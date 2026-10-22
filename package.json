@@ -1,0 +1,23 @@
+{
+  "name": "paseo-public",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "workspaces": [
+    "plugin/role-workflow"
+  ],
+  "scripts": {
+    "test": "npm test --workspace paseo-role-workflow",
+    "typecheck": "npm run typecheck --workspace paseo-role-workflow"
+  },
+  "devDependencies": {
+    "@typescript/native-preview": "7.0.0-dev.20260423.1",
+    "@types/node": "20.19.37",
+    "@types/react": "19.2.14",
+    "esbuild": "0.27.3",
+    "playwright": "1.58.2",
+    "react-dom": "19.1.0",
+    "react-native-web": "0.21.2"
+  }
+}

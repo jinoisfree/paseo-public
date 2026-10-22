@@ -1,0 +1,20 @@
+{
+  "name": "paseo-role-workflow",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsgo --noEmit",
+    "test": "tsx --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "@getpaseo/client": "0.10.3",
+    "@getpaseo/plugin": "0.10.3",
+    "@getpaseo/protocol": "0.10.3",
+    "marked": "16.4.2",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "tsx": "^4.20.0",
+    "zod": "^4.0.0"
+  }
+}

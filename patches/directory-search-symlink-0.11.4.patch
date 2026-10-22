@@ -1,0 +1,619 @@
+# Adapted for paseo-public: fictional portable path fixtures.
+diff --git a/packages/app/src/add-project-flow/options.ts b/packages/app/src/add-project-flow/options.ts
+--- a/packages/app/src/add-project-flow/options.ts
++++ b/packages/app/src/add-project-flow/options.ts
+@@ -174,7 +174,7 @@
+   });
+ }
+ 
+-function pathIdentity(path: string): string {
++export function pathIdentity(path: string): string {
+   const normalized = shortenPath(path.trim()).replace(/\\/g, "/").replace(/\/+$/u, "");
+   return /^[A-Za-z]:\//u.test(normalized) || normalized.startsWith("//")
+     ? normalized.toLowerCase()
+diff --git a/packages/app/src/components/add-project-flow.tsx b/packages/app/src/components/add-project-flow.tsx
+--- a/packages/app/src/components/add-project-flow.tsx
++++ b/packages/app/src/components/add-project-flow.tsx
+@@ -70,6 +70,10 @@
+   buildProjectPickerOptions,
+   type ProjectPickerOption,
+ } from "@/components/project-picker-options";
++import {
++  buildDirectorySearchParents,
++  fetchProjectDirectoryPaths,
++} from "@/add-project-flow/directory-search";
+ import { Shortcut } from "@/components/ui/shortcut";
+ import { useKeyboardShortcutsAvailable } from "@/keyboard/availability";
+ import { getIsElectronRuntime } from "@/constants/layout";
+@@ -371,6 +375,10 @@
+   const client = useHostRuntimeClient(hostId ?? "");
+   const isLocalDaemon = useIsLocalDaemon(hostId ?? "");
+   const recommendedPaths = useRecommendedProjectPaths(hostId);
++  const directorySearchParents = useMemo(
++    () => buildDirectorySearchParents(recommendedPaths),
++    [recommendedPaths],
++  );
+   const openProject = useOpenProject(hostId);
+   const cloneGithubProject = useCloneGithubProject(hostId);
+   const upsertProject = useCallback(
+@@ -413,20 +421,16 @@
+     page.kind === "github-location" ||
+     page.kind === "new-directory-parent";
+   const directoryQuery = useFetchQuery({
+-    queryKey: ["add-project-flow-directories", hostId, debouncedQuery],
++    queryKey: ["add-project-flow-directories", hostId, debouncedQuery, directorySearchParents],
+     queryFn: async () => {
+       if (!client) return { query: debouncedQuery, paths: [] as string[] };
+-      const payload = await client.getDirectorySuggestions({
+-        query: debouncedQuery,
+-        includeDirectories: true,
+-        includeFiles: false,
+-        limit: 30,
+-      });
+       return {
+         query: debouncedQuery,
+-        paths:
+-          payload.entries?.flatMap((entry) => (entry.kind === "directory" ? [entry.path] : [])) ??
+-          [],
++        paths: await fetchProjectDirectoryPaths({
++          client,
++          query: debouncedQuery,
++          parents: directorySearchParents,
++        }),
+       };
+     },
+     enabled: Boolean(client && searchesDirectories),
+diff --git a/packages/app/src/add-project-flow/directory-search.ts b/packages/app/src/add-project-flow/directory-search.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/app/src/add-project-flow/directory-search.ts
+@@ -0,0 +1,152 @@
++import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
++import { scorePathMatch } from "@getpaseo/protocol/search/text-match";
++import { isOpenableProjectPath } from "@/components/project-picker-options";
++import { joinDirectoryPath, parentDirectory, pathIdentity } from "./options";
++
++const DIRECTORY_LIMIT = 30;
++const CHILD_LIST_LIMIT = 100;
++const PARENT_LIMIT = 6;
++const SEARCH_TIMEOUT_MS = 5_000;
++
++export function buildDirectorySearchParents(projectPaths: string[]): string[] {
++  const seen = new Set<string>();
++  const parents: string[] = [];
++  for (const projectPath of projectPaths) {
++    const parent = parentDirectory(projectPath.trim());
++    if (!parent || !isOpenableProjectPath(parent)) continue;
++    const identity = pathIdentity(parent);
++    // Do not expand a home directory or its broad /Users and /home ancestors.
++    const normalized = parent.replace(/\\/g, "/").replace(/\/+$/, "");
++    if (
++      !identity ||
++      identity === "~" ||
++      /^\/(?:Users|home)(?:\/[^/]+)?$/u.test(normalized) ||
++      seen.has(identity)
++    )
++      continue;
++    seen.add(identity);
++    parents.push(parent);
++    if (parents.length === PARENT_LIMIT) break;
++  }
++  return parents;
++}
++
++export function splitDirectorySearchPath(
++  query: string,
++): { parent: string; term: string } | null {
++  const path = query.trim();
++  if (!path.startsWith("/") && !path.startsWith("~/")) return null;
++  const index = path.lastIndexOf("/");
++  return { parent: path.slice(0, index) || "/", term: path.slice(index + 1) };
++}
++
++function joinRelativeDirectories(
++  parent: string,
++  paths: string[],
++  maxDepth = Infinity,
++): string[] {
++  return paths.flatMap((path) => {
++    // cwd searches return relative paths; never join an absolute or escaping result.
++    if (isOpenableProjectPath(path)) return [];
++    const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
++    const segments = parts.filter((part) => part !== ".");
++    if (!segments.length || segments.includes("..") || segments.length > maxDepth) return [];
++    return [segments.reduce(joinDirectoryPath, parent)];
++  });
++}
++
++function uniqueDirectories(paths: string[]): string[] {
++  const seen = new Set<string>();
++  return paths
++    .filter((path) => {
++      const identity = pathIdentity(path);
++      if (seen.has(identity)) return false;
++      seen.add(identity);
++      return true;
++    })
++    .slice(0, DIRECTORY_LIMIT);
++}
++
++export async function fetchProjectDirectoryPaths(input: {
++  client: Pick<DaemonClient, "getDirectorySuggestions">;
++  query: string;
++  parents: string[];
++}): Promise<string[]> {
++  const { client, query, parents } = input;
++  const search = async (
++    searchQuery: string,
++    cwd?: string,
++    limit = DIRECTORY_LIMIT,
++  ): Promise<string[]> => {
++    let timer: ReturnType<typeof setTimeout> | undefined;
++    try {
++      return await Promise.race([
++        client
++          .getDirectorySuggestions({
++            query: searchQuery,
++            ...(cwd ? { cwd } : {}),
++            includeDirectories: true,
++            includeFiles: false,
++            limit,
++          })
++          .then(
++            (payload) =>
++              payload.entries?.flatMap((entry) =>
++                entry.kind === "directory" ? [entry.path] : [],
++              ) ?? [],
++          ),
++        new Promise<string[]>((resolve) => {
++          timer = setTimeout(() => resolve([]), SEARCH_TIMEOUT_MS);
++        }),
++      ]);
++    } finally {
++      clearTimeout(timer);
++    }
++  };
++
++  if (query.trim() && !isOpenableProjectPath(query)) {
++    // A blank cwd query lists children without walking the entire project tree.
++    const parentPaths = await Promise.all(
++      parents.slice(0, PARENT_LIMIT).map(async (parent) => {
++        try {
++          return joinRelativeDirectories(
++            parent,
++            (await search("", parent, CHILD_LIST_LIMIT)).filter(
++              (path) => scorePathMatch(query.trim(), path) !== null,
++            ),
++            1,
++          );
++        } catch {
++          return [];
++        }
++      }),
++    );
++    const matches = parentPaths.flat();
++    // Avoid starting a slow home scan when known parents already have matches.
++    if (matches.length) return uniqueDirectories(matches);
++    return uniqueDirectories(await search(query).catch(() => []));
++  }
++
++  const homePaths = await search(query);
++  const pathQuery = splitDirectorySearchPath(query);
++  if (!pathQuery) return uniqueDirectories(homePaths);
++  const parentIdentity = pathIdentity(pathQuery.parent);
++  // A home scan can return fuzzy cache-directory matches to the typed path.
++  // Only results within its parent should prevent a cwd retry.
++  if (
++    homePaths.some((path) => {
++      const identity = pathIdentity(path);
++      return identity === parentIdentity || identity.startsWith(`${parentIdentity}/`);
++    })
++  )
++    return uniqueDirectories(homePaths);
++  try {
++    const paths = await search(pathQuery.term ? `./${pathQuery.term}` : "", pathQuery.parent);
++    return uniqueDirectories([
++      ...joinRelativeDirectories(pathQuery.parent, paths),
++      ...homePaths,
++    ]);
++  } catch {
++    return homePaths;
++  }
++}
+diff --git a/packages/app/src/add-project-flow/directory-search.test.ts b/packages/app/src/add-project-flow/directory-search.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/app/src/add-project-flow/directory-search.test.ts
+@@ -0,0 +1,392 @@
++import { describe, expect, it, vi } from "vitest";
++import {
++  buildDirectorySearchParents,
++  fetchProjectDirectoryPaths,
++  splitDirectorySearchPath,
++} from "./directory-search";
++
++type Search = Parameters<
++  typeof fetchProjectDirectoryPaths
++>[0]["client"]["getDirectorySuggestions"];
++
++function response(paths: string[], files: string[] = []): Awaited<ReturnType<Search>> {
++  return {
++    requestId: "directory-search-test",
++    directories: paths,
++    entries: [
++      ...paths.map((path) => ({ kind: "directory" as const, path })),
++      ...files.map((path) => ({ kind: "file" as const, path })),
++    ],
++    error: null,
++  };
++}
++
++describe("buildDirectorySearchParents", () => {
++  it("uses only unique recommended parents, excluding home and filesystem root", () => {
++    expect(
++      buildDirectorySearchParents([
++        "/home/example/paseo-work/known",
++        "~/paseo-work/other/",
++        "/home/example/project",
++        "~/project",
++        "/project",
++        "relative/project",
++        "/mnt/demo-data/projects/known",
++      ]),
++    ).toEqual(["/home/example/paseo-work", "/mnt/demo-data/projects"]);
++  });
++
++  it("caps distinct parents at six without adding default directories", () => {
++    const paths = Array.from({ length: 9 }, (_, i) => `/work/${i}/project`);
++    expect(buildDirectorySearchParents(paths)).toEqual(
++      paths.slice(0, 6).map((_, i) => `/work/${i}`),
++    );
++    expect(buildDirectorySearchParents([])).toEqual([]);
++  });
++
++  it("excludes absolute homes and their /Users, /home and root ancestors", () => {
++    expect(
++      buildDirectorySearchParents([
++        "/Users",
++        "/home/example",
++        "/home/example/example-project",
++        "/home",
++        "/home/example",
++        "/home/example/example-project",
++        "~/project",
++        "/project",
++        "/home/example/paseo-work/known",
++        "/home/example/dev/known",
++      ]),
++    ).toEqual(["/home/example/paseo-work", "/home/example/dev"]);
++  });
++
++  it("deduplicates Windows parents without changing their path syntax", () => {
++    expect(
++      buildDirectorySearchParents(["C:\\work\\one", "c:/WORK/two", "\\\\host\\share\\repo"]),
++    ).toEqual(["C:\\work", "\\\\host\\share"]);
++  });
++});
++
++describe("splitDirectorySearchPath", () => {
++  it.each([
++    [" ~/paseo-work/hermes ", { parent: "~/paseo-work", term: "hermes" }],
++    ["/mnt/demo-data/work/hermes", { parent: "/mnt/demo-data/work", term: "hermes" }],
++    ["~/paseo-work/", { parent: "~/paseo-work", term: "" }],
++    ["~/", { parent: "~", term: "" }],
++    ["/hermes", { parent: "/", term: "hermes" }],
++    ["/", { parent: "/", term: "" }],
++    ["hermes", null],
++    ["~", null],
++    ["C:\\work\\hermes", null],
++  ])("splits %s for a cwd search", (query, expected) => {
++    expect(splitDirectorySearchPath(query as string)).toEqual(expected);
++  });
++});
++
++describe("fetchProjectDirectoryPaths", () => {
++  it("lists parent children in parallel and matches names without a home scan", async () => {
++    const pending: (() => void)[] = [];
++    const getDirectorySuggestions = vi.fn<Search>(
++      (options) =>
++        new Promise((resolve) => {
++          pending.push(() =>
++            resolve(
++              options.cwd
++                ? response(
++                    [
++                      "hermes-starter",
++                      "unrelated",
++                      "group/hermes",
++                      "group/deep/hermes",
++                      ".",
++                      "../escape",
++                      "/absolute",
++                    ],
++                    ["hermes.txt"],
++                  )
++                : response(["/home/example/other-hermes"]),
++            ),
++          );
++        }),
++    );
++    const result = fetchProjectDirectoryPaths({
++      client: { getDirectorySuggestions },
++      query: "hermes",
++      parents: ["~/paseo-work", "/mnt/demo-other"],
++    });
++    expect(getDirectorySuggestions).toHaveBeenCalledTimes(2);
++    expect(getDirectorySuggestions.mock.calls.map(([options]) => options.cwd)).toEqual([
++      "~/paseo-work",
++      "/mnt/demo-other",
++    ]);
++    for (const [options] of getDirectorySuggestions.mock.calls) {
++      expect(options).toMatchObject({
++        query: "",
++        includeDirectories: true,
++        includeFiles: false,
++        limit: 100,
++      });
++    }
++    pending.forEach((resolve) => resolve());
++    await expect(result).resolves.toEqual([
++      "~/paseo-work/hermes-starter",
++      "/mnt/demo-other/hermes-starter",
++    ]);
++  });
++
++  it("deduplicates tilde and absolute home paths before enforcing the thirty-result limit", async () => {
++    const children = Array.from({ length: 40 }, (_, i) => `hermes-${i}`);
++    const getDirectorySuggestions = vi.fn<Search>(async ({ cwd }) =>
++      cwd
++        ? response(children)
++        : response(["/home/example/work/hermes-0/", "/home/example/work/hermes-1", "/other/hermes"]),
++    );
++    const paths = await fetchProjectDirectoryPaths({
++      client: { getDirectorySuggestions },
++      query: "hermes",
++      parents: ["~/work"],
++    });
++    expect(paths).toEqual(children.slice(0, 30).map((path) => `~/work/${path}`));
++  });
++
++  it("retains a successful parent when another parent fails", async () => {
++    const getDirectorySuggestions = vi.fn<Search>(async ({ cwd }) => {
++      if (cwd === "/missing") throw new Error("Unavailable");
++      return cwd ? response(["hermes-starter"]) : response(["/home/example/hermes"]);
++    });
++    await expect(
++      fetchProjectDirectoryPaths({
++        client: { getDirectorySuggestions },
++        query: "hermes",
++        parents: ["/missing", "~/work"],
++      }),
++    ).resolves.toEqual(["~/work/hermes-starter"]);
++  });
++
++  it("retains parent results when the home request fails", async () => {
++    const getDirectorySuggestions = vi.fn<Search>(async ({ cwd }) => {
++      if (!cwd) throw new Error("Home scan failed");
++      return response(["hermes-starter"]);
++    });
++    await expect(
++      fetchProjectDirectoryPaths({
++        client: { getDirectorySuggestions },
++        query: "hermes",
++        parents: ["~/work"],
++      }),
++    ).resolves.toEqual(["~/work/hermes-starter"]);
++  });
++
++  it("deduplicates parent aliases without starting a home scan", async () => {
++    const getDirectorySuggestions = vi.fn<Search>(async ({ cwd }) =>
++      cwd
++        ? response(["hermes-starter"])
++        : response(["/home/example/work/hermes-starter/", "/other/hermes"]),
++    );
++    await expect(
++      fetchProjectDirectoryPaths({
++        client: { getDirectorySuggestions },
++        query: "hermes",
++        parents: ["~/work", "/home/example/work"],
++      }),
++    ).resolves.toEqual(["~/work/hermes-starter"]);
++  });
++
++  it("falls back to home only when child listings have no matching names", async () => {
++    const getDirectorySuggestions = vi.fn<Search>(async ({ cwd }) =>
++      cwd ? response(["unrelated"]) : response(["/elsewhere/hermes-starter"]),
++    );
++    await expect(
++      fetchProjectDirectoryPaths({
++        client: { getDirectorySuggestions },
++        query: "hermes",
++        parents: ["~/work"],
++      }),
++    ).resolves.toEqual(["/elsewhere/hermes-starter"]);
++    expect(
++      getDirectorySuggestions.mock.calls.map(([options]) => [options.cwd, options.query]),
++    ).toEqual([
++      ["~/work", ""],
++      [undefined, "hermes"],
++    ]);
++  });
++
++  it("joins Windows cwd-relative results and filters by depth", async () => {
++    const getDirectorySuggestions = vi.fn<Search>(async ({ cwd }) =>
++      cwd ? response(["hermes", "group\\hermes", "group\\deep\\hermes"]) : response([]),
++    );
++    await expect(
++      fetchProjectDirectoryPaths({
++        client: { getDirectorySuggestions },
++        query: "hermes",
++        parents: ["C:\\work"],
++      }),
++    ).resolves.toEqual(["C:\\work\\hermes"]);
++  });
++
++  it("does not start a home scan when parent matches are ready", async () => {
++    vi.useFakeTimers();
++    try {
++      const getDirectorySuggestions = vi.fn<Search>(({ cwd }) =>
++        cwd ? Promise.resolve(response(["hermes", "hermes-starter"])) : new Promise(() => {}),
++      );
++      await expect(
++        fetchProjectDirectoryPaths({
++          client: { getDirectorySuggestions },
++          query: "hermes",
++          parents: ["~/paseo-work"],
++        }),
++      ).resolves.toEqual(["~/paseo-work/hermes", "~/paseo-work/hermes-starter"]);
++      expect(getDirectorySuggestions).toHaveBeenCalledTimes(1);
++      expect(getDirectorySuggestions.mock.calls[0][0].cwd).toBe("~/paseo-work");
++      expect(vi.getTimerCount()).toBe(0);
++    } finally {
++      vi.useRealTimers();
++    }
++  });
++
++  it("drops each stalled parent after five seconds and retains completed results", async () => {
++    vi.useFakeTimers();
++    try {
++      const getDirectorySuggestions = vi.fn<Search>(({ cwd }) => {
++        if (cwd === "/slow") return new Promise(() => {});
++        return Promise.resolve(response(cwd ? ["hermes-starter"] : ["/other/hermes"]));
++      });
++      const result = fetchProjectDirectoryPaths({
++        client: { getDirectorySuggestions },
++        query: "hermes",
++        parents: ["/slow", "~/work"],
++      });
++      let settled = false;
++      void result.then(() => {
++        settled = true;
++      });
++      await vi.advanceTimersByTimeAsync(4_999);
++      expect(settled).toBe(false);
++      await vi.advanceTimersByTimeAsync(1);
++      await expect(result).resolves.toEqual(["~/work/hermes-starter"]);
++      expect(vi.getTimerCount()).toBe(0);
++    } finally {
++      vi.useRealTimers();
++    }
++  });
++
++  it("also bounds home-only searches to five seconds", async () => {
++    vi.useFakeTimers();
++    try {
++      const getDirectorySuggestions = vi.fn<Search>(() => new Promise(() => {}));
++      const result = fetchProjectDirectoryPaths({
++        client: { getDirectorySuggestions },
++        query: "hermes",
++        parents: [],
++      });
++      await vi.advanceTimersByTimeAsync(5_000);
++      await expect(result).resolves.toEqual([]);
++      expect(vi.getTimerCount()).toBe(0);
++    } finally {
++      vi.useRealTimers();
++    }
++  });
++
++  it.each(["", "   "])("only searches home for blank input %j", async (query) => {
++    const getDirectorySuggestions = vi.fn<Search>(async () => response([]));
++    await fetchProjectDirectoryPaths({
++      client: { getDirectorySuggestions },
++      query,
++      parents: ["~/work"],
++    });
++    expect(getDirectorySuggestions).toHaveBeenCalledTimes(1);
++  });
++
++  it("leaves successful home path queries alone", async () => {
++    const getDirectorySuggestions = vi.fn<Search>(async () =>
++      response(["/home/example/work/hermes"]),
++    );
++    await expect(
++      fetchProjectDirectoryPaths({
++        client: { getDirectorySuggestions },
++        query: "~/work/hermes",
++        parents: ["/other"],
++      }),
++    ).resolves.toEqual(["/home/example/work/hermes"]);
++    expect(getDirectorySuggestions).toHaveBeenCalledTimes(1);
++  });
++
++  it.each(["~/paseo-work", "/mnt/demo-data/paseo-work"])(
++    "retries an empty path query from %s",
++    async (parent) => {
++      const getDirectorySuggestions = vi.fn<Search>(async ({ cwd }) =>
++        cwd ? response(["hermes", "hermes-starter"]) : response([]),
++      );
++      await expect(
++        fetchProjectDirectoryPaths({
++          client: { getDirectorySuggestions },
++          query: `${parent}/hermes`,
++          parents: ["/unrelated"],
++        }),
++      ).resolves.toEqual([`${parent}/hermes`, `${parent}/hermes-starter`]);
++      expect(
++        getDirectorySuggestions.mock.calls.map(([options]) => [options.cwd, options.query]),
++      ).toEqual([
++        [undefined, `${parent}/hermes`],
++        [parent, "./hermes"],
++      ]);
++    },
++  );
++
++  it("retries path queries when home only finds unrelated fuzzy cache paths", async () => {
++    const cachePath = "/home/example/Library/Caches/claude-cli-nodejs/-home-example-paseo-work-hermes";
++    const getDirectorySuggestions = vi.fn<Search>(async ({ cwd }) =>
++      cwd ? response(["hermes", "hermes-starter"]) : response([cachePath]),
++    );
++    await expect(
++      fetchProjectDirectoryPaths({
++        client: { getDirectorySuggestions },
++        query: "~/paseo-work/hermes",
++        parents: [],
++      }),
++    ).resolves.toEqual(["~/paseo-work/hermes", "~/paseo-work/hermes-starter", cachePath]);
++    expect(getDirectorySuggestions).toHaveBeenCalledTimes(2);
++  });
++
++  it("lists children when a path query ends in a slash", async () => {
++    const getDirectorySuggestions = vi.fn<Search>(async ({ cwd }) =>
++      cwd ? response(["hermes-starter"]) : response([]),
++    );
++    await expect(
++      fetchProjectDirectoryPaths({
++        client: { getDirectorySuggestions },
++        query: "~/paseo-work/",
++        parents: [],
++      }),
++    ).resolves.toEqual(["~/paseo-work/hermes-starter"]);
++    expect(getDirectorySuggestions).toHaveBeenLastCalledWith(
++      expect.objectContaining({ cwd: "~/paseo-work", query: "" }),
++    );
++  });
++
++  it("keeps empty home results if the fallback fails", async () => {
++    const getDirectorySuggestions = vi.fn<Search>(async ({ cwd }) => {
++      if (cwd) throw new Error("Missing directory");
++      return response([]);
++    });
++    await expect(
++      fetchProjectDirectoryPaths({
++        client: { getDirectorySuggestions },
++        query: "~/missing/hermes",
++        parents: [],
++      }),
++    ).resolves.toEqual([]);
++  });
++
++  it("keeps Windows path input out of the word-search expansion", async () => {
++    const getDirectorySuggestions = vi.fn<Search>(async () => response([]));
++    await fetchProjectDirectoryPaths({
++      client: { getDirectorySuggestions },
++      query: "C:\\work\\hermes",
++      parents: ["C:\\work"],
++    });
++    expect(getDirectorySuggestions).toHaveBeenCalledTimes(1);
++  });
++});

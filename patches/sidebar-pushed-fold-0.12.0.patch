@@ -1,0 +1,422 @@
+--- /dev/null
++++ b/packages/app/src/components/sidebar/pushed-workspaces.ts
+@@ -0,0 +1,28 @@
++import type {
++  SidebarWorkspaceEntry,
++  SidebarWorkspacePlacement,
++} from "@/hooks/use-sidebar-workspaces-list";
++
++/** Completion belongs to the task, not the checkout shared by other conversations.
++ * New repository commits or a running preview service do not undo an earlier task's push.
++ */
++export function partitionPushedWorkspaces<T extends SidebarWorkspacePlacement>(
++  items: readonly T[],
++  entries: ReadonlyMap<string, SidebarWorkspaceEntry>,
++  selectedKey?: string | null,
++): { active: T[]; pushed: T[] } {
++  const active: T[] = [];
++  const pushed: T[] = [];
++  for (const item of items) {
++    const entry = entries.get(item.workspaceKey);
++    const fold =
++      entry &&
++      /^🔵\s/u.test(entry.name.trim()) &&
++      (entry.statusBucket === "done" || entry.statusBucket === "attention") &&
++      !entry.pinnedAt &&
++      item.workspaceKey !== selectedKey &&
++      !entry.archivingAt;
++    (fold ? pushed : active).push(item);
++  }
++  return { active, pushed };
++}
+--- /dev/null
++++ b/packages/app/src/components/sidebar/use-pushed-workspaces.ts
+@@ -0,0 +1,25 @@
++import { useCallback, useMemo } from "react";
++import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
++import { useSidebarPushedStore } from "@/stores/sidebar-pushed-store";
++import type {
++  SidebarWorkspaceEntry,
++  SidebarWorkspacePlacement,
++} from "@/hooks/use-sidebar-workspaces-list";
++import { partitionPushedWorkspaces } from "./pushed-workspaces";
++
++export function usePushedWorkspaces<T extends SidebarWorkspacePlacement>(
++  items: readonly T[],
++  entries: ReadonlyMap<string, SidebarWorkspaceEntry>,
++  scope: string,
++) {
++  const selection = useActiveWorkspaceSelection();
++  const selectedKey = selection ? `${selection.serverId}:${selection.workspaceId}` : null;
++  const groups = useMemo(
++    () => partitionPushedWorkspaces(items, entries, selectedKey),
++    [items, entries, selectedKey],
++  );
++  const expanded = useSidebarPushedStore((state) => state.expanded.has(scope));
++  const toggle = useSidebarPushedStore((state) => state.toggle);
++  const toggleExpanded = useCallback(() => toggle(scope), [toggle, scope]);
++  return { ...groups, expanded, toggleExpanded };
++}
+--- /dev/null
++++ b/packages/app/src/stores/sidebar-pushed-store.ts
+@@ -0,0 +1,16 @@
++import { create } from "zustand";
++
++// Expansion is a viewing choice for this app session. Restarting folds pushed work again.
++export const useSidebarPushedStore = create<{
++  expanded: ReadonlySet<string>;
++  toggle: (key: string) => void;
++}>((set) => ({
++  expanded: new Set(),
++  toggle: (key) =>
++    set((state) => {
++      const expanded = new Set(state.expanded);
++      if (expanded.has(key)) expanded.delete(key);
++      else expanded.add(key);
++      return { expanded };
++    }),
++}));
+--- a/packages/app/src/components/sidebar/sidebar-group-toggle-row.tsx
++++ b/packages/app/src/components/sidebar/sidebar-group-toggle-row.tsx
+@@ -1,4 +1,4 @@
+-import { useCallback } from "react";
++import { useCallback, useMemo } from "react";
+ import { useTranslation } from "react-i18next";
+ import { Pressable, Text, View, type PressableStateCallbackType } from "react-native";
+ import { ChevronDown, ChevronUp } from "lucide-react-native";
+@@ -23,16 +23,19 @@
+   onPress,
+   indented = false,
+   testID,
++  label: customLabel,
+ }: {
+   expanded: boolean;
+   onPress: () => void;
+   indented?: boolean;
+   testID: string;
++  label?: string;
+ }) {
+   const { t } = useTranslation();
+-  const label = t(
+-    expanded ? "sidebar.workspace.actions.showLess" : "sidebar.workspace.actions.showMore",
+-  );
++  const label =
++    customLabel ??
++    t(expanded ? "sidebar.workspace.actions.showLess" : "sidebar.workspace.actions.showMore");
++  const accessibilityState = useMemo(() => ({ expanded }), [expanded]);
+   const rowStyle = useCallback(
+     ({ hovered = false, pressed }: PressableStateCallbackType & { hovered?: boolean }) => [
+       styles.row,
+@@ -47,6 +50,7 @@
+     <Pressable
+       accessibilityRole={isWeb ? undefined : "button"}
+       accessibilityLabel={label}
++      accessibilityState={accessibilityState}
+       onPress={onPress}
+       style={rowStyle}
+       testID={testID}
+--- a/packages/app/src/components/sidebar/sidebar-projection.ts
++++ b/packages/app/src/components/sidebar/sidebar-projection.ts
+@@ -1,4 +1,5 @@
+ import type { TFunction } from "i18next";
++import { partitionPushedWorkspaces } from "./pushed-workspaces";
+ import { buildStatusGroups } from "@/hooks/sidebar-status-view-model";
+ import {
+   splitPinnedSidebarGroups,
+@@ -43,10 +44,12 @@
+   workspaceEntriesByKey: ReadonlyMap<string, SidebarWorkspaceEntry>;
+   projectNamesByViewKey: Map<string, string>;
+   groupMode: SidebarGroupMode;
++  t: TFunction;
+   pinnedCollapsed: boolean;
++  selectedWorkspaceKey?: string | null;
++  expandedPushedGroups?: ReadonlySet<string>;
+   collapsedProjectKeys: ReadonlySet<string>;
+   collapsedWorkspaceGroupKeys: ReadonlySet<string>;
+-  t: TFunction;
+ }
+ 
+ export function buildSidebarProjection(input: SidebarProjectionInput): SidebarProjection {
+@@ -64,6 +67,19 @@
+   // fall-through to the project rows.
+   const workspaceGroups = buildWorkspaceGroups(input, unpinnedWorkspaces);
+ 
++  const visible = <
++    T extends import("@/hooks/use-sidebar-workspaces-list").SidebarWorkspacePlacement,
++  >(
++    rows: T[],
++    scope: string,
++  ): T[] => {
++    const { active, pushed } = partitionPushedWorkspaces(
++      rows,
++      input.workspaceEntriesByKey,
++      input.selectedWorkspaceKey,
++    );
++    return input.expandedPushedGroups?.has(scope) ? [...active, ...pushed] : active;
++  };
+   const sections: SidebarShortcutSection[] = [];
+   if (!input.pinnedCollapsed) {
+     sections.push({ workspaces: pinnedGroups.pinnedChats });
+@@ -71,14 +87,14 @@
+   if (input.groupMode === "project") {
+     sections.push(
+       ...pinnedGroups.unpinnedProjects.map((project) => ({
+-        workspaces: project.workspaces,
++        workspaces: visible(project.workspaces, `project:${project.viewKey}`),
+         collapsed: input.collapsedProjectKeys.has(project.viewKey),
+       })),
+     );
+   } else {
+     sections.push(
+       ...workspaceGroups.map((group) => ({
+-        workspaces: group.rows,
++        workspaces: visible(group.rows, `status:${group.key}`),
+         collapsed: input.collapsedWorkspaceGroupKeys.has(group.key),
+       })),
+     );
+--- a/packages/app/src/components/sidebar/sidebar-projection.test.ts
++++ b/packages/app/src/components/sidebar/sidebar-projection.test.ts
+@@ -84,9 +84,9 @@
+     projectNamesByViewKey: new Map([["project", "Project"]]),
+     groupMode: options?.groupMode ?? ("project" as const),
+     pinnedCollapsed: options?.pinnedCollapsed ?? false,
++    t: i18n.t,
+     collapsedProjectKeys: new Set<string>(),
+     collapsedWorkspaceGroupKeys: new Set<string>(),
+-    t: i18n.t,
+   };
+ }
+ 
+@@ -176,3 +176,71 @@
+     ]);
+   });
+ });
++
++describe("pushed workspace folding", () => {
++  function pushedInput(groupMode: "project" | "status" = "project") {
++    const input = projectionInput({ groupMode });
++    const row = input.workspaceEntriesByKey.get("srv:unpinned")!;
++    row.name = "🔵 G[일반]-01 pushed";
++    row.statusBucket = "done";
++    return input;
++  }
++  it.each(["project", "status"] as const)(
++    "hides only pushed rows from %s shortcuts until expanded",
++    (mode) => {
++      const input = pushedInput(mode);
++      const hidden = buildSidebarProjection(input);
++      expect(hidden.shortcutModel.shortcutIndexByWorkspaceKey.has("srv:unpinned")).toBe(false);
++      const expanded = buildSidebarProjection({
++        ...input,
++        expandedPushedGroups: new Set([mode === "project" ? "project:project" : "status:done"]),
++      });
++      expect(expanded.shortcutModel.shortcutIndexByWorkspaceKey.has("srv:unpinned")).toBe(true);
++      expect(input.projects[0]!.workspaces).toHaveLength(2);
++    },
++  );
++  it("keeps a selected pushed conversation visible", () => {
++    const output = buildSidebarProjection({
++      ...pushedInput(),
++      selectedWorkspaceKey: "srv:unpinned",
++    });
++    expect(output.shortcutModel.shortcutIndexByWorkspaceKey.has("srv:unpinned")).toBe(true);
++  });
++  it.each(["🟢 G[일반]-01 committed", "🟠 G[일반]-01 pending", "ordinary idle"])(
++    "keeps %s visible",
++    (name) => {
++      const input = pushedInput();
++      input.workspaceEntriesByKey.get("srv:unpinned")!.name = name;
++      expect(
++        buildSidebarProjection(input).shortcutModel.shortcutIndexByWorkspaceKey.has("srv:unpinned"),
++      ).toBe(true);
++    },
++  );
++  it.each(["running", "needs_input", "failed"] as const)(
++    "reveals pushed rows needing %s attention",
++    (status) => {
++      const input = pushedInput();
++      input.workspaceEntriesByKey.get("srv:unpinned")!.statusBucket = status;
++      expect(
++        buildSidebarProjection(input).shortcutModel.shortcutIndexByWorkspaceKey.has("srv:unpinned"),
++      ).toBe(true);
++    },
++  );
++  it("keeps pinned work visible but does not reopen pushed tasks for another commit", () => {
++    const input = pushedInput();
++    input.workspaceEntriesByKey.get("srv:unpinned")!.archiveUnpushedCommitCount = 1;
++    input.workspaceEntriesByKey.get("srv:pinned")!.name = "🔵 pinned";
++    const shortcuts = buildSidebarProjection(input).shortcutModel.shortcutIndexByWorkspaceKey;
++    expect(shortcuts.has("srv:pinned")).toBe(true);
++    expect(shortcuts.has("srv:unpinned")).toBe(false);
++  });
++  it("folds pushed tasks even if their result is unread or a preview service is running", () => {
++    const input = pushedInput();
++    const row = input.workspaceEntriesByKey.get("srv:unpinned")!;
++    row.statusBucket = "attention";
++    row.hasRunningScripts = true;
++    expect(
++      buildSidebarProjection(input).shortcutModel.shortcutIndexByWorkspaceKey.has(row.workspaceKey),
++    ).toBe(false);
++  });
++});
+--- a/packages/app/src/components/sidebar/sidebar-model.tsx
++++ b/packages/app/src/components/sidebar/sidebar-model.tsx
+@@ -16,6 +16,8 @@
+ } from "@/stores/sidebar-view-store";
+ import { useSidebarOrderStore } from "@/stores/sidebar-order-store";
+ import type { SidebarShortcutModel } from "@/utils/sidebar-shortcuts";
++import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
++import { useSidebarPushedStore } from "@/stores/sidebar-pushed-store";
+ import { buildSidebarProjection } from "./sidebar-projection";
+ import type { SidebarProjectIconTarget } from "@/utils/sidebar-project-row-model";
+ import { filterWorkspacesByLabels, type SidebarWorkspaceGroup } from "./sidebar-labels";
+@@ -148,8 +150,14 @@
+     visibleWorkspaceKeys,
+   ]);
+   const pinnedKeys = usePinnedSidebarKeys(filteredProjects);
++  const selection = useActiveWorkspaceSelection();
++  const selectedWorkspaceKey = selection ? `${selection.serverId}:${selection.workspaceId}` : null;
++  const expandedPushedGroups = useSidebarPushedStore((state) => state.expanded);
+   const projectionInput = useMemo(
+     () => ({
++      t,
++      selectedWorkspaceKey,
++      expandedPushedGroups,
+       projects: filteredProjects,
+       pinnedKeys,
+       pinnedWorkspaceOrder,
+@@ -159,9 +167,11 @@
+       pinnedCollapsed,
+       collapsedProjectKeys,
+       collapsedWorkspaceGroupKeys,
+-      t,
+     }),
+     [
++      t,
++      selectedWorkspaceKey,
++      expandedPushedGroups,
+       collapsedProjectKeys,
+       collapsedWorkspaceGroupKeys,
+       groupMode,
+@@ -171,7 +181,6 @@
+       pinnedKeys,
+       pinnedWorkspaceOrder,
+       filteredWorkspaceEntriesByKey,
+-      t,
+     ],
+   );
+   const projection = useMemo(() => buildSidebarProjection(projectionInput), [projectionInput]);
+--- a/packages/app/src/components/sidebar/sidebar-status-list.tsx
++++ b/packages/app/src/components/sidebar/sidebar-status-list.tsx
+@@ -75,6 +75,7 @@
+ } from "@/components/sidebar/sidebar-workspace-menu";
+ import { SidebarSectionHeader } from "@/components/sidebar/sidebar-section-header";
+ import { SidebarGroupToggleRow } from "@/components/sidebar/sidebar-group-toggle-row";
++import { usePushedWorkspaces } from "@/components/sidebar/use-pushed-workspaces";
+ import { useLimitedSidebarGroup } from "@/components/sidebar/use-limited-sidebar-group";
+ import type { ToggleSidebarWorkspacePin } from "@/hooks/use-sidebar-workspace-pin";
+ import { DraggableList, type DraggableRenderItemInfo } from "@/components/draggable-list";
+@@ -340,12 +341,17 @@
+   supportsPinningByServerId: ReadonlyMap<string, boolean>;
+   onToggleWorkspacePin: ToggleSidebarWorkspacePin;
+ }) {
++  const entries = useMemo(
++    () => new Map(group.rows.map((row) => [row.workspaceKey, row])),
++    [group.rows],
++  );
++  const pushedGroup = usePushedWorkspaces(group.rows, entries, `status:${group.key}`);
+   const {
+     visibleItems: visibleWorkspaces,
+     expanded: workspacesExpanded,
+     canToggle: canToggleWorkspaces,
+     toggleExpanded: toggleWorkspacesExpanded,
+-  } = useLimitedSidebarGroup(group.rows);
++  } = useLimitedSidebarGroup(pushedGroup.active);
+ 
+   return (
+     <View style={collapsed ? undefined : styles.statusGroupBlockExpanded}>
+@@ -379,6 +385,33 @@
+               testID={`sidebar-status-group-show-more-${group.key}`}
+             />
+           ) : null}
++          {pushedGroup.pushed.length > 0 ? (
++            <SidebarGroupToggleRow
++              expanded={pushedGroup.expanded}
++              onPress={pushedGroup.toggleExpanded}
++              label={`푸시 완료 ${pushedGroup.pushed.length}개`}
++              indented
++              testID={`sidebar-status-pushed-${group.key}`}
++            />
++          ) : null}
++          {pushedGroup.expanded
++            ? pushedGroup.pushed.map((workspace) => (
++                <StatusWorkspaceRow
++                  key={workspace.workspaceKey}
++                  workspace={workspace}
++                  {...buildStatusRowProjectPresentation({
++                    workspace,
++                    projectIconByProjectViewKey,
++                    hostBadgeByServerId,
++                  })}
++                  shortcutNumber={shortcutIndex.get(workspace.workspaceKey) ?? null}
++                  showShortcutBadge={showShortcutBadges}
++                  canPin={supportsPinningByServerId.get(workspace.serverId) === true}
++                  onToggleWorkspacePin={onToggleWorkspacePin}
++                  onWorkspacePress={onWorkspacePress}
++                />
++              ))
++            : null}
+         </View>
+       ) : null}
+     </View>
+--- a/packages/app/src/components/sidebar-workspace-list.tsx
++++ b/packages/app/src/components/sidebar-workspace-list.tsx
+@@ -99,6 +99,7 @@
+ import { useLongPressDragInteraction } from "@/components/sidebar/use-long-press-drag-interaction";
+ import { SidebarSectionHeader } from "@/components/sidebar/sidebar-section-header";
+ import { SidebarGroupToggleRow } from "@/components/sidebar/sidebar-group-toggle-row";
++import { usePushedWorkspaces } from "@/components/sidebar/use-pushed-workspaces";
+ import { useLimitedSidebarGroup } from "@/components/sidebar/use-limited-sidebar-group";
+ import {
+   SidebarWorkspaceRowFrame,
+@@ -1594,12 +1595,17 @@
+   supportsPinningByServerId: ReadonlyMap<string, boolean>;
+   onToggleWorkspacePin: ToggleSidebarWorkspacePin;
+ }) {
++  const pushedGroup = usePushedWorkspaces(
++    project.workspaces,
++    workspaceEntriesByKey,
++    `project:${project.viewKey}`,
++  );
+   const {
+     visibleItems: visibleWorkspaces,
+     expanded: workspacesExpanded,
+     canToggle: canToggleWorkspaces,
+     toggleExpanded: toggleWorkspacesExpanded,
+-  } = useLimitedSidebarGroup(project.workspaces);
++  } = useLimitedSidebarGroup(pushedGroup.active);
+   const activeServerId = activeWorkspaceSelection?.serverId ?? null;
+   const activeHostStatus = useHostRuntimeConnectionStatus(activeServerId ?? "");
+   const preferredServerId = activeHostStatus === "online" ? activeServerId : null;
+@@ -1779,6 +1785,21 @@
+               onPress={toggleWorkspacesExpanded}
+               testID={`sidebar-project-show-more-${project.viewKey}`}
+             />
++          ) : null}
++          {pushedGroup.pushed.length > 0 ? (
++            <>
++              <SidebarGroupToggleRow
++                expanded={pushedGroup.expanded}
++                onPress={pushedGroup.toggleExpanded}
++                label={`푸시 완료 ${pushedGroup.pushed.length}개`}
++                testID={`sidebar-project-pushed-${project.viewKey}`}
++              />
++              {pushedGroup.expanded
++                ? pushedGroup.pushed.map((item) => (
++                    <View key={item.workspaceKey}>{renderWorkspaceRow(item)}</View>
++                  ))
++                : null}
++            </>
+           ) : null}
+         </>
+       );

@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "jsx": "react-jsx",
+    "types": ["node", "react"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": [
+    "index.server.ts",
+    "index.client.tsx",
+    "server/**/*.ts",
+    "client/**/*.tsx",
+    "shared/**/*.ts"
+  ]
+}

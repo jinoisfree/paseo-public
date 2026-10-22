@@ -1,0 +1,5 @@
+{
+  "id": "role-workflow",
+  "description": "일반·연합개발, 저장소 충돌 확인과 검증 인계, 설정된 기준의 컨텍스트 압축",
+  "requirements": { "paseo": ">=0.10.2" }
+}
