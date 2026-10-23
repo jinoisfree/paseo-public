@@ -1,4 +1,3 @@
-// Adapted for paseo-public: portable fixtures and explicit notification opt-in.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile, symlink } from "node:fs/promises";
@@ -17,7 +16,7 @@ async function repo(t) {
   git(root, "init", "-q", "work");
   const work = path.join(root, "work");
   git(work, "config", "user.name", "test");
-  git(work, "config", "user.email", "test@example.invalid");
+  git(work, "config", "user.email", "test@example.com");
   git(work, "config", "commit.gpgsign", "false");
   await writeFile(path.join(work, "file.txt"), "one");
   git(work, "add", ".");

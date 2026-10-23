@@ -1,4 +1,3 @@
-// Adapted for paseo-public: portable fixtures and explicit notification opt-in.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {

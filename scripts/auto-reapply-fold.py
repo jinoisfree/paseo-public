@@ -22,7 +22,7 @@ import tempfile
 import time
 import urllib.request
 
-from public_runtime import ROOT, load_config, data_root, logs_root, node_executable, app_path
+from public_runtime import ROOT, load_config, data_root, logs_root, node_executable, app_path, build_root, backup_root
 PLUGIN_WAIT_SECONDS = 600
 VERSION = re.compile(r'^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$')
 
@@ -214,7 +214,7 @@ class Automation:
                 pending.replace(archive)
             finally:
                 pending.unlink(missing_ok=True)
-        build = self.state_dir/'build'
+        build = self.state_dir/'build' if self.args.data_root else build_root(self.config)
         build.mkdir(parents=True, exist_ok=True)
         attempt = Path(tempfile.mkdtemp(prefix=version+'-', dir=build))
         with tarfile.open(archive, 'r:gz') as source:
@@ -339,7 +339,7 @@ class Automation:
                     raise RuntimeError('App changed during build; installation refused')
                 installer = [sys.executable, str(self.root/'scripts/install-pushed-fold.py'),
                              '--app', str(self.args.app), '--version', version, '--dist', str(dist),
-                             '--backup-root', str(self.state_dir/'backups'/('auto-pushed-fold-'+version))]
+                             '--backup-root', str((self.state_dir/'backups' if self.args.data_root else backup_root(self.config))/('auto-pushed-fold-'+version))]
                 if self.args.dry_run:
                     # The installer version guard still runs against a harmless temporary app fixture.
                     with tempfile.TemporaryDirectory(prefix='preflight-', dir=self.log) as temporary:

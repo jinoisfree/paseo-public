@@ -25,7 +25,7 @@ import {
   type TitleRole,
 } from "./protocol";
 import { executorDefaults, oppositeProvider } from "../shared/assignment";
-import { requestedMode } from "../shared/mode-request";
+import { requestedMode, requestsFederation } from "../shared/mode-request";
 import { JsonStore } from "./store";
 import { ManagedPushRunner } from "./managed-push";
 import {
@@ -1194,7 +1194,6 @@ export class WorkflowEngine {
     messageIds?: readonly string[],
     evidence?: TurnEvidence,
   ) {
-    const report = evidence?.report ?? text;
     return this.serial(async () => {
       const w = (await this.db()).workflows.find(
         (candidate) => candidate.plan?.id === agentId || candidate.execute?.id === agentId,
@@ -1215,33 +1214,95 @@ export class WorkflowEngine {
         answers: true,
       };
       if (await this.transitionTurn(w, turn, request, messageIds)) return;
-      if (!(await this.admits(w, agentId, text, failed, request, key, report))) {
-        await this.rememberSideTurn(w, key, evidence);
-        return;
-      }
+      const chatResume = await this.chatResume(w, turn, request);
       const role: Role = w.plan?.id === agentId ? "plan" : "execute";
-      // An agent runs one turn at a time, so while an instruction is in flight to it, the turn
-      // it ends is that instruction's, even when the user steered or interrupted it on the way.
-      const mine =
-        !!w.pending &&
-        w.pending.stage !== "queued" &&
-        w.pending.role === role &&
-        this.carries(w, w.pending, request, messageIds);
-      const answers = w.inbox ? this.supersedes(w, role, agentId, text, failed, mine) : mine;
-      if (answers === null) {
-        // A result nobody has read yet outranks what the user says on the side meanwhile.
+      if (chatResume === "resumed" && !this.sideDecision(w, role, text)) {
         this.seen(w, key);
+        // This turn may itself have ended the outstanding instruction. Settle it before
+        // keepMoving, so a later tick does not mistake its seen answer for a new stop.
+        await this.clearSettled(w);
         await this.save();
-        return;
+        await this.advance(w);
+      } else {
+        await this.admitTurn(
+          w,
+          turn,
+          request,
+          goal,
+          evidence,
+          chatResume === "blocked",
+          messageIds,
+        );
       }
-      if (w.inbox) this.seen(w, w.inbox.key);
-      const resumed = w.status === "needs_input";
-      if (resumed) w.status = "active";
-      if (!w.goal) w.goal = goal.slice(0, 32000);
-      w.inbox = { agentId, key, text, failed, compacted, canceled, resumed, answers };
-      await this.save();
-      await this.advance(w);
+      if (chatResume === "resumed") await this.keepMoving(w);
     });
+  }
+  private async admitTurn(
+    w: Workflow,
+    turn: Inbox,
+    request: string,
+    goal: string,
+    evidence: TurnEvidence | undefined,
+    chatBlocked: boolean,
+    messageIds?: readonly string[],
+  ) {
+    const { agentId, key, text, failed, compacted, canceled } = turn;
+    const report = evidence?.report ?? text;
+    const role: Role = w.plan?.id === agentId ? "plan" : "execute";
+    if (!(await this.admits(w, agentId, text, failed, request, key, report))) {
+      await this.rememberSideTurn(w, key, evidence);
+      return;
+    }
+    // An agent runs one turn at a time, so while an instruction is in flight to it, the turn
+    // it ends is that instruction's, even when the user steered or interrupted it on the way.
+    const mine =
+      !!w.pending &&
+      w.pending.stage !== "queued" &&
+      w.pending.role === role &&
+      this.carries(w, w.pending, request, messageIds);
+    const answers = w.inbox ? this.supersedes(w, role, agentId, text, failed, mine) : mine;
+    if (answers === null) {
+      // A result nobody has read yet outranks what the user says on the side meanwhile.
+      this.seen(w, key);
+      await this.save();
+      return;
+    }
+    if (w.inbox) this.seen(w, w.inbox.key);
+    const resumed = !chatBlocked && w.status === "needs_input";
+    if (resumed) w.status = "active";
+    if (!w.goal) w.goal = goal.slice(0, 32000);
+    w.inbox = { agentId, key, text, failed, compacted, canceled, resumed, answers };
+    await this.save();
+    await this.advance(w);
+  }
+  private async chatResume(
+    w: Workflow,
+    turn: Inbox,
+    request: string,
+  ): Promise<"resumed" | "blocked" | null> {
+    const said = userText(request);
+    if (
+      w.mode !== "federated" ||
+      !["paused", "error", "needs_input"].includes(w.status) ||
+      w.generalTransition ||
+      turn.failed !== null ||
+      turn.canceled ||
+      !requestsFederation(said)
+    )
+      return null;
+    try {
+      // The user's message also answers an open question; its finished turn decides what follows.
+      await this.checkResume(w, w.asker ? said : "");
+    } catch (error) {
+      this.touch(w, `채팅 재개 불가: ${error instanceof Error ? error.message : String(error)}`);
+      await this.save();
+      return "blocked";
+    }
+    await this.prepareResume(w, false);
+    w.asker = null;
+    this.touch(w, "채팅의 연합개발 요청으로 자동 작업을 재개합니다.");
+    await this.save();
+    return "resumed";
   }
   private async recordTurnEvidence(
     w: Workflow,
@@ -2529,6 +2590,17 @@ export class WorkflowEngine {
   ): Promise<Workflow["status"]> {
     // Refusals come before any change, so a rejected resume leaves the flow as it was.
     await this.checkResume(w, message);
+    await this.prepareResume(w, automatic);
+    if (automatic && w.quotaPause && !w.pending && !w.inbox && !w.asker && !w.held)
+      this.queue(w, w.quotaPause.role, w.quotaPause.prompt ?? CONTINUE, w.quotaPause.phase);
+    if (message) this.redirect(w, message);
+    this.touch(w, "자동 작업을 재개합니다.");
+    await this.save();
+    await this.advance(w);
+    await this.keepMoving(w);
+    return w.status;
+  }
+  private async prepareResume(w: Workflow, automatic: boolean) {
     if (!automatic) {
       w.quotaPause = null;
       w.planFingerprint = "";
@@ -2545,14 +2617,6 @@ export class WorkflowEngine {
     w.status = "active";
     if (w.execute && w.execute.workspaceId === null) await this.restoreExecutor(w);
     await this.clearSettled(w);
-    if (automatic && w.quotaPause && !w.pending && !w.inbox && !w.asker && !w.held)
-      this.queue(w, w.quotaPause.role, w.quotaPause.prompt ?? CONTINUE, w.quotaPause.phase);
-    if (message) this.redirect(w, message);
-    this.touch(w, "자동 작업을 재개합니다.");
-    await this.save();
-    await this.advance(w);
-    await this.keepMoving(w);
-    return w.status;
   }
   private async checkResume(w: Workflow, message: string) {
     for (const member of [w.plan, w.execute]) {

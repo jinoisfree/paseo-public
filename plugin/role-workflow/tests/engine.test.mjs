@@ -1,4 +1,3 @@
-// Adapted for paseo-public: portable fixtures and explicit notification opt-in.
 import { test } from "node:test";
 import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
@@ -2817,6 +2816,396 @@ for (const limit of ["cycles", "turns"]) {
     assert.deepEqual(await f.engine.settings(), before);
   });
 }
+
+test("chat federation resume consumes a paused planner's valid plan once", async (t) => {
+  const f = await fixture(t, undefined, "federated");
+  await f.engine.control(f.id, "pause");
+  await f.engine.ended(
+    "planner",
+    "chat-plan",
+    decision("plan", "새 실행 지시"),
+    null,
+    "",
+    false,
+    "연합개발 재개해줘",
+  );
+  assert.equal((await f.view()).status, "active");
+  assert.equal(f.sent.length, 1);
+  assert.equal(f.sent[0].id, f.created[0].id);
+  assert.match(f.sent[0].prompt, /이번 지시:\n새 실행 지시$/);
+  await f.engine.ended(
+    "planner",
+    "chat-plan",
+    decision("plan"),
+    null,
+    "",
+    false,
+    "연합개발 재개해줘",
+  );
+  await f.engine.tick();
+  assert.equal(f.sent.length, 1);
+});
+
+test("chat federation resume accepts a reference to previously stopped work", async (t) => {
+  const f = await fixture(t, undefined, "federated");
+  await f.engine.control(f.id, "pause");
+  await f.engine.ended(
+    "planner",
+    "previously-stopped-chat",
+    decision("plan", "재개한 실행 지시"),
+    null,
+    "",
+    false,
+    "중지된 연합개발 다시 해줘",
+  );
+  assert.equal((await f.view()).status, "active");
+  assert.equal(f.sent.length, 1);
+  assert.equal(f.sent[0].id, f.created[0].id);
+  assert.match(f.sent[0].prompt, /이번 지시:\n재개한 실행 지시$/);
+});
+
+for (const text of [
+  "재개했습니다.",
+  "<paseo-workflow>{broken}</paseo-workflow>",
+  decision("result"),
+]) {
+  test(`chat federation resume continues without a valid planner block: ${text}`, async (t) => {
+    const f = await fixture(t, undefined, "federated");
+    await f.engine.control(f.id, "pause");
+    await f.engine.ended("planner", "chat-no-block", text, null, "", false, "연합개발 계속");
+    assert.equal((await f.view()).status, "active");
+    assert.equal(f.sent.length, 1);
+    assert.equal(f.sent[0].id, "planner");
+    assert.match(f.sent[0].prompt, /이번 지시:\n중단된 지점부터 이어서/);
+    assert.ok((await stored(f)).processed.includes("chat-no-block"));
+    await f.engine.tick();
+    assert.equal(f.sent.length, 1);
+  });
+}
+
+test("chat federation resume settles an instruction ended by a blockless executor turn", async (t) => {
+  const f = await fixture(t);
+  await f.finish("planner", "p1", "plan");
+  const executor = f.created[0].id;
+  const pending = (await stored(f)).pending;
+  await f.engine.control(f.id, "pause");
+  f.agents.get(executor).status = "idle";
+  f.histories.set(executor, {
+    text: "계속합니다",
+    key: "blockless-executor",
+    messageIds: [pending.id],
+    failed: null,
+  });
+  await f.engine.ended(
+    executor,
+    "blockless-executor",
+    "계속합니다",
+    null,
+    "",
+    false,
+    "연합개발 계속",
+    false,
+    [pending.id],
+  );
+  assert.equal((await f.view()).status, "active");
+  assert.equal(f.sent.length, 2);
+  assert.equal(f.sent.at(-1).id, executor);
+  assert.match(f.sent.at(-1).prompt, /중단된 지점부터 이어서/);
+  assert.notEqual((await stored(f)).pending.id, pending.id);
+  await f.engine.tick();
+  assert.equal((await f.view()).status, "active");
+  assert.equal(f.sent.length, 2);
+});
+
+for (const status of ["error", "needs_input"]) {
+  for (const block of [false, true]) {
+    test(`chat federation resume recovers ${status} with block=${block}`, async (t) => {
+      const f = await fixture(t, undefined, "federated");
+      if (status === "error") {
+        const create = f.port.create;
+        f.port.create = async () => {
+          throw Error("creation failed");
+        };
+        await f.finish("planner", "p1", "plan");
+        f.port.create = create;
+      } else {
+        await f.finish("planner", "p1", "plan");
+        const executor = f.created[0].id;
+        f.agents.get(executor).status = "idle";
+        await f.engine.ended(executor, "stopped", "", "interrupted", "", false, "", true);
+      }
+      assert.equal((await f.view()).status, status);
+      const before = f.sent.length;
+      await f.engine.ended(
+        "planner",
+        "chat-recovery",
+        block ? decision("plan", "복구한 지시") : "계속합니다",
+        null,
+        "",
+        false,
+        "연합개발로 다시 진행해",
+      );
+      assert.equal((await f.view()).status, "active");
+      assert.equal(f.sent.length, before + 1);
+      assert.equal(f.sent.at(-1).id, f.created[0].id);
+      if (block) assert.match(f.sent.at(-1).prompt, /복구한 지시$/);
+      await f.engine.tick();
+      assert.equal(f.sent.length, before + 1);
+    });
+  }
+}
+
+for (const request of [
+  "연합개발 하지마",
+  "연합개발이 뭐야?",
+  "작업 ID: host\n진행 방식: 연합개발\n연합개발 재개해줘",
+]) {
+  test(`chat federation resume ignores a stop, question or host message: ${request}`, async (t) => {
+    const f = await fixture(t, undefined, "federated");
+    await f.finish("planner", "p1", "plan");
+    await f.engine.control(f.id, "pause");
+    await f.engine.ended(f.created[0].id, "not-resume", "알겠습니다", null, "", false, request);
+    assert.equal((await f.view()).status, "paused");
+    assert.equal(f.sent.length, 1);
+    assert.doesNotMatch((await f.view()).detail, /채팅의 연합개발 요청/);
+  });
+}
+
+test("chat federation resume does not interrupt a transition to general", async (t) => {
+  const f = await fixture(t);
+  await f.finish("planner", "p1", "plan");
+  await f.engine.control(f.id, "general");
+  assert.equal((await stored(f)).generalTransition, true);
+  await f.engine.ended(
+    "planner",
+    "transition-chat",
+    "계속합니다",
+    null,
+    "",
+    false,
+    "연합개발 재개해줘",
+  );
+  assert.equal((await stored(f)).generalTransition, true);
+  assert.equal(f.sent.length, 1);
+  assert.doesNotMatch((await f.view()).detail, /채팅의 연합개발 요청/);
+});
+
+for (const role of ["plan", "execute"]) {
+  test(`chat federation resume refuses an archived ${role} conversation`, async (t) => {
+    const f = await fixture(t, undefined, "federated");
+    if (role === "execute") await f.finish("planner", "p1", "plan");
+    await f.engine.control(f.id, "pause");
+    f.agents.get(role === "plan" ? "planner" : f.created[0].id).archived = true;
+    const before = f.sent.length;
+    await f.engine.ended("planner", "archived-chat", "계속합니다", null, "", false, "연합개발");
+    assert.equal((await f.view()).status, "paused");
+    assert.match((await f.view()).detail, /채팅 재개 불가:.*보관/);
+    assert.equal(f.sent.length, before);
+  });
+}
+
+test("chat federation resume treats a planner's reply as the decision after an open question", async (t) => {
+  const f = await fixture(t);
+  occupyNewExecutor(f);
+  await f.finish("planner", "p1", "plan");
+  await userTurn(f, "planner", "question", decision("input", "그대로 진행할까요?"));
+  const executor = f.created[0].id;
+  f.agents.get(executor).status = "idle";
+  assert.equal((await stored(f)).asker, "plan");
+  await f.engine.ended(
+    "planner",
+    "answer",
+    decision("plan", "답변에 따른 새 계획"),
+    null,
+    "",
+    false,
+    "연합개발 계속",
+  );
+  assert.equal((await f.view()).status, "active");
+  assert.equal((await stored(f)).asker, null);
+  assert.equal((await stored(f)).held, null);
+  assert.equal(f.sent.length, 1);
+  assert.equal(f.sent[0].id, executor);
+  assert.match(f.sent[0].prompt, /답변에 따른 새 계획$/);
+});
+
+test("chat federation resume without a block clears an open question and continues the floor", async (t) => {
+  const f = await fixture(t, undefined, "federated");
+  await f.finish("planner", "question", "input");
+  assert.equal((await stored(f)).asker, "plan");
+  await f.engine.ended("planner", "answer", "계속합니다", null, "", false, "연합개발 계속");
+  assert.equal((await f.view()).status, "active");
+  assert.equal((await stored(f)).asker, null);
+  assert.equal(f.sent.length, 1);
+  assert.match(f.sent[0].prompt, /중단된 지점부터 이어서/);
+});
+
+for (const block of [false, true]) {
+  test(`chat federation resume cannot bypass an archived needs_input conversation, block=${block}`, async (t) => {
+    const f = await fixture(t, undefined, "federated");
+    await f.finish("planner", "ask", "input");
+    f.agents.get("planner").archived = true;
+    await f.engine.ended(
+      "planner",
+      "blocked-answer",
+      block ? decision("plan") : "계속합니다",
+      null,
+      "",
+      false,
+      "연합개발 계속",
+    );
+    assert.equal((await f.view()).status, "needs_input");
+    assert.match((await f.view()).detail, /채팅 재개 불가:.*보관/);
+    assert.equal(f.sent.length, 0);
+  });
+}
+
+test("chat federation resume uses the executor's valid result after cancellation", async (t) => {
+  const f = await fixture(t);
+  await f.finish("planner", "p1", "plan");
+  const executor = f.created[0].id;
+  f.agents.get(executor).status = "idle";
+  await f.engine.ended(executor, "cut", "", "interrupted", "", false, "", true);
+  await f.engine.ended(
+    executor,
+    "executor-result",
+    decision("result"),
+    null,
+    "",
+    false,
+    "연합개발 계속",
+  );
+  assert.equal((await f.view()).status, "active");
+  assert.equal((await f.view()).phase, "review");
+  assert.equal(f.sent.length, 2);
+  assert.equal(f.sent.at(-1).id, "planner");
+});
+
+for (const limit of ["cycles", "turns"]) {
+  test(`chat federation resume resets exhausted ${limit} and stale maintenance`, async (t) => {
+    const f = await fixture(t, undefined, "federated");
+    await f.engine.control(f.id, "pause");
+    await f.engine.close();
+    const db = JSON.parse(await readFile(f.file, "utf8"));
+    const w = db.workflows[0];
+    w[limit] = limit === "cycles" ? db.settings.maxCycles : db.settings.maxTurns;
+    w.planFingerprint = "old fingerprint";
+    w.repeatedPlans = 3;
+    w.plan.compaction = "interrupted compaction";
+    await writeFile(f.file, JSON.stringify(db));
+    const engine = new WorkflowEngine(f.file, f.port);
+    t.after(() => engine.close());
+    await engine.ended(
+      "planner",
+      "limited-chat",
+      decision("plan"),
+      null,
+      "",
+      false,
+      "연합개발 재개해줘",
+    );
+    const after = JSON.parse(await readFile(f.file, "utf8"));
+    assert.equal(after.workflows[0].status, "active");
+    assert.equal(after.workflows[0].cycles, 1);
+    assert.equal(after.workflows[0].turns, 1);
+    assert.equal(after.workflows[0].planFingerprint, "");
+    assert.equal(after.workflows[0].repeatedPlans, 0);
+    assert.equal(after.workflows[0].quotaPause, null);
+    assert.equal(after.workflows[0].plan.compaction, null);
+    assert.deepEqual(after.settings, db.settings);
+    assert.equal(f.sent.length, 1);
+  });
+}
+
+test("chat federation stop preserves the planner's existing general-mode switch", async (t) => {
+  const f = await fixture(t, undefined, "federated");
+  await f.engine.control(f.id, "pause");
+  await f.engine.ended("planner", "stop", "알겠습니다", null, "", false, "연합개발 하지마");
+  assert.equal((await f.view()).mode, "general");
+  assert.equal(f.sent.length, 0);
+  assert.doesNotMatch((await f.view()).detail, /채팅의 연합개발 요청/);
+});
+
+test("chat federation resume accepts an executor but preserves the planner's floor", async (t) => {
+  const f = await fixture(t);
+  await f.finish("planner", "p1", "plan");
+  const executor = f.created[0].id;
+  await f.finish(executor, "e1", "result");
+  f.agents.get("planner").status = "idle";
+  await f.engine.ended("planner", "question", decision("input"), null);
+  assert.equal((await f.view()).status, "needs_input");
+  await f.engine.ended(
+    executor,
+    "executor-chat",
+    decision("result"),
+    null,
+    "",
+    false,
+    "연합개발 재개해줘",
+  );
+  assert.equal((await f.view()).status, "active");
+  assert.equal(f.sent.at(-1).id, "planner");
+  assert.match(f.sent.at(-1).prompt, /중단된 지점부터 이어서/);
+  assert.ok((await stored(f)).processed.includes("executor-chat"));
+});
+
+for (const [failed, canceled] of [
+  ["failed", false],
+  [null, true],
+]) {
+  test(`chat federation resume ignores unsuccessful turns (${failed}, ${canceled})`, async (t) => {
+    const f = await fixture(t, undefined, "federated");
+    await f.engine.control(f.id, "pause");
+    await f.engine.ended(
+      "planner",
+      "failed-chat",
+      decision("plan"),
+      failed,
+      "",
+      false,
+      "연합개발 재개해줘",
+      canceled,
+    );
+    assert.equal((await f.view()).status, "paused");
+    assert.equal(f.sent.length, 0);
+  });
+}
+
+for (const mode of ["general", "undecided"]) {
+  test(`chat federation resume does not federate a ${mode} conversation`, async (t) => {
+    const f = await fixture(t, undefined, mode);
+    await f.engine.ended(
+      "planner",
+      "other-mode",
+      "계속합니다",
+      null,
+      "",
+      false,
+      "연합개발 재개해줘",
+    );
+    assert.equal((await f.view()).mode, mode);
+    assert.equal((await f.view()).status, "active");
+    assert.equal(f.sent.length, 0);
+  });
+}
+
+test("chat federation resume leaves active and completed admission behavior intact", async (t) => {
+  for (const status of ["active", "completed"]) {
+    const f = await fixture(t, undefined, "federated");
+    if (status === "completed") await f.finish("planner", "done", "complete");
+    await f.engine.ended(
+      "planner",
+      "ordinary-chat",
+      "설명입니다",
+      null,
+      "",
+      false,
+      "연합개발 재개해줘",
+    );
+    assert.equal((await f.view()).status, status === "active" ? "needs_input" : "completed");
+    assert.equal(f.sent.length, 0);
+  }
+});
 
 test("ordinary resume preserves counters and status reads leave persisted state untouched", async (t) => {
   const f = await fixture(t);

@@ -3,8 +3,14 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import { folderList } from "../plugin/role-workflow/shared/folders.ts";
+const root = fileURLToPath(new URL("..", import.meta.url)).replace(/\/$/, "");
+const configFile = process.env.PASEO_PUBLIC_CONFIG ?? path.join(homedir(), ".config/paseo-public/config.json");
+let config: { pluginPath?: string; profiles?: Record<string, { pluginPath?: string }> } = {};
+try { config = JSON.parse(await readFile(configFile, "utf8")); } catch { /* Default layout. */ }
+const pluginPath = config.profiles?.[root]?.pluginPath ?? config.pluginPath ?? path.join(root, "plugin/role-workflow");
+const { folderList } = await import(pathToFileURL(path.join(pluginPath, "shared/folders.ts")).href);
 
 const expectedVersion = process.argv[2];
 if (!expectedVersion) throw new Error("Expected app version argument is required");

@@ -4,17 +4,17 @@
 import argparse, json, pathlib, plistlib, subprocess, tempfile, datetime, shutil
 from html.parser import HTMLParser
 from urllib.parse import urlsplit, unquote
-from public_runtime import ROOT, data_root, app_path
+from public_runtime import ROOT, data_root, app_path, backup_root, installer_dist
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--app', type=pathlib.Path, default=app_path())
 # A renderer is built and verified per app version; never install one onto another version.
 parser.add_argument('--version', default='0.11.4', help='Paseo version the renderer was built from')
 parser.add_argument('--dist', type=pathlib.Path)
-parser.add_argument('--backup-root', type=pathlib.Path, default=data_root()/'backups')
+parser.add_argument('--backup-root', type=pathlib.Path, default=backup_root())
 parser.add_argument('--apply', action='store_true')
 parser.add_argument('--restore', type=pathlib.Path, help='Restore renderer and signature files from an installation backup')
 args=parser.parse_args()
-args.dist = args.dist or data_root()/f'build/paseo-{args.version}/packages/app/dist'
+args.dist = args.dist or installer_dist(args.version)
 app=args.app.resolve()
 resources=app/'Contents/Resources'
 staged=resources/'app-dist.pushed-fold-new'

@@ -1,4 +1,3 @@
-// Adapted for paseo-public: portable fixtures and explicit notification opt-in.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -16,7 +15,7 @@ test("probe reads the baseline, what changed since it, and whether commits are p
   git(root, "init", "-q", "--bare", "remote.git");
   git(root, "init", "-q", "work");
   for (const [key, value] of [
-    ["user.email", "test@example.invalid"],
+    ["user.email", "test@example.com"],
     ["user.name", "test"],
     ["commit.gpgsign", "false"],
   ])
@@ -92,7 +91,7 @@ test("a second edit to an already modified file still counts as a change", async
   t.after(() => rm(work, { recursive: true, force: true }));
   git(work, "init", "-q");
   for (const [key, value] of [
-    ["user.email", "test@example.invalid"],
+    ["user.email", "test@example.com"],
     ["user.name", "test"],
     ["commit.gpgsign", "false"],
   ])
@@ -116,7 +115,7 @@ test("changes are seen from a subfolder of the repository and inside an untracke
   t.after(() => rm(root, { recursive: true, force: true }));
   git(root, "init", "-q");
   for (const [key, value] of [
-    ["user.email", "test@example.invalid"],
+    ["user.email", "test@example.com"],
     ["user.name", "test"],
     ["commit.gpgsign", "false"],
   ])
@@ -151,7 +150,7 @@ async function parentFolder(t) {
 async function childRepo(root, name) {
   const child = path.join(root, name);
   git(root, "init", "-q", name);
-  git(child, "config", "user.email", "test@example.invalid");
+  git(child, "config", "user.email", "test@example.com");
   git(child, "config", "user.name", "test");
   git(child, "config", "commit.gpgsign", "false");
   await writeFile(path.join(child, "a.txt"), "one\n");

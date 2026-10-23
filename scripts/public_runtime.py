@@ -19,7 +19,10 @@ def load_config():
     value = json.loads(file.read_text())
     if not isinstance(value, dict):
         raise ValueError('The paseo-public configuration must be a JSON object')
-    return value
+    profile = value.get("profiles", {}).get(str(ROOT), {})
+    if not isinstance(profile, dict):
+        raise ValueError("The repository runtime profile must be an object")
+    return {**value, **profile}
 
 
 def data_root(config=None):
@@ -49,3 +52,19 @@ def app_path(config=None):
         return Path(config['app']).expanduser()
     local = Path.home()/'Applications/Paseo.app'
     return local if local.exists() else Path('/Applications/Paseo.app')
+
+
+def backup_root(config=None):
+    config = load_config() if config is None else config
+    return Path(config.get('backupDir', data_root(config)/'backups')).expanduser()
+
+
+def build_root(config=None):
+    config = load_config() if config is None else config
+    return Path(config.get('buildDir', data_root(config)/'build')).expanduser()
+
+
+def installer_dist(version, config=None):
+    config = load_config() if config is None else config
+    template = config.get('distTemplate')
+    return Path(template.format(version=version)).expanduser() if template else data_root(config)/f'build/paseo-{version}/packages/app/dist'

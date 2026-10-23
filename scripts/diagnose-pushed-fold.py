@@ -8,7 +8,7 @@ import plistlib
 import re
 import subprocess
 
-from public_runtime import data_root, app_path
+from public_runtime import backup_root as configured_backup_root, app_path
 home = pathlib.Path.home()
 apps = {app_path()}
 try:
@@ -42,7 +42,7 @@ for app in sorted(apps):
     except (OSError, ValueError) as error:
         report['error'] = str(error)
     reports.append(report)
-backup_root = data_root()/'backups'
+backup_root = configured_backup_root()
 backups = []
 if backup_root.is_dir():
     for file in sorted(backup_root.rglob('installation.json'))[-3:]:

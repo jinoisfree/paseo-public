@@ -2,6 +2,7 @@
 
 Paseo용 한국어 개발 워크플로 플러그인과 macOS 접기 패치 관리 도구입니다.
 공개 저장소 이름은 `jinoisfree/paseo-public`입니다.
+이 저장소의 공유 코드는 개발 저장소에서 검사·테스트를 거쳐 자동 동기화됩니다.
 
 ## 기능
 
@@ -122,6 +123,9 @@ Node.js는 PATH의 `node` 또는 설정의 `node`를 사용합니다.
 - 작업과 인계 상태: Paseo가 관리하는 계정별 `~/.paseo/role-workflow`
 
 `dataDir`, `logsDir`, `app`, `paseo`, `node` 설정으로 경로를 바꿀 수 있습니다.
+개발 저장소에서 같은 코드를 사용하는 경우 `profiles`의 저장소 절대경로 키 아래에
+`dataDir`, `logsDir`, `buildDir`, `backupDir`, `distTemplate`, `pluginPath`를 설정할 수 있습니다.
+이 값은 사용자 설정 파일에만 보관하며 공개 저장소에 넣지 않습니다.
 설정에는 필요할 때만 본인 경로를 넣고 저장소에 복사하지 마세요.
 
 휴대폰 알림은 기본으로 꺼져 있습니다. 본인이 Paseo에서 알림 수신을 설정한 뒤

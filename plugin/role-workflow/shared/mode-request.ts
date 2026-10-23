@@ -31,3 +31,22 @@ export function requestedMode(text: string): "general" | "federated" | null {
     return null;
   return match[1] === "일반개발" ? "general" : "federated";
 }
+
+/** A mention resumes a stopped federation only when its sentence asks to proceed. */
+export function requestsFederation(text: string): boolean {
+  if (requestedMode(text) === "general") return false;
+  const mentions = text
+    .trim()
+    .split(/(?<=[.!?。！？])|[\r\n]+/u)
+    .filter((sentence) => sentence.includes("연합개발"));
+  return (
+    mentions.length > 0 &&
+    mentions.every(
+      (sentence) =>
+        // Stop commands exclude a mention; past descriptions and nouns can request a resume.
+        !/[?？"'“”‘’`]|할까|할지|하면(?!서)|하려면|하지\s*(?:마|말)|(?:^|[\s,])마(?:요|세요|라)?(?=\s|[,.!。！？]|$)|말고|말아|않|아니(?!라)|금지|(?:중지|취소)\s*(?:해|하|시켜)|그만\s*(?:해|하|둬|두)|(?:^|\s)(?:중지|취소|그만)(?=\s*[.!。！？]?$)|멈춰|멈추|설명|비교|차이|뭐야|뭔가/.test(
+          sentence,
+        ),
+    )
+  );
+}
