@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import os
+import pwd
 from pathlib import Path
 import subprocess
 import sys
@@ -26,6 +27,7 @@ class SetupTests(unittest.TestCase):
         (self.root/'package-lock.json').write_text('{}')
         (self.root/'launchd').mkdir()
         (self.root/'launchd/fold-reapply.plist.in').write_bytes((Path(__file__).resolve().parents[1]/'launchd/fold-reapply.plist.in').read_bytes())
+        (self.root/'launchd/fold-reapply.daemon.plist.in').write_bytes((Path(__file__).resolve().parents[1]/'launchd/fold-reapply.daemon.plist.in').read_bytes())
         self.config=self.home/'.config/paseo-public/config.json'
         self.commands=[]
         self.env=mock.patch.dict(os.environ,{'HOME':str(self.home),'PASEO_PUBLIC_CONFIG':str(self.config),'PASEO_PUBLIC_NODE':str(self.node)})
@@ -68,6 +70,21 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(plist['StandardOutPath'],str(self.home/'logs & data/stdout.log'))
         self.assertEqual(plist['WorkingDirectory'],str(self.home))
         self.assertNotIn('__',json.dumps(plist))
+
+    def test_system_option_uses_app_owner_home_and_no_plugin_registration(self):
+        owner = pwd.struct_passwd(('example', 'x', 501, os.getgid(), '', str(self.home), '/bin/sh'))
+        app = self.root/'Paseo.app'; app.mkdir()
+        with mock.patch.object(setup, 'app_path', return_value=app), mock.patch.object(setup.pwd, 'getpwuid', return_value=owner), mock.patch.object(setup, 'deploy', return_value=0) as deploy:
+            self.assertEqual(self.execute('install', '--fold-reapply-system', '--dry-run'), 0)
+        spec, backup, action = deploy.call_args.args
+        self.assertEqual(spec['UserName'], 'example')
+        self.assertEqual(spec['EnvironmentVariables']['HOME'], str(self.home))
+        self.assertEqual(spec['EnvironmentVariables']['PASEO_HOME'], str(self.home/'.paseo'))
+        self.assertNotIn('LimitLoadToSessionType', spec)
+        self.assertTrue(spec['StartOnMount'])
+        self.assertEqual(spec['ProgramArguments'][0], '/bin/sh')
+        self.assertIn('--app "$3"', spec['ProgramArguments'][2])
+        self.assertEqual(self.commands, [])
 
     def test_dry_run_has_no_writes_or_daemon_commands(self):
         before=sorted(str(path.relative_to(self.home)) for path in self.home.rglob('*'))

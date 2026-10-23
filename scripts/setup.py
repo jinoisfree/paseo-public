@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Account-local installer. Dry runs never change files or contact Paseo."""
 import argparse
+import contextlib
+import grp
+import pwd
 import hashlib
 import json
 import os
@@ -10,6 +13,7 @@ import shutil
 import subprocess
 import sys
 from xml.sax.saxutils import escape
+from fold_daemon_setup import deploy
 from public_runtime import ROOT, LABEL, load_config, config_path, data_root, logs_root, node_executable, app_path
 
 
@@ -41,25 +45,72 @@ def same_plugin(entry):
     return entry.get('source') == 'directory' and Path(entry.get('path', '')).resolve() == (ROOT/'plugin/role-workflow').resolve()
 
 
-def launch_plist(config, node, home):
+def launch_plist(config, node, home, owner=None):
     values = {'__PYTHON__':config.get('python') or os.environ.get('PASEO_PUBLIC_PYTHON') or shutil.which('python3') or sys.executable,'__REPOSITORY__':str(ROOT),'__HOME__':str(home),
               '__PATH__':str(Path(node).parent)+os.pathsep+os.environ.get('PATH','/usr/bin:/bin'),
               '__APP__':str(app_path(config)),'__PASEO_HOME__':str(home/'.paseo'),
               '__LOGS__':str(logs_root(config)), '__CONFIG__':str(config_path())}
-    text = (ROOT/'launchd/fold-reapply.plist.in').read_text()
+    if owner is not None:
+        values.update(__USER__=owner.pw_name, __GROUP__=grp.getgrgid(owner.pw_gid).gr_name)
+    template = 'fold-reapply.daemon.plist.in' if owner is not None else 'fold-reapply.plist.in'
+    text = (ROOT/'launchd'/template).read_text()
     for key,value in values.items():
         text = text.replace(key,escape(value))
     return plistlib.loads(text.encode())
+
+
+@contextlib.contextmanager
+def owner_environment(owner):
+    # sudo's HOME is not the app owner's HOME. Never register plugins into root's Paseo.
+    original = os.environ.copy()
+    try:
+        os.environ.update(HOME=owner.pw_dir, PASEO_HOME=str(Path(owner.pw_dir)/'.paseo'))
+        os.environ.pop('PASEO_PUBLIC_CONFIG', None)
+        os.environ.pop('PASEO_PUBLIC_NODE', None)
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(original)
+
+
+def system_setup(args):
+    app = app_path(load_config()).absolute()
+    owner = pwd.getpwuid(app.stat().st_uid)
+    with owner_environment(owner):
+        config = load_config()
+        config['app'] = str(app)
+        node = node_executable(config)
+        version = subprocess.check_output([node, '--version'], text=True).strip()
+        if int(version.lstrip('v').split('.')[0]) < 22:
+            raise RuntimeError('Node.js 22 이상이 필요합니다.')
+        if not args.dry_run and args.action == 'install':
+            if not (ROOT/'node_modules/.bin/tsx').is_file():
+                raise RuntimeError('앱 소유 계정에서 ./install.sh를 먼저 실행하세요. sudo 모드는 감시만 설치합니다.')
+            account = read_paseo(Path(owner.pw_dir))
+            if not same_plugin(account.get('plugins', {}).get('role-workflow', {})):
+                raise RuntimeError('앱 소유 계정의 role-workflow 등록을 먼저 확인하세요.')
+            # Private pre-existing automation must be migrated with its own installer.
+            legacy = Path(owner.pw_dir)/'Library/LaunchAgents/com.jino.paseo-fold-reapply.plist'
+            if legacy.exists() or Path('/Library/LaunchDaemons/com.jino.paseo-fold-reapply.plist').exists():
+                raise RuntimeError('다른 접기 감시가 있습니다. 중복 설치하지 않습니다.')
+        spec = launch_plist(config, node, Path(owner.pw_dir), owner)
+        return deploy(spec, data_root(config)/'system-install-backup', args.action, dry=args.dry_run)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['install','uninstall'])
     parser.add_argument('--dry-run', action='store_true')
-    parser.add_argument('--with-fold-reapply', action='store_true')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--with-fold-reapply', action='store_true')
+    mode.add_argument('--fold-reapply-system', action='store_true', help='sudo: install only the app-owner system watcher; --dry-run needs no sudo')
     args = parser.parse_args(argv)
     if sys.version_info < (3,12):
         raise RuntimeError('Python 3.12 이상이 필요합니다.')
+    if args.fold_reapply_system:
+        return system_setup(args)
+    if os.geteuid() == 0 and not args.dry_run:
+        raise RuntimeError('일반 설치는 sudo 없이 실행하세요. 시스템 감시는 --fold-reapply-system을 사용하세요.')
     home = Path.home()
     config = load_config()
     node = node_executable(config)
@@ -94,6 +145,8 @@ def main(argv=None):
     if not (home/'.paseo/paseo.pid').exists():
         raise RuntimeError('이 계정에서 Paseo를 먼저 실행하세요. 설치기는 데몬을 시작하거나 재시작하지 않습니다.')
     if args.with_fold_reapply:
+        if (Path('/Library/LaunchDaemons')/(LABEL+'.plist')).exists():
+            raise RuntimeError('시스템 접기 감시가 있습니다. 사용자 감시를 중복 설치하지 않습니다.')
         app = app_path(config)
         if not app.exists() or app.stat().st_uid != os.getuid():
             raise RuntimeError('공용 앱 자동 재적용은 앱 소유 계정 한 곳에서만 등록하세요.')
@@ -139,6 +192,6 @@ def main(argv=None):
 if __name__ == '__main__':
     try:
         sys.exit(main())
-    except (RuntimeError,ValueError,subprocess.CalledProcessError) as error:
+    except (OSError,RuntimeError,ValueError,subprocess.CalledProcessError) as error:
         print(str(error),file=sys.stderr)
         sys.exit(1)

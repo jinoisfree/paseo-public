@@ -178,6 +178,41 @@ class Fixture(unittest.TestCase):
         self.assertEqual(self.quiet_run(self.machine()), 0)
         self.assertEqual(self.events, [])
 
+    def test_absent_daemon_is_deferred_without_notification(self):
+        machine = self.machine()
+        machine.probe_plugin = mock.Mock(return_value={'status': 'deferred', 'daemonVersion': None})
+        self.assertEqual(self.quiet_run(machine), 0)
+        self.assertEqual(machine.state['pluginChecks']['0.12.0']['status'], 'deferred')
+        self.assertEqual(machine.state['appliedVersion'], '0.12.0')
+        self.assertFalse(any(event[0] == 'notify' for event in self.events))
+
+    def test_deferred_check_retries_without_reinstalling_and_succeeds(self):
+        machine = self.machine()
+        machine.probe_plugin = mock.Mock(return_value={'status': 'deferred'})
+        self.assertEqual(self.quiet_run(machine), 0)
+        self.events.clear()
+        next_run = self.machine()
+        self.assertEqual(self.quiet_run(next_run), 0)
+        self.assertEqual(next_run.state['pluginChecks']['0.12.0']['status'], 'passed')
+        self.assertFalse(any(event[0] in ('prepare', 'build') for event in self.events))
+        self.assertFalse(any('--apply' in event[1] for event in self.events if event[0] == 'command'))
+        self.assertEqual(sum(event[0] == 'notify' for event in self.events), 1)
+        self.events.clear()
+        self.assertEqual(self.quiet_run(self.machine()), 0)
+        self.assertEqual(self.events, [])
+
+    def test_gui_notification_failure_does_not_change_success(self):
+        for failure in (subprocess.CompletedProcess([], 1, '', 'no GUI session'),
+                        OSError('no notification service'),
+                        subprocess.TimeoutExpired('osascript', 10)):
+            with self.subTest(failure=type(failure).__name__):
+                machine = self.machine()
+                machine.state['pluginChecks'] = {'0.12.0': {'status': 'passed', 'daemonVersion': '0.12.0'}}
+                machine.notify = lambda message: auto.Automation.notify(machine, message)
+                options = {'side_effect': failure} if isinstance(failure, Exception) else {'return_value': failure}
+                with mock.patch.object(auto.subprocess, 'run', **options), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(machine.finish_update('0.12.0', {'status': 'applied'}), 0)
+
     def test_same_version_no_action(self):
         machine = self.machine()
         machine.state['appliedVersion'] = '0.12.0'; machine.save()

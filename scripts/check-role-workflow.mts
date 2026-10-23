@@ -13,7 +13,26 @@ let client: DaemonClient | undefined;
 let connected = false;
 let daemonVersion: string | null = null;
 const result = async () => {
-  const pid = JSON.parse(await readFile(path.join(home, "paseo.pid"), "utf8"));
+  let pid;
+  try {
+    pid = JSON.parse(await readFile(path.join(home, "paseo.pid"), "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { status: "deferred", summary: "소유 계정의 Paseo 데몬이 실행 중이 아닙니다." };
+    }
+    throw error;
+  }
+  if (!Number.isSafeInteger(pid.pid) || pid.pid <= 0) {
+    return { status: "failed", summary: "데몬 프로세스 정보를 확인하지 못했습니다." };
+  }
+  try {
+    process.kill(pid.pid, 0); // Existence check only; never starts or stops a daemon.
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") {
+      return { status: "deferred", summary: "소유 계정의 Paseo 데몬이 실행 중이 아닙니다." };
+    }
+    if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+  }
   const port = /^(?:127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\]|\[::\]):(\d+)$/.exec(pid.listen)?.[1];
   if (!port) return { status: "failed", summary: "로컬 데몬 주소를 확인하지 못했습니다." };
   client = new DaemonClient({

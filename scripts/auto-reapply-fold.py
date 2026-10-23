@@ -107,7 +107,7 @@ class Automation:
         self.command_number += 1
         log = self.log/f'{self.command_number:02d}-{Path(command[0]).name}.log'
         env = os.environ.copy()
-        env.update(PATH=self.node_bin+os.pathsep+env.get('PATH', ''), EXPO_NO_TELEMETRY='1', PASEO_WEB_PLATFORM='electron')
+        env.update(PATH=self.node_bin+os.pathsep+env.get('PATH', ''), EXPO_NO_TELEMETRY='1', PASEO_WEB_PLATFORM='electron', CI='1')
         started = time.monotonic()
         with log.open('x') as output:
             output.write('cwd: '+str(cwd or self.root)+'\ncommand: '+json.dumps(command)+'\n')
@@ -127,8 +127,13 @@ class Automation:
         self.record(notification=message)
         # Same macOS notification mechanism used by the existing local watchdog.
         script = 'display notification '+json.dumps(message, ensure_ascii=False)+' with title "Paseo 접기 자동 재적용"'
-        result = subprocess.run(['/usr/bin/osascript', '-e', script], capture_output=True, text=True)
-        self.record(notificationExitCode=result.returncode, notificationError=result.stderr.strip())
+        # A system job has no Aqua session. Notification delivery is best effort.
+        try:
+            result = subprocess.run(['/usr/bin/osascript', '-e', script], capture_output=True,
+                                    text=True, timeout=10)
+            self.record(notificationExitCode=result.returncode, notificationError=result.stderr.strip())
+        except (OSError, subprocess.TimeoutExpired) as error:
+            self.record(notificationSkipped=type(error).__name__)
 
     def probe_plugin(self, version, timeout):
         command = [self.root/'node_modules/.bin/tsx',
@@ -137,11 +142,11 @@ class Automation:
 
     def check_plugin(self, version):
         checks = self.state.setdefault('pluginChecks', {})
-        if version in checks:
+        if version in checks and checks[version].get('status') != 'deferred':
             return checks[version]
         entry = {'status': 'checking', 'startedAt': stamp(), 'logDirectory': str(self.log)}
         checks[version] = entry
-        self.save()  # Even an interrupted check is not automatically repeated.
+        self.save()  # Only an explicitly deferred check is automatically repeated.
         started = time.monotonic()
         deadline = started + PLUGIN_WAIT_SECONDS
         try:
@@ -155,7 +160,7 @@ class Automation:
                 except subprocess.TimeoutExpired:
                     output = {'status': 'waiting', 'summary': '데몬 연결 응답을 기다리고 있습니다.'}
                 if output.get('status') != 'waiting':
-                    if output.get('status') not in ('passed', 'failed'):
+                    if output.get('status') not in ('passed', 'failed', 'deferred'):
                         raise ValueError('Invalid plugin probe status')
                     if output['status'] == 'passed' and output.get('daemonVersion') != version:
                         raise ValueError('Plugin probe checked a different daemon version')
@@ -179,6 +184,11 @@ class Automation:
             message = f'Paseo {version} 접기 재적용 완료, Cmd+R'
         else:
             message = f'Paseo {version} 접기 재적용 실패. 로그: {self.log}. 수동 확인 후 --force-version {version}'
+        if plugin.get('status') == 'deferred':
+            self.record(result='plugin check deferred; retry on next invocation', version=version)
+            if not fold_ok:
+                self.notify(message)  # The independent fold failure still needs attention.
+            return 0 if fold_ok else 1
         if plugin.get('status') == 'passed':
             message += '\nrole-workflow 플러그인 점검 정상'
         else:
@@ -296,7 +306,7 @@ class Automation:
                 version == self.state.get('appliedVersion') or version in self.state['attempts']
             ):
                 previous = self.state['attempts'].get(version, {})
-                if previous.get('pluginCheckPending'):
+                if previous.get('pluginCheckPending') or self.state.get('pluginChecks', {}).get(version, {}).get('status') == 'deferred':
                     self.log = Path(tempfile.mkdtemp(prefix=version+'-plugin-', dir=self.log_root))
                     return self.finish_update(version, previous)
                 self.record(result='already applied/attempted; no action', version=version)

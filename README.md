@@ -58,7 +58,9 @@ Paseo 계정 홈, 자격 증명, 작업 상태는 각 계정의 `~/.paseo`를 �
 플러그인은 `>=0.10.2` 범위로 버전 상한을 두지 않습니다.
 실제 검증한 앱 소스는 0.11.4와 0.12.0이며, 미래 API 변경은 업데이트 후 점검으로 확인합니다.
 접기 빌드가 실패해도 플러그인 점검은 따로 수행하고 결과를 알립니다.
-같은 버전의 접기와 점검은 자동 반복하지 않습니다.
+같은 버전의 접기는 자동 반복하지 않습니다. 플러그인 점검은 소유 계정의 데몬이
+없으면 `deferred`로 미루고, 다음 실행에서 현재 버전 점검만 다시 합니다.
+연기 중에는 점검 실패 알림을 보내지 않으며, 점검이 끝나면 버전별로 결과를 유지합니다.
 접기 실패를 수정한 후에만 수동으로 재시도하세요.
 
 ```sh
@@ -68,6 +70,43 @@ python3 scripts/auto-reapply-fold.py --force-version <현재앱버전>
 `directory-search-symlink-*.patch`는 이전 앱 검색 보완의 참고용입니다.
 자동 재적용에는 포함하지 않으며 현재는 플러그인의 폴더 열기를 사용합니다.
 맥북 등 다른 기기의 로컬 renderer는 별도로 관리해야 합니다.
+
+## 선택: 로그인 없이 접기 감시
+
+소유 계정이 로그아웃해 있거나 다른 계정만 로그인해 있어도 감시하려면
+앱 소유 계정에서 먼저 `./install.sh`로 플러그인과 의존성을 설치한 뒤 실행하세요.
+
+```sh
+./install.sh --fold-reapply-system --dry-run
+sudo ./install.sh --fold-reapply-system
+```
+
+sudo 모드는 **시스템 감시만** 등록합니다. `/Library/LaunchDaemons`의 job은
+앱 소유 계정을 `UserName`으로 사용하고 그 계정의 HOME·Paseo·설정을 사용합니다.
+빌드·서명은 root가 아닌 앱 소유 계정 권한으로 실행합니다.
+기존 같은 저장소의 LaunchAgent는 설정 데이터 안에 백업하고 해제합니다.
+다른 접기 감시가 있으면 먼저 그 감시의 설치기로 전환하거나 해제하세요.
+사용자 감시와 시스템 감시는 함께 등록하지 않습니다.
+
+저장소나 Python이 있는 볼륨이 아직 없으면 시스템 `/bin/sh`가 정상 종료합니다.
+`StartOnMount`로 마운트 시 다시 실행하며 앱 변경 감시와 하루 1회 실행도 유지합니다.
+WorkingDirectory와 로그 경로는 로그인 없이 접근할 수 있는 로컬 홈에 두세요.
+암호화된 볼륨이 잠겨 있으면 잠금 해제·마운트 후 실행됩니다.
+GUI 알림 실패·10초 시간 초과는 기록만 남기고 빌드/설치 결과를 바꾸지 않습니다.
+서명은 키체인 인증서가 필요 없는 ad hoc 방식이며 빌드는 `CI=1`을 사용합니다.
+자동화의 접기 알림은 macOS 방식이며, GUI가 없을 때 전달은 보장하지 않습니다.
+결과는 상태와 로그에 남고, 소유 계정 데몬 점검이 연기됐다면 후속 점검 후 알립니다.
+
+시스템 감시를 되돌리면 백업된 LaunchAgent가 복원됩니다.
+소유 계정이 로그아웃 상태면 다음 로그인 때 LaunchAgent가 로드됩니다.
+
+```sh
+./uninstall.sh --fold-reapply-system --dry-run
+sudo ./uninstall.sh --fold-reapply-system
+```
+
+플러그인 등록·사용자 데이터·앱 renderer는 이 모드에서 지우거나 바꾸지 않습니다.
+다른 계정의 플러그인은 각 계정에서 따로 설치합니다.
 
 ## 사용자 설정과 데이터
 
@@ -116,7 +155,7 @@ npm ci --ignore-scripts
 npx playwright install chromium
 npm test
 npm run typecheck
-python3 -m unittest -v scripts/test_auto_reapply_fold.py scripts/test_install_pushed_fold.py scripts/test_setup.py scripts/test_privacy_scan.py
+python3 -m unittest -v scripts/test_auto_reapply_fold.py scripts/test_install_pushed_fold.py scripts/test_setup.py scripts/test_privacy_scan.py scripts/test_fold_daemon_setup.py
 python3 scripts/privacy_scan.py --staged
 ```
 

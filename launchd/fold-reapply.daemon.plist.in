@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>io.github.jinoisfree.paseo-public.fold-reapply</string>
+<key>UserName</key><string>__USER__</string>
+<key>GroupName</key><string>__GROUP__</string>
+<key>ProgramArguments</key><array>
+<string>/bin/sh</string><string>-c</string>
+<string>if [ ! -r "$1" ] || [ ! -x "$2" ]; then echo "Paseo fold reapply deferred: source volume or Python unavailable"; exit 0; fi; exec "$2" "$1" --app "$3"</string>
+<string>paseo-fold-reapply</string><string>__REPOSITORY__/scripts/auto-reapply-fold.py</string><string>__PYTHON__</string><string>__APP__</string>
+</array>
+<key>WorkingDirectory</key><string>__HOME__</string>
+<key>EnvironmentVariables</key><dict>
+<key>HOME</key><string>__HOME__</string>
+<key>PATH</key><string>__PATH__</string>
+<key>PASEO_HOME</key><string>__PASEO_HOME__</string>
+<key>PASEO_PUBLIC_CONFIG</key><string>__CONFIG__</string>
+<key>PYTHONDONTWRITEBYTECODE</key><string>1</string>
+<key>PYTHONUNBUFFERED</key><string>1</string>
+</dict>
+<key>RunAtLoad</key><true/>
+<key>StartOnMount</key><true/>
+<key>WatchPaths</key><array><string>__APP__/Contents/Info.plist</string></array>
+<key>StartInterval</key><integer>86400</integer>
+<key>ThrottleInterval</key><integer>60</integer>
+<key>StandardOutPath</key><string>__LOGS__/stdout.log</string>
+<key>StandardErrorPath</key><string>__LOGS__/stderr.log</string>
+</dict></plist>
