@@ -422,3 +422,21 @@ test("push approval instructs direct execution and verification without a requir
     assert.ok(prompt.includes(text), text);
   }
 });
+
+test("only line-start fences hide metadata; inline backticks and nested fences do not", async () => {
+  const { parseProgress, parseTitle } = await import("../server/protocol.ts");
+  const { proseArtifacts } = await import("../shared/artifacts.ts");
+  const inline = "마크다운에서는 ``` 세 개로 코드 블록을 엽니다.\n작업상태: 푸시";
+  assert.equal(parseProgress(inline), "pushed");
+  const nested = "````md\n```\n작업상태: 푸시\n```\n````\n작업상태: 완료";
+  assert.equal(parseProgress(nested), "done");
+  assert.equal(parseProgress("```\n작업상태: 푸시\n```"), null);
+  assert.equal(parseProgress("  ~~~\n작업상태: 푸시\n~~~\n작업상태: 진행"), "active");
+  assert.equal(parseTitle("```\n제목: 예시 제목\n```\n본문"), null);
+  assert.equal(parseTitle("```\n제목: 예시\n```\n제목: 실제 제목"), "실제 제목");
+  const target = { repository: "/repo", remote: "origin", branch: "main", commit: "a".repeat(40) };
+  assert.equal(
+    proseArtifacts(`인라인 \`\`\` 설명\n푸시대상: ${JSON.stringify([target])}`).pushTargets?.length,
+    1,
+  );
+});

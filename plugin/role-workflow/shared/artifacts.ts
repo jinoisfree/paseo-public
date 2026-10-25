@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { stripFences } from "./fences";
 
 export const repositoryPathsSchema = z.array(z.string().trim().min(1).max(4096)).max(8);
 export const pushTargetSchema = z.object({
@@ -26,9 +27,7 @@ export const verificationRecordSchema = verificationSchema.extend({
 
 /** Only standalone metadata outside code fences and the structured final block counts. */
 export function proseArtifacts(text: string) {
-  const prose = text
-    .replace(/```[^]*?(?:```|$)|~~~[^]*?(?:~~~|$)/g, "")
-    .replace(/<paseo-workflow>[^]*?<\/paseo-workflow>/g, "");
+  const prose = stripFences(text).replace(/<paseo-workflow>[^]*?<\/paseo-workflow>/g, "");
   const repositories: string[] = [];
   let pushTargets: PushTarget[] | undefined;
   let invalidTargets = false;

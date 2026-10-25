@@ -1,4 +1,5 @@
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { randomUUID } from "node:crypto";
 import {
   chmod,
@@ -15,6 +16,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { managedPushSchema, type ManagedPush } from "../shared/managed-push";
 import { pushTargetSchema, type PushTarget } from "../shared/artifacts";
+import { gitEnvironment } from "./git-environment";
 
 export interface ManagedGitResult {
   stdout: string;
@@ -28,38 +30,45 @@ const hashPattern = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/;
 const now = () => new Date().toISOString();
 const unavailable = "푸시 기록을 읽거나 저장하지 못했습니다. 다시 푸시하지 말고 기록을 확인하세요.";
 
-function processEnvironment() {
-  const env = { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0" };
-  for (const key of Object.keys(env)) {
-    if (
-      /^GIT_(?:DIR|WORK_TREE|COMMON_DIR|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|NAMESPACE|CONFIG(?:_.*)?)$/.test(
-        key,
-      )
-    )
-      delete env[key as keyof typeof env];
-  }
-  return env;
-}
+const OUTPUT_LIMIT = 1024 * 1024;
 
-const runGit: ManagedPushDriver = (cwd, args) =>
-  new Promise((resolve) => {
-    execFile(
-      "git",
-      args,
-      {
-        cwd,
-        timeout: args.includes("push") ? 120_000 : 15_000,
-        maxBuffer: 1024 * 1024,
-        env: processEnvironment(),
-        encoding: "utf8",
-      },
-      (error, stdout, stderr) => {
-        let exitCode: number | null = 0;
-        if (error) exitCode = typeof error.code === "number" && !error.killed ? error.code : null;
-        resolve({ stdout, stderr, exitCode });
-      },
-    );
+// No stdin and its own process group: a credential or host-key prompt cannot wait on input,
+// and a timeout stops ssh and remote helpers too, so no push can land after it is recorded.
+const runGit: ManagedPushDriver = async (cwd, args) => {
+  // A spawn failure emits "error", which rejects below; the runner records an unknown exit.
+  const child = spawn("git", args, {
+    cwd,
+    env: gitEnvironment(),
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: true,
   });
+  let stdout = "";
+  let stderr = "";
+  let failed = false;
+  const stop = () => {
+    failed = true;
+    try {
+      process.kill(-child.pid!, "SIGKILL");
+    } catch {
+      child.kill("SIGKILL");
+    }
+  };
+  child.stdout!.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString("utf8");
+    if (stdout.length + stderr.length > OUTPUT_LIMIT) stop();
+  });
+  child.stderr!.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString("utf8");
+    if (stdout.length + stderr.length > OUTPUT_LIMIT) stop();
+  });
+  const timer = setTimeout(stop, args.includes("push") ? 120_000 : 15_000);
+  try {
+    const [code] = (await once(child, "close")) as [number | null];
+    return { stdout, stderr, exitCode: !failed && typeof code === "number" ? code : null };
+  } finally {
+    clearTimeout(timer);
+  }
+};
 
 class ManagedPushError extends Error {}
 function safeError(message: string): Error {
@@ -193,6 +202,42 @@ export class ManagedPushRunner {
       });
   }
 
+  /**
+   * Git reads a `remote.<url>.*` section even for a literal URL, so pushurl, url, receivepack
+   * or uploadpack there would send the push and its check somewhere else. Repository-local
+   * credential helpers and ssh commands run with the user's credentials at approval time.
+   */
+  private async unredirected(repository: string, url: string) {
+    const result = await this.git(repository, [
+      "config",
+      "--null",
+      "--show-scope",
+      "--get-regexp",
+      "^(remote\\..*|credential\\..*helper|core\\.(sshcommand|askpass))$",
+    ]);
+    if (result.exitCode === 1) return true;
+    if (result.exitCode !== 0) return false;
+    const fields = result.stdout.split("\0");
+    for (let index = 0; index + 1 < fields.length; index += 2) {
+      const scope = fields[index];
+      const row = fields[index + 1];
+      const newline = row.indexOf("\n");
+      const key = newline === -1 ? row : row.slice(0, newline);
+      if (key.startsWith("remote.")) {
+        if (key.slice("remote.".length, key.lastIndexOf(".")) === url) return false;
+      } else if (scope === "local" || scope === "worktree") return false;
+    }
+    return true;
+  }
+
+  private async fixedDestination(repository: string, url: string) {
+    return (
+      (await this.literalUrl(repository, url, true)) &&
+      (await this.literalUrl(repository, url, false)) &&
+      (await this.unredirected(repository, url))
+    );
+  }
+
   private async target(input: PushTarget): Promise<Target> {
     const parsed = pushTargetSchema.safeParse(input);
     if (!parsed.success) throw safeError("저장소, 원격, 브랜치와 전체 커밋 해시가 필요합니다.");
@@ -219,11 +264,10 @@ export class ManagedPushRunner {
     );
     if (type !== "commit") throw safeError("전체 커밋 객체 해시가 필요합니다.");
     const remoteUrl = await this.remoteUrl(repository, value.remote);
-    if (
-      !(await this.literalUrl(repository, remoteUrl, true)) ||
-      !(await this.literalUrl(repository, remoteUrl, false))
-    )
-      throw safeError("Git URL 치환 설정 때문에 고정된 푸시 주소를 확인할 수 없습니다.");
+    if (!(await this.fixedDestination(repository, remoteUrl)))
+      throw safeError(
+        "Git URL 치환, 원격 URL 전용 설정 또는 저장소 전용 자격 증명·ssh 명령 설정 때문에 고정된 푸시 주소를 확인할 수 없습니다.",
+      );
     return {
       ...value,
       repository,
@@ -390,7 +434,7 @@ export class ManagedPushRunner {
 
   private async verify(target: Target): Promise<boolean | null> {
     const ref = `refs/heads/${target.branch}`;
-    if (!(await this.literalUrl(target.repository, target.remoteUrl, false))) return null;
+    if (!(await this.fixedDestination(target.repository, target.remoteUrl))) return null;
     const result = await this.git(target.repository, [
       "-c",
       "protocol.ext.allow=never",
@@ -433,8 +477,12 @@ export class ManagedPushRunner {
       "push.recurseSubmodules=no",
       "-c",
       "protocol.ext.allow=never",
+      // Repository hooks are agent-writable and could push other refs with these credentials.
+      "-c",
+      "core.hooksPath=/dev/null",
       "push",
       "--porcelain",
+      "--no-verify",
       "--no-follow-tags",
       "--no-force",
       "--no-mirror",
@@ -502,6 +550,30 @@ export class ManagedPushRunner {
     return record;
   }
 
+  /**
+   * A timed-out push is killed with its whole process group. If the remote now holds every
+   * approved commit, that is settled; anything less is left for the user, never re-pushed.
+   */
+  private async settledByRemote(record: ManagedPush) {
+    if (!record.targets.every((target) => target.startedAt)) return false;
+    const verified = [];
+    for (const target of record.targets) verified.push(await this.verify(target));
+    if (!verified.every((value) => value === true)) return false;
+    for (const target of record.targets) {
+      target.verified = true;
+      target.alreadyIncluded = target.exitCode !== 0;
+      target.error = "";
+    }
+    record.state = "pushed";
+    record.error = "";
+    try {
+      await this.save(record);
+    } catch {
+      throw safeError(unavailable);
+    }
+    return true;
+  }
+
   async recheck(id: string): Promise<ManagedPush> {
     if (this.isRunning(id)) return this.read(id);
     const record = await this.raw(id);
@@ -510,6 +582,7 @@ export class ManagedPushRunner {
     if (record.state === "pushed") return record;
     if (record.state === "prepared" && !(await this.claimed(id))) return record;
     if (record.targets.some((target) => target.exitCode === null)) {
+      if (await this.settledByRemote(record)) return record;
       record.state = record.targets.some(
         (target) => target.exitCode !== null && target.exitCode !== 0,
       )

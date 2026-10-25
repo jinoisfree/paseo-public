@@ -168,14 +168,20 @@ export function ManagedPushPanel({ workflow: w, refresh, styles: s }: Props) {
           await execute({ id: w.id, requestId: push.id, approved: true });
           setNotice("푸시 요청의 현재 상태를 확인했습니다.");
         } else if (push) {
-          await recheck({ id: w.id, requestId: push.id });
-          setNotice("현재 상태와 원격 반영을 다시 확인했습니다.");
+          const current = await recheck({ id: w.id, requestId: push.id });
+          if (current.state === "prepared") {
+            // The server reports an unclaimed request: nothing ran, so approval is offered again.
+            submitted.delete(push.id);
+            setUncertain("");
+            setNotice("이 요청은 실행되지 않았습니다. 대상을 확인한 뒤 다시 승인할 수 있습니다.");
+          } else setNotice("현재 상태와 원격 반영을 다시 확인했습니다.");
         }
-      } catch {
+      } catch (error) {
+        const reason = error instanceof Error && error.message ? ` (${error.message})` : "";
         setNotice(
           action === "execute"
-            ? "요청 결과를 확인하지 못했습니다. 다시 실행하지 말고 ‘현재 상태 확인’으로 확인하세요."
-            : "상태를 확인하지 못했습니다. 연결과 작업 상태를 확인한 뒤 다시 조회하세요.",
+            ? `요청 결과를 확인하지 못했습니다${reason}. 다시 실행하지 말고 ‘현재 상태 확인’으로 확인하세요.`
+            : `상태를 확인하지 못했습니다${reason}. 연결과 작업 상태를 확인한 뒤 다시 조회하세요.`,
         );
       } finally {
         try {

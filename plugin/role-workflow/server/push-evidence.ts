@@ -1,6 +1,7 @@
 import path from "node:path";
 import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
 import { parseLoggedPush } from "./shell-push-log";
+import { stripFences } from "../shared/fences";
 
 export interface PushExecution {
   callId: string;
@@ -70,10 +71,13 @@ function pushedHash(
   if (porcelain) return porcelainHash(source, branch, output, known);
   if (/^Everything up-to-date\s*$/m.test(output)) return exact ? source : (known ?? "");
   // A successful process alone is not enough: require Git's actual update line.
-  const update = output.split("\n").find((line) => {
+  const updates = output.split("\n").filter((line) => {
     const match = /(?:^|\s)(\S+)\s+->\s+(\S+)(?:\s|$)/.exec(line);
     return match?.[2]?.replace(/^refs\/heads\//, "") === branch;
   });
+  // After `;` a rejected push can still end in a successful exit; its own line says so.
+  if (updates.some((line) => /^\s*!|\[(?:remote )?rejected\]/.test(line))) return null;
+  const update = updates[0];
   if (!update || !/^To\s+\S+/m.test(output)) return null;
   if (!exact && /\[new branch\]/.test(update)) return "";
   return exact ? source : /(?:^|\s)[a-f0-9]+\.{2,3}([a-f0-9]{7,64})(?:\s|$)/.exec(update)?.[1];
@@ -420,8 +424,7 @@ export function turnEvidence(
 
 /** A final approval request overrides stale success text in earlier commentary. */
 export function pushPending(report: string): boolean {
-  const prose = report
-    .replace(/```[^]*?(?:```|$)|~~~[^]*?(?:~~~|$)/g, "")
+  const prose = stripFences(report)
     .replace(/<paseo-workflow>[^]*?(?:<\/paseo-workflow>|$)/g, "")
     .replace(/[*_`]/g, "");
   return (

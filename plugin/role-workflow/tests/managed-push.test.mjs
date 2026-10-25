@@ -279,9 +279,60 @@ test("unknown process exits are never treated as a successful push or retried", 
   const prepared = await runner.prepare("flow", 0, [f.target]);
   assert.equal((await runner.execute(prepared.id)).state, "unknown");
   assert.equal(await checked(f.remote, ["rev-parse", "refs/heads/main"]), f.hash);
-  assert.equal((await runner.recheck(prepared.id)).state, "unknown");
   assert.equal((await runner.execute(prepared.id)).state, "unknown");
   assert.equal(pushes(f.calls).length, 1);
+  // Only the real remote settles it: once it holds the approved commit, recheck records that.
+  const settled = await runner.recheck(prepared.id);
+  assert.equal(settled.state, "pushed");
+  assert.equal(settled.targets[0].verified, true);
+  assert.equal(pushes(f.calls).length, 1);
+});
+
+test("an unknown exit whose commit never reached the remote stays unknown without repushing", async (t) => {
+  const f = await fixture(t);
+  const runner = new ManagedPushRunner(f.records, async (cwd, args) =>
+    args.includes("push") ? { stdout: "", stderr: "", exitCode: null } : f.driver(cwd, args),
+  );
+  const prepared = await runner.prepare("flow", 0, [f.target]);
+  assert.equal((await runner.execute(prepared.id)).state, "unknown");
+  assert.equal((await runner.recheck(prepared.id)).state, "unknown");
+  assert.equal((await git(f.remote, ["rev-parse", "--verify", "refs/heads/main"])).exitCode, 128);
+});
+
+test("URL-named remote sections, local credential helpers and ssh commands refuse the push", async (t) => {
+  for (const [key, value] of [
+    ["pushurl", "/elsewhere.git"],
+    ["url", "/elsewhere.git"],
+    ["receivepack", "touch /tmp/never"],
+  ]) {
+    const f = await fixture(t);
+    await checked(f.repository, ["config", `remote.${f.remote}.${key}`, value]);
+    await assert.rejects(f.runner.prepare("flow", 0, [f.target]), /고정된 푸시 주소/);
+  }
+  for (const [key, value] of [
+    ["credential.helper", "!echo password=x"],
+    ["core.sshCommand", "ssh -o ProxyCommand=true"],
+  ]) {
+    const f = await fixture(t);
+    await checked(f.repository, ["config", key, value]);
+    await assert.rejects(f.runner.prepare("flow", 0, [f.target]), /고정된 푸시 주소/);
+  }
+  // Added after approval: the push is refused before it runs.
+  const f = await fixture(t);
+  const prepared = await f.runner.prepare("flow", 0, [f.target]);
+  await checked(f.repository, ["config", `remote.${f.remote}.pushurl`, "/elsewhere.git"]);
+  assert.notEqual((await f.runner.execute(prepared.id)).state, "pushed");
+  assert.equal(pushes(f.calls).length, 0);
+});
+
+test("repository hooks do not run during an approved push", async (t) => {
+  const f = await fixture(t);
+  const marker = path.join(f.root, "hook-ran");
+  const hook = path.join(f.repository, ".git", "hooks", "pre-push");
+  await writeFile(hook, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`, { mode: 0o755 });
+  const prepared = await f.runner.prepare("flow", 0, [f.target]);
+  assert.equal((await f.runner.execute(prepared.id)).state, "pushed");
+  await assert.rejects(stat(marker));
 });
 
 test("reload recovers a durable zero exit through read-only verification without repushing", async (t) => {
@@ -432,4 +483,14 @@ test("a finalized push stays confirmed without probing an unavailable or changed
   assert.equal(attempts, 0);
   assert.equal(await readFile(recordPath(f, prepared.id), "utf8"), saved);
   assert.equal(await readFile(path.join(f.records, prepared.id, "target-1-push.log"), "utf8"), log);
+});
+
+test("the default driver runs git without stdin and records exit codes", async (t) => {
+  const f = await fixture(t);
+  const runner = new ManagedPushRunner(f.records);
+  const prepared = await runner.prepare("flow", 0, [f.target]);
+  const done = await runner.execute(prepared.id);
+  assert.equal(done.state, "pushed");
+  assert.equal(done.targets[0].exitCode, 0);
+  assert.equal(await checked(f.remote, ["rev-parse", "refs/heads/main"]), f.hash);
 });

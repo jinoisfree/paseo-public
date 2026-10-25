@@ -39,14 +39,20 @@ export default function contribute(client: PluginClientContext) {
           const matches = workflows.filter(
             (workflow) => workflow.planAgentId === agent.id || workflow.executeAgentId === agent.id,
           );
-          if (matches.length !== 1) throw new Error("연결된 작업을 확인할 수 없습니다.");
-          const workflow = matches[0];
+          // Like resume, a conversation reused by a newer flow means its unfinished one.
+          const unfinished = matches.filter((workflow) => workflow.status !== "completed");
+          const candidates = unfinished.length ? unfinished : matches;
+          if (candidates.length !== 1) throw new Error("연결된 작업을 확인할 수 없습니다.");
+          const workflow = candidates[0];
           focusManagedPush(workflow.id);
           await rpc(preparePush, { id: workflow.id });
           focusManagedPush(workflow.id);
           reportControl(`${workflow.title}: 표시된 푸시 대상을 확인한 뒤 승인 버튼을 누르세요.`);
-        } catch {
-          reportControl("푸시 대상을 준비하지 못했습니다. 작업 상태를 확인한 뒤 다시 조회하세요.");
+        } catch (error) {
+          const reason = error instanceof Error && error.message ? ` (${error.message})` : "";
+          reportControl(
+            `푸시 대상을 준비하지 못했습니다${reason}. 작업 상태를 확인한 뒤 다시 조회하세요.`,
+          );
         } finally {
           client.openSurface("workflow");
         }

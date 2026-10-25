@@ -53,6 +53,15 @@ test("push targets verify the specified repository, remote, branch and commit, i
     "a known descendant contains the target commit",
   );
   assert.equal(await probe.pushedTarget({ ...target, commit: second }), true);
+  // ls-remote matches suffixes: a nested ref ending in the branch name is not the branch.
+  git(remote, "update-ref", "refs/heads/a/refs/heads/zz", head);
+  assert.equal(await probe.pushedTarget({ ...target, branch: "zz" }), null);
+  // The push URL, not the fetch URL, is what a push reached.
+  git(root, "init", "-q", "--bare", "fork.git");
+  git(work, "remote", "set-url", "--push", "target", path.join(root, "fork.git"));
+  assert.equal(await probe.pushedTarget(target), null);
+  git(work, "config", "--unset", "remote.target.pushurl");
+  assert.equal(await probe.pushedTarget(target), true);
   git(work, "remote", "set-url", "target", path.join(root, "gone.git"));
   assert.equal(await probe.pushedTarget(target), null);
 });

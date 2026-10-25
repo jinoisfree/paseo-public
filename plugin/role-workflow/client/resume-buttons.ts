@@ -13,15 +13,22 @@ export function registerResumeButtons(client: PluginClientContext) {
   const pills = new Map<string, { workspaceId: string; button: PluginButtonRegistration }>();
   const lifetime = new AbortController();
   let stopped = false,
-    reading = false;
+    reading = false,
+    stale = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const remove = (id: string) => {
     pills.get(id)?.button.remove();
     pills.delete(id);
   };
   async function refresh() {
-    if (stopped || reading) return;
+    if (stopped) return;
+    // An update during a read is applied by one more read right after it, not 15s later.
+    if (reading) {
+      stale = true;
+      return;
+    }
     reading = true;
+    stale = false;
     try {
       const data = await client.rpc(status, {});
       if (stopped) return;
@@ -60,6 +67,7 @@ export function registerResumeButtons(client: PluginClientContext) {
       if (!stopped) console.error("자동 작업 재개 버튼:", error);
     } finally {
       reading = false;
+      if (stale) schedule(0);
     }
   }
   function schedule(delay = 1000) {

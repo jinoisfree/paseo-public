@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { ScrollView, TextInput } from "@getpaseo/plugin/client/react-native";
 import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
@@ -51,6 +51,9 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
   const [draft, setDraft] = useState<Settings | null>(null);
   const execution = executorDefaults(draft, executorProvider);
   const [error, setError] = useState("");
+  // A failed poll clears itself on the next success; action errors stay until dismissed.
+  const [loadError, setLoadError] = useState("");
+  const loads = useRef({ started: 0, applied: 0 });
   const [notice, setNotice] = useState("");
   const controlFeedback = useControlFeedback();
   useEffect(() => setNotice(controlFeedback), [controlFeedback]);
@@ -102,12 +105,18 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
     [s.button, c.foreground, c.border],
   );
   const load = useCallback(async () => {
+    // A slow response must not overwrite a newer one that already arrived.
+    const sequence = ++loads.current.started;
     try {
       const next = await read({});
+      if (sequence < loads.current.applied) return;
+      loads.current.applied = sequence;
       setData(next);
+      setLoadError("");
       setDraft((previous) => previous ?? next.settings);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (sequence < loads.current.applied) return;
+      setLoadError(e instanceof Error ? e.message : String(e));
     }
   }, [read]);
   useEffect(() => {
@@ -429,7 +438,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
           }),
         )}
         {field(
-          "Claude 새 대화 권한 모드 (비우면 앱에서 고른 그대로)",
+          "Claude 새 대화 권한 모드 (모든 새 Claude 대화에 적용 · 기본 bypassPermissions · 비우면 앱에서 고른 그대로)",
           draft.claudeStartMode,
           (value) => setDraft({ ...draft, claudeStartMode: value }),
         )}
@@ -456,6 +465,46 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
         </Text>
         {projectChoices()}
       </View>
+    );
+  }
+  /** Escapes from a stop that only the user can settle; each says what it skips. */
+  function recoveryControls(w: Parameters<typeof workflowLabel>[0]) {
+    if (w.mode !== "federated") return null;
+    return (
+      <>
+        {w.deliveryUnconfirmed && !w.generalTransition && (
+          <>
+            <Text style={s.muted}>
+              마지막 지시의 전달을 확인하지 못했습니다. 담당 대화에 그 지시가 없을 때만 다시
+              보냅니다.
+            </Text>
+            {button(
+              "전달 확인 후 다시 보내기",
+              () =>
+                void run(
+                  () => act({ id: w.id, action: "resend", message: "" }),
+                  "전달 상태를 확인하고 이어갔습니다.",
+                ),
+            )}
+          </>
+        )}
+        {w.generalTransition && w.status === "needs_input" && (
+          <>
+            <Text style={s.muted}>
+              전환할 대화의 결과를 확인하지 못했습니다. 확인 없이 전환하면 그 사실을 전환 기록에
+              남깁니다.
+            </Text>
+            {button(
+              "확인 없이 일반개발로 전환",
+              () =>
+                void run(
+                  () => act({ id: w.id, action: "general", message: "" }),
+                  "일반개발로 전환했습니다.",
+                ),
+            )}
+          </>
+        )}
+      </>
     );
   }
   function generalButton(id: string) {
@@ -552,10 +601,10 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
         일시정지는 현재 응답을 마친 뒤 적용됩니다.
       </Text>
       {pending && <Text style={s.text}>처리 중…</Text>}
-      {!!(error || data?.error) && (
+      {!!(error || loadError || data?.error) && (
         <View accessibilityRole="alert">
           <Text testID="workflow-error" style={s.error}>
-            {error || data?.error}
+            {error || loadError || data?.error}
           </Text>
           {button("다시 확인", () => {
             setError("");
@@ -568,7 +617,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
           {notice}
         </Text>
       )}
-      {!draft && !error && <Text style={s.text}>상태를 불러오는 중…</Text>}
+      {!draft && !error && !loadError && <Text style={s.text}>상태를 불러오는 중…</Text>}
       <View style={s.row}>
         {modelChoice("전체", "all", filter === "all", () => setFilter("all"))}
         {modelChoice("일반개발", "general", filter === "general", () => setFilter("general"))}
@@ -626,6 +675,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
                 : button("재개", () => resume(w.id))}
             </>
           )}
+          {recoveryControls(w)}
           {w.mode === "federated" && !w.generalTransition && generalButton(w.id)}
         </View>
       ))}

@@ -413,6 +413,10 @@ test("claims, dry runs, failed or masked commands, unrelated branches and unknow
     shell("git push -n origin main"),
     shell("git push origin main || true"),
     shell("git push origin main; true"),
+    shell(
+      `git push origin ${hash}:main; git status`,
+      `To example:repo.git\n ! [rejected]        ${hash} -> main (non-fast-forward)\n`,
+    ),
     shell("git push origin main\ntrue"),
     shell('echo "git push origin main"'),
     shell("git push origin other"),

@@ -2546,6 +2546,13 @@ test("a turn that ended before the delivery, or never received it, is not the an
   await g.engine.control(g.id, "resume");
   assert.equal(g.sent.length, 0, "nothing is sent until the delivery is settled");
   assert.match((await g.view()).detail, /전달 여부/);
+  // The user's explicit retry sends it once the conversation shows it never arrived.
+  assert.equal((await g.view()).deliveryUnconfirmed, true);
+  await g.engine.control(g.id, "resend");
+  assert.equal(g.sent.length, 1, "the undelivered instruction goes out on the user's retry");
+  assert.equal((await stored(g)).pending.stage, "sent");
+  assert.equal((await g.view()).deliveryUnconfirmed, false);
+  await assert.rejects(g.engine.control(g.id, "resend"), /미확인 전달이 없습니다/);
 });
 
 test("releasing a parked instruction clears the question it was parked for", async (t) => {
@@ -5915,4 +5922,93 @@ test("managed already-included recheck marks PUSH and pins without another execu
   assert.equal(pins, 1);
   assert.equal(f.runner.executions(), 0);
   assert.match(f.renamed.at(-1).title, /^🔵 .*\[PUSH\]/);
+});
+
+test("a state file that fails to load is read again once it is repaired", async (t) => {
+  const f = await fixture(t);
+  const good = await readFile(f.file, "utf8");
+  await writeFile(f.file, "{ broken");
+  const restarted = new WorkflowEngine(f.file, f.port);
+  t.after(() => restarted.close());
+  await assert.rejects(restarted.startSettings(f.dir ?? path.dirname(f.file), "claude"));
+  await writeFile(f.file, good);
+  const settings = await restarted.startSettings(path.dirname(f.file), "claude");
+  assert.equal(typeof settings.maxCycles, "number");
+  assert.equal((await restarted.list()).workflows.length, 1);
+});
+
+test("a single failed daemon read in a tick is retried; a persistent one stops the flow", async (t) => {
+  const f = await fixture(t);
+  await f.finish("planner", "p1", "plan");
+  assert.equal((await f.view()).status, "active");
+  const inspect = f.port.inspect;
+  f.port.inspect = async () => {
+    throw new Error("daemon timeout");
+  };
+  await f.engine.tick();
+  await f.engine.tick();
+  assert.equal((await f.view()).status, "active", "two transient failures are retried");
+  f.port.inspect = inspect;
+  await f.engine.tick();
+  f.port.inspect = async () => {
+    throw new Error("daemon timeout");
+  };
+  await f.engine.tick();
+  await f.engine.tick();
+  assert.equal((await f.view()).status, "active", "a success resets the count");
+  await f.engine.tick();
+  assert.equal((await f.view()).status, "error");
+  assert.match((await f.view()).detail, /daemon timeout/);
+  f.port.inspect = inspect;
+});
+
+test("a general switch stuck on an unreadable executor can be finished by asking again", async (t) => {
+  const f = await fixture(t);
+  await f.finish("planner", "p1", "plan");
+  const executor = f.created[0].id;
+  await f.engine.control(f.id, "general");
+  assert.equal((await stored(f)).generalTransition, true);
+  const agent = f.agents.get(executor);
+  agent.status = "idle";
+  agent.archived = true;
+  await f.engine.tick();
+  let w = await stored(f);
+  assert.equal(w.status, "needs_input");
+  assert.equal(w.generalTransition, true);
+  assert.equal((await f.view()).generalTransition, true);
+  await f.engine.control(f.id, "general");
+  w = await stored(f);
+  assert.equal(w.mode, "general");
+  assert.equal(w.generalTransition, false);
+  assert.equal(JSON.parse(w.generalHandoff).resultUnconfirmed, true);
+});
+
+test("more push targets than the state can hold are refused, keeping the file loadable", async (t) => {
+  const f = await fixture(t, undefined, "general", false, "claude", verifiedPushProbe);
+  await f.engine.ended("planner", "1", "제목: 많은 푸시\n작업상태: 진행", null);
+  const pushes = Array.from({ length: 9 }, (_, index) => ({
+    callId: `push-${index}`,
+    cwd: "/repo",
+    remote: "origin",
+    branch: `branch-${index}`,
+    commit: "a".repeat(40),
+  }));
+  await f.engine.ended(
+    "planner",
+    "2",
+    "푸시함\n작업상태: 푸시",
+    null,
+    "",
+    false,
+    "",
+    false,
+    undefined,
+    { report: "푸시함\n작업상태: 푸시", changed: false, pushes },
+  );
+  const view = await f.view();
+  assert.notEqual(view.progress, "pushed");
+  assert.ok((await stored(f)).pushTargets.length <= 8);
+  const restarted = new WorkflowEngine(f.file, f.port);
+  t.after(() => restarted.close());
+  assert.equal((await restarted.list()).workflows.length, 1);
 });

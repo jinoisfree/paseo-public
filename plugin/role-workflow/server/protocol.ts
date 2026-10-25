@@ -1,4 +1,5 @@
 import type { WorkflowProvider } from "../shared/assignment";
+import { stripFences } from "../shared/fences";
 export { decisionSchema, parseDecision, DecisionError, type Decision } from "../shared/decision";
 
 export function contextRatio(usage?: {
@@ -183,7 +184,7 @@ export function titlePrompt(): string {
 </paseo-title-v1>`;
 }
 export function parseTitle(text: string): string | null {
-  const prose = text
+  const prose = stripFences(text)
     .replace(/<paseo-workflow>[\s\S]*?<\/paseo-workflow>/g, "")
     .replace(/<paseo-workflow>[\s\S]*$/, "");
   const last = [...prose.matchAll(/^제목:[ \t]*(.*)$/gm)].at(-1)?.[1];
@@ -237,8 +238,7 @@ export function progressPrompt(): string {
 </paseo-progress-v1>`;
 }
 export function parseProgress(text: string): Progress | null {
-  const prose = text
-    .replace(/```[^]*?(?:```|$)|~~~[^]*?(?:~~~|$)/g, "")
+  const prose = stripFences(text)
     .replace(/<paseo-workflow>[\s\S]*?<\/paseo-workflow>/g, "")
     .replace(/<paseo-workflow>[\s\S]*$/, "");
   const last = [...prose.matchAll(/^작업상태:[ \t]*(계획|진행|완료|푸시)[ \t]*$/gm)].at(-1)?.[1];

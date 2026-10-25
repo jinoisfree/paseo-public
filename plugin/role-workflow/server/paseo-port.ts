@@ -496,12 +496,17 @@ export function createPort(
       const model = await resolveModel(api, w.cwd, member.config);
       await validateMode(api, base, w.cwd, member.config);
       member.config = { ...member.config, provider: `${base}/${model}` };
-      const title = decorateTitle(base, role, w.title, marker, {
-        projectName: await readProjectName(api, w.projectId, w.cwd),
-        number: w.number,
-        progress: w.progress,
-        generation: member.generation,
-      }).slice(0, 120);
+      // Count code points, so an emoji at the limit is not split into a lone surrogate.
+      const title = Array.from(
+        decorateTitle(base, role, w.title, marker, {
+          projectName: await readProjectName(api, w.projectId, w.cwd),
+          number: w.number,
+          progress: w.progress,
+          generation: member.generation,
+        }),
+      )
+        .slice(0, 120)
+        .join("");
       // The executor opens as a tab beside its planner, so the pair is one row in every
       // client's sidebar. A workspace of its own is only for a conversation without one.
       const beside = role === "execute" ? (w.plan?.workspaceId ?? null) : null;

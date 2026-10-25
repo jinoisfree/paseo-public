@@ -443,6 +443,7 @@ export class WorkflowEngine {
   readonly store: JsonStore<Database>;
   private database: Database | null = null;
   private loading: Promise<Database> | null = null;
+  private readonly tickFailures = new Map<string, number>();
   private tail: Promise<unknown> = Promise.resolve();
   private stopped = false;
   private cleanupChecked = false;
@@ -488,7 +489,15 @@ export class WorkflowEngine {
     );
   }
   private async db(): Promise<Database> {
-    return (this.database ??= await (this.loading ??= this.store.read().then(migrate)));
+    // A failed load (transient I/O, a bad file being repaired) is retried on the next call.
+    this.loading ??= this.store
+      .read()
+      .then(migrate)
+      .catch((error: unknown) => {
+        this.loading = null;
+        throw error;
+      });
+    return (this.database ??= await this.loading);
   }
   private handoffPath(w: Workflow) {
     return path.join(path.dirname(this.store.file), "handoffs", `${w.id}.json`);
@@ -496,9 +505,11 @@ export class WorkflowEngine {
   private async save() {
     const db = await this.db();
     const events: NotificationEvent[] = [];
+    const marked: [Workflow, Workflow["notifiedStatus"]][] = [];
     for (const w of db.workflows) {
       if (w.notifiedStatus === w.status) continue;
       const previous = w.notifiedStatus;
+      marked.push([w, previous]);
       w.notifiedStatus = w.status;
       let kind: NotificationEvent["kind"] | null = null;
       if (
@@ -521,7 +532,13 @@ export class WorkflowEngine {
     }
     const serialized = JSON.stringify(db);
     if (serialized !== this.savedDatabase) {
-      await this.store.write(db);
+      try {
+        await this.store.write(db);
+      } catch (error) {
+        // Unsent notifications stay pending for the next successful save.
+        for (const [w, previous] of marked) w.notifiedStatus = previous;
+        throw error;
+      }
       this.savedDatabase = serialized;
     }
     for (const event of events) this.dispatch(event);
@@ -776,6 +793,13 @@ export class WorkflowEngine {
     const rows = await this.observedPushes(w, evidence.pushes, reported ? w.pushTargets : []);
     const targets = rows.map((row) => row.target);
     if (!targets.length) return;
+    // The stored state holds at most eight targets; more would make the file unreadable.
+    if (targets.length > 8) {
+      this.invalidatePush(w);
+      w.artifactNotice =
+        "한 번에 확인할 수 있는 푸시 대상(8개)을 넘었습니다. 푸시 완료로 표시하지 않습니다.";
+      return;
+    }
     const key = pushReviewKey(targets);
     // Metadata is a claim; only matching successful push commands in this flow establish a receipt.
     if (reported && key !== pushReviewKey(w.pushTargets)) {
@@ -943,6 +967,8 @@ export class WorkflowEngine {
     return result;
   }
   private async applyManagedPush(w: Workflow, record: ManagedPush) {
+    // After a reload the new engine reads the durable record; a stale copy must not save over it.
+    if (this.stopped) return;
     if (
       record.workflowId !== w.id ||
       record.epoch !== w.pushEpoch ||
@@ -1066,6 +1092,7 @@ export class WorkflowEngine {
         artifactNotice: w.artifactNotice,
         conflict: w.conflict,
         generalTransition: w.generalTransition,
+        deliveryUnconfirmed: w.pending?.stage === "sending" && w.status !== "active",
         updatedAt: w.updatedAt,
         progress: w.progress,
         planAgentId: w.plan?.id ?? null,
@@ -1344,6 +1371,8 @@ export class WorkflowEngine {
       if (w.inbox && !w.transitionTurns.some((entry) => entry.key === w.inbox!.key))
         w.transitionTurns.push(w.inbox);
       w.transitionTurns.push(turn);
+      // Only the latest turns matter for the handoff; an endless wait must not grow the file.
+      if (w.transitionTurns.length > 20) w.transitionTurns.splice(0, w.transitionTurns.length - 20);
       this.seen(w, turn.key);
       await this.returnToGeneral(w);
       return true;
@@ -2389,7 +2418,7 @@ export class WorkflowEngine {
     w.repairs = 0;
     w.asker = null;
   }
-  control(id: string, action: "pause" | "resume" | "general", message = "") {
+  control(id: string, action: "pause" | "resume" | "general" | "resend", message = "") {
     return this.serial(async () => {
       const w = (await this.db()).workflows.find((candidate) => candidate.id === id);
       if (!w) throw new Error("자동 작업을 찾을 수 없습니다.");
@@ -2402,12 +2431,19 @@ export class WorkflowEngine {
         throw new Error("일반개발 전환을 기다리고 있습니다. 현재 응답이 끝나면 이어집니다.");
       if (w.status === "completed")
         throw new Error("완료된 작업입니다. 계획 대화에 새 지시를 보내면 다시 시작합니다.");
-      if (action === "pause") await this.pause(w);
+      if (action === "resend") await this.resend(w);
+      else if (action === "pause") await this.pause(w);
       else await this.resume(w, message.trim());
       return { ok: true as const, status: w.status, detail: w.detail };
     });
   }
   private async returnToGeneral(w: Workflow) {
+    // Asking again while the transition waits on an unreadable conversation finishes it
+    // without that confirmation; the handoff records that the result was not confirmed.
+    if (w.generalTransition && w.status === "needs_input") {
+      await this.finishGeneralTransition(w, true);
+      return;
+    }
     if (w.execute) {
       w.generalTransition = true;
       w.status = "paused";
@@ -2428,8 +2464,9 @@ export class WorkflowEngine {
     await this.save();
     await this.renameWorkspaces(w, (await this.settings()).titleMarker);
   }
-  private transitionRecord(w: Workflow) {
+  private transitionRecord(w: Workflow, unconfirmed = false) {
     return JSON.stringify({
+      ...(unconfirmed ? { resultUnconfirmed: true } : {}),
       goal: w.goal,
       lastPlan: w.lastPlan,
       lastResult: w.lastResult,
@@ -2448,28 +2485,33 @@ export class WorkflowEngine {
       verification: w.verification,
     });
   }
-  private async finishGeneralTransition(w: Workflow) {
-    if (!w.generalTransition) return;
+  /** Whether every conversation has settled; a forced switch skips an unreadable executor. */
+  private async transitionSettled(w: Workflow, force: boolean) {
     for (const member of [w.plan, w.execute]) {
       if (!member?.workspaceId) continue;
-      if (this.compacting.has(member.id)) return;
+      if (this.compacting.has(member.id)) return false;
       const snapshot = await this.port.inspect(member.id);
       if (
         snapshot?.permission ||
         snapshot?.status === "running" ||
         snapshot?.status === "initializing"
       )
-        return;
+        return false;
       if (!snapshot || snapshot.archived) {
+        if (force && member !== w.plan) continue;
         w.status = "needs_input";
         this.touch(w, "전환할 대화를 확인할 수 없습니다. 기존 대화의 보관 상태를 확인하세요.");
         await this.save();
-        return;
+        return false;
       }
     }
+    return true;
+  }
+  private async finishGeneralTransition(w: Workflow, force = false) {
+    if (!w.generalTransition || !(await this.transitionSettled(w, force))) return;
     if (!w.plan) return;
-    if (!(await this.captureTransitionResult(w))) return;
-    w.generalHandoff = this.transitionRecord(w);
+    if (!(await this.captureTransitionResult(w)) && !force) return;
+    w.generalHandoff = this.transitionRecord(w, force);
     // An idle provider after restart may have no completion event for an old maintenance
     // marker. Preserve it as unverified in the handoff, without claiming a compaction.
     w.plan.compaction = null;
@@ -2892,35 +2934,58 @@ export class WorkflowEngine {
           if (w.progress === "pushed" || w.managedPush || w.pushUnverified)
             await this.renameWorkspaces(w, (await this.settings()).titleMarker);
       }
+      // One workflow's failed read must not skip the others or the final save.
+      for (const w of (await this.db()).workflows)
+        await this.syncWorkflow(w).catch((error) =>
+          console.error(`role-workflow: #${w.number} sync failed; will retry:`, error),
+        );
+      await this.checkArchives().catch((error) =>
+        console.error("role-workflow: archive check failed; will retry:", error),
+      );
       for (const w of (await this.db()).workflows) {
-        await this.syncStartPin(w);
-        await this.syncManagedPush(w);
-        if (this.pendingTitles.has(w.id))
-          await this.renameWorkspaces(w, (await this.settings()).titleMarker);
-        if (await this.syncPushReview(w))
-          await this.renameWorkspaces(w, (await this.settings()).titleMarker);
-      }
-      await this.checkArchives();
-      for (const w of (await this.db()).workflows) {
-        await this.retryPush(w);
-        if (w.generalTransition) {
-          await this.finishGeneralTransition(w);
-          continue;
-        }
-        if (w.mode === "general") await this.deliverGeneral(w);
-        await this.retryQuota(w);
-        if (w.mode !== "federated" || w.status !== "active") continue;
-        try {
-          if ((await this.observe(w)) === false) continue;
-          await this.recover(w);
-          await this.advance(w);
-        } catch (error) {
-          w.status = "error";
-          this.touch(w, String(error));
-        }
+        const ready = await this.tidyWorkflow(w).catch((error) => {
+          console.error(`role-workflow: #${w.number} housekeeping failed; will retry:`, error);
+          return false;
+        });
+        if (ready) await this.stepWorkflow(w);
       }
       await this.save();
     });
+  }
+  private async syncWorkflow(w: Workflow) {
+    await this.syncStartPin(w);
+    await this.syncManagedPush(w);
+    if (this.pendingTitles.has(w.id))
+      await this.renameWorkspaces(w, (await this.settings()).titleMarker);
+    if (await this.syncPushReview(w))
+      await this.renameWorkspaces(w, (await this.settings()).titleMarker);
+  }
+  /** Retries and mode transitions; true when the federated flow may take its next step. */
+  private async tidyWorkflow(w: Workflow) {
+    await this.retryPush(w);
+    if (w.generalTransition) {
+      await this.finishGeneralTransition(w);
+      return false;
+    }
+    if (w.mode === "general") await this.deliverGeneral(w);
+    await this.retryQuota(w);
+    return w.mode === "federated" && w.status === "active";
+  }
+  private async stepWorkflow(w: Workflow) {
+    try {
+      if ((await this.observe(w)) === false) return;
+      await this.recover(w);
+      await this.advance(w);
+      this.tickFailures.delete(w.id);
+    } catch (error) {
+      // A single failed daemon read is retried; a failure that persists stops the flow.
+      const failures = (this.tickFailures.get(w.id) ?? 0) + 1;
+      this.tickFailures.set(w.id, failures);
+      if (failures < 3) return;
+      this.tickFailures.delete(w.id);
+      w.status = "error";
+      this.touch(w, String(error));
+    }
   }
   private async observe(w: Workflow) {
     this.asking.delete(w.id);
@@ -2956,6 +3021,16 @@ export class WorkflowEngine {
         "전달한 지시의 응답이 이미 끝나 다음 단계가 정해지지 않았습니다. 대화를 확인하고 재개하세요.",
       );
     } else if (turn.history.text) {
+      // The turn-ended event for this turn will now find it taken and skip its evidence,
+      // so push receipts and reported artifacts are recorded here, as in a transition.
+      if (turn.failed === null)
+        await this.captureArtifacts(
+          w,
+          turn.history.text,
+          turn.history.evidence,
+          turn.agentId,
+          turn.history.key,
+        );
       w.inbox = {
         agentId: turn.agentId,
         key: turn.history.key,
@@ -3176,6 +3251,27 @@ export class WorkflowEngine {
     );
     await this.save();
   }
+  /**
+   * The user's explicit retry after a failed send. Only a quiet conversation whose history
+   * lacks the message is sent again, under the same message ID; a delivered one just resumes.
+   */
+  private async resend(w: Workflow) {
+    const pending = w.pending;
+    if (!pending || pending.stage !== "sending" || w.status === "active")
+      throw new Error("다시 보낼 미확인 전달이 없습니다.");
+    const member = w[pending.role];
+    if (!member) throw new Error("다음 담당 대화가 없습니다.");
+    const snapshot = await this.port.inspect(member.id);
+    if (!snapshot || snapshot.archived) throw new Error("다음 담당 대화를 사용할 수 없습니다.");
+    if (!this.receptive(snapshot))
+      throw new Error("담당 대화가 아직 응답 중입니다. 응답이 끝난 뒤 다시 확인하세요.");
+    const history = await this.port.history(member.id, pending.id);
+    if (!history.messageIds.includes(pending.id)) {
+      pending.stage = "queued";
+      w.turns = Math.max(0, w.turns - 1);
+    }
+    await this.resume(w, "");
+  }
   /** A send that may or may not have arrived is settled from the conversation, never resent. */
   private async confirmDelivery(pending: Pending, member: Member) {
     const history = await this.port.history(member.id, pending.id);
@@ -3351,6 +3447,10 @@ export class WorkflowEngine {
       w.memories.push({ sequence: ++w.memorySequence, text });
       if (w.memories.length > 50) w.memories.shift();
     }
+    // Every full context repeats these; keep the newest 100 so a long flow stays bounded.
+    const remembered = Object.keys(w.constraints).filter((key) => key.startsWith("remember:"));
+    for (const key of remembered.slice(0, Math.max(0, remembered.length - 100)))
+      delete w.constraints[key];
   }
   private assignmentError(w: Workflow, role: Role, d: Decision): string | null {
     if (

@@ -4,6 +4,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import type { PushTarget } from "../shared/artifacts";
 import { resolvedFolder } from "./workspaces";
+import { gitEnvironment } from "./git-environment";
 
 export interface Baseline {
   head: string;
@@ -31,12 +32,13 @@ export interface RepoProbe {
 
 const execute = promisify(execFile);
 async function git(cwd: string, args: string[]): Promise<string> {
-  const { stdout } = await execute("git", args, {
+  // An agent-written core.fsmonitor would otherwise run as the daemon on every status probe.
+  const { stdout } = await execute("git", ["-c", "core.fsmonitor=false", ...args], {
     cwd,
     timeout: 5000,
     maxBuffer: 1024 * 1024,
     // Agents run git in the same folder; a status refresh must not take the index lock.
-    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0" },
+    env: gitEnvironment(),
   });
   return stdout;
 }
@@ -93,13 +95,21 @@ export function createRepoProbe(run: typeof git = git): RepoProbe {
         : `refs/heads/${target.branch}`;
       await run(target.repository, ["check-ref-format", ref]);
       await run(target.repository, ["cat-file", "-e", `${target.commit}^{commit}`]);
-      const advertised = (
-        await run(target.repository, ["ls-remote", "--exit-code", "--", target.remote, ref])
+      // A push goes to the remote's push URL, which can differ from the fetch URL (a fork).
+      const urls = (
+        await run(target.repository, ["remote", "get-url", "--push", "--all", target.remote])
       )
-        .trim()
-        .split(/\s+/)[0];
+        .split(/\r?\n/)
+        .filter(Boolean);
+      if (urls.length !== 1) return null;
+      // ls-remote matches patterns as ref-name suffixes; only the exact branch counts.
+      const rows = (await run(target.repository, ["ls-remote", "--exit-code", "--", urls[0], ref]))
+        .split(/\r?\n/)
+        .map((line) => line.split(/\s+/))
+        .filter((row) => row[1] === ref);
+      if (rows.length !== 1 || !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(rows[0][0])) return null;
+      const advertised = rows[0][0];
       if (advertised === target.commit) return true;
-      if (!advertised) return null;
       await run(target.repository, ["cat-file", "-e", `${advertised}^{commit}`]);
       try {
         await run(target.repository, ["merge-base", "--is-ancestor", target.commit, advertised]);

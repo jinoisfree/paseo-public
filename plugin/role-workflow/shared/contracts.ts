@@ -120,6 +120,7 @@ export const workflowViewSchema = z.object({
   artifactNotice: z.string().default(""),
   conflict: z.string().default(""),
   generalTransition: z.boolean().default(false),
+  deliveryUnconfirmed: z.boolean().default(false),
 });
 export const status = defineRpc({
   name: "workflow.status",
@@ -152,7 +153,7 @@ export const control = defineRpc({
   name: "workflow.control",
   input: z.object({
     id: z.string(),
-    action: z.enum(["pause", "resume", "general"]),
+    action: z.enum(["pause", "resume", "general", "resend"]),
     message: z.string().max(30000).default(""),
   }),
   output: z.object({

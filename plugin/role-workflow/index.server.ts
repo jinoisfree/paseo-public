@@ -93,7 +93,12 @@ export default function contribute(server: PluginServerContext) {
       const provider = request.config.provider;
       if (provider !== "claude" && provider !== "codex")
         return { config: request.config, env: request.env };
-      const settings = await engine.startSettings(request.config.cwd, provider);
+      // A broken workflow state must not stop every new conversation in Paseo.
+      const settings = await engine.startSettings(request.config.cwd, provider).catch((error) => {
+        report(error);
+        return null;
+      });
+      if (!settings) return { config: request.config, env: request.env };
       const env = request.env ?? {};
       const { automated, role, mode, gated } = creation(settings, env);
       let trailing = "";
@@ -161,6 +166,7 @@ export default function contribute(server: PluginServerContext) {
       if (seed && request.reason === "create") {
         createdSeeds.set(request.agentId, seed);
         seeds.delete(token);
+        if (createdSeeds.size > 200) createdSeeds.delete(createdSeeds.keys().next().value!);
       }
       return request;
     }),
@@ -169,9 +175,16 @@ export default function contribute(server: PluginServerContext) {
       const seed = createdSeeds.get(agent.id);
       createdSeeds.delete(agent.id);
       if (!seed || agent.parentAgentId || !agent.workspaceId) return;
-      const snapshot = await port.inspect(agent.id);
-      if (snapshot)
+      // The workspace list can lag the creation event, and one failed read must not leave
+      // the conversation outside its workflow for good.
+      for (let attempt = 0; attempt < 5; attempt++) {
+        if (attempt) await new Promise((resolve) => setTimeout(resolve, 1000));
+        const snapshot = await port.inspect(agent.id).catch(() => null);
+        if (!snapshot) continue;
         await engine.enroll(snapshot, seed.config, seed.env, seed.mode, seed.titled).catch(report);
+        return;
+      }
+      report(new Error(`대화 ${agent.id}를 작업에 연결하지 못했습니다. 대화 상태를 확인하세요.`));
     }),
     server.on("agent.turn_ended", async (event, context) => {
       attach(context.paseo);
@@ -344,8 +357,18 @@ export default function contribute(server: PluginServerContext) {
       workspaceId: member?.workspaceId ?? "",
     });
   });
+  // A slow daemon must not queue a tick every 3s ahead of lifecycle events.
+  let ticking = false;
   const timer = setInterval(() => {
-    if (api) void engine.tick().catch(report);
+    if (api && !ticking) {
+      ticking = true;
+      void engine
+        .tick()
+        .catch(report)
+        .finally(() => {
+          ticking = false;
+        });
+    }
     if (api) void engine.auditPushes().catch(report);
     syncProjectTitles();
   }, 3000);
