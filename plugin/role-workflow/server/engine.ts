@@ -176,6 +176,9 @@ const workflowSchema = z.object({
   conflict: z.string().default(""),
   generalTransition: z.boolean().default(false),
   transitionTurns: z.array(inboxSchema).default([]),
+  // The plan held at the cycle limit, and a resume note that goes out with it.
+  limitPlan: z.string().default(""),
+  resumeNote: z.string().default(""),
   generalHandoff: z.string().default(""),
   generalDelivery: z
     .object({
@@ -1182,6 +1185,8 @@ export class WorkflowEngine {
         conflict: "",
         generalTransition: false,
         transitionTurns: [],
+        limitPlan: "",
+        resumeNote: "",
         generalHandoff: "",
         generalDelivery: null,
         updatedAt: new Date().toISOString(),
@@ -2417,6 +2422,8 @@ export class WorkflowEngine {
     w.held = null;
     w.repairs = 0;
     w.asker = null;
+    w.limitPlan = "";
+    w.resumeNote = "";
   }
   control(id: string, action: "pause" | "resume" | "general" | "resend", message = "") {
     return this.serial(async () => {
@@ -2691,6 +2698,11 @@ export class WorkflowEngine {
     // An instruction that has not gone out yet carries the note with it.
     if (w.pending?.stage === "queued") {
       w.pending.prompt += `\n\n${note}`;
+      return;
+    }
+    // The plan held at the cycle limit is still dispatched; the note travels with it.
+    if (w.inbox && w.limitPlan && w.inbox.key === w.limitPlan) {
+      w.resumeNote = w.resumeNote ? `${w.resumeNote}\n\n${note}` : note;
       return;
     }
     if (w.inbox) {
@@ -3722,6 +3734,7 @@ export class WorkflowEngine {
       // Keep the plan as inbox so raising the limit and resuming dispatches it.
       w.processed.pop();
       w.inbox = inbox;
+      w.limitPlan = inbox.key;
       w.status = "paused";
       this.touch(w, "계획·실행 반복 한도에 도달했습니다.");
     } else {
@@ -3757,7 +3770,10 @@ export class WorkflowEngine {
         };
         await this.rememberProject(w, true);
       }
-      this.queue(w, "execute", d.next, "execute", true);
+      const note = w.resumeNote;
+      w.limitPlan = "";
+      w.resumeNote = "";
+      this.queue(w, "execute", note ? `${d.next}\n\n${note}` : d.next, "execute", true);
     }
   }
 }

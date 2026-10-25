@@ -219,6 +219,26 @@ class Fixture(unittest.TestCase):
         self.assertEqual(self.quiet_run(machine), 0)
         self.assertEqual(self.events, [])
 
+    def test_same_version_reinstall_is_applied_again(self):
+        self.assertEqual(self.quiet_run(self.machine()), 0)
+        self.events.clear()
+        self.assertEqual(self.quiet_run(self.machine()), 0)
+        self.assertEqual(self.events, [], 'the installed snapshot still matches')
+        # An official reinstall of the same version brings back unpatched files.
+        (self.app/'Contents/MacOS/Paseo').write_bytes(b'reinstalled executable')
+        shutil.rmtree(self.root/'backups')
+        self.assertEqual(self.quiet_run(self.machine()), 0)
+        self.assertTrue(any(event[0] == 'command' and '--apply' in event[1] for event in self.events))
+
+    def test_patch_selection_never_uses_a_newer_versions_patch(self):
+        (self.root/'patches/sidebar-pushed-fold-0.13.0.patch').write_text('newer\n')
+        machine = self.machine()
+        machine.log = self.root/'logs'; machine.log.mkdir()
+        chosen = machine.apply_patch(self.root/'source', '0.12.0')
+        self.assertEqual(chosen.name, 'sidebar-pushed-fold-0.11.4.patch')
+        with self.assertRaisesRegex(ValueError, 'No pushed-fold patch'):
+            machine.apply_patch(self.root/'source', '0.10.0')
+
     def test_conflict_no_install_notifies_and_blocks_automatic_retry(self):
         before = auto.active_bundle(self.app/'Contents/Resources/app-dist')
         self.assertEqual(self.quiet_run(self.machine(conflict=True)), 1)

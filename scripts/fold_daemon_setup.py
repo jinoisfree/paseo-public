@@ -95,9 +95,22 @@ def deploy(spec, backup, action, *, dry=False, system_dir=None):
                     owned_directory(Path(spec[key]).parent, owner.pw_uid, group)
                 if command(['/bin/launchctl', 'print', 'system/'+label], check=False).returncode == 0:
                     command(['/bin/launchctl', 'bootout', 'system/'+label])
-            command(['/usr/bin/install', '-o', 'root', '-g', 'wheel', '-m', '644', source, target], dry=dry)
-            command(['/bin/launchctl', 'bootstrap', 'system', target], dry=dry)
-            status = command(['/bin/launchctl', 'print', 'system/'+label], dry=dry)
+            try:
+                command(['/usr/bin/install', '-o', 'root', '-g', 'wheel', '-m', '644', source, target], dry=dry)
+                command(['/bin/launchctl', 'bootstrap', 'system', target], dry=dry)
+                status = command(['/bin/launchctl', 'print', 'system/'+label], dry=dry)
+            except subprocess.CalledProcessError:
+                # The LaunchAgent was already removed; without this, no watcher would remain.
+                if not dry:
+                    target.unlink(missing_ok=True)
+                    if saved.exists():
+                        owned_directory(agent.parent, owner.pw_uid, group)
+                        shutil.copy2(saved, agent)
+                        os.chown(agent, owner.pw_uid, group)
+                        if command(['/bin/launchctl', 'print', gui], check=False).returncode == 0:
+                            command(['/bin/launchctl', 'bootstrap', gui, agent], check=False)
+                    print('System registration failed; the previous LaunchAgent was restored.')
+                raise
         else:
             if dry or command(['/bin/launchctl', 'print', 'system/'+label], check=False).returncode == 0:
                 command(['/bin/launchctl', 'bootout', 'system/'+label], dry=dry)

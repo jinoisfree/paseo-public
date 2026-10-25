@@ -239,14 +239,17 @@ class Automation:
         self.record(officialSource=url, archive=str(archive), archiveSha256=digest(archive), source=str(directory))
         return directory
 
-    def apply_patch(self, source):
+    def apply_patch(self, source, version):
         def key(file):
             version = file.stem.removeprefix('sidebar-pushed-fold-')
             return tuple(map(int, version.split('.')))
+        # A newer version's patch never applies to an older retry (e.g. --force-version 0.11.4).
+        target = tuple(map(int, version.split('.')))
         patches = [file for file in (self.root/'patches').glob('sidebar-pushed-fold-*.patch')
-                   if re.fullmatch(r'sidebar-pushed-fold-\d+\.\d+\.\d+\.patch', file.name)]
+                   if re.fullmatch(r'sidebar-pushed-fold-\d+\.\d+\.\d+\.patch', file.name)
+                   and key(file) <= target]
         if not patches:
-            raise ValueError('No pushed-fold patch found')
+            raise ValueError('No pushed-fold patch found for this version')
         patch = max(patches, key=key)
         self.command(['git', 'apply', '--check', patch], source)
         self.command(['git', 'apply', patch], source)
@@ -302,7 +305,13 @@ class Automation:
                 self.save()
                 self.record(result='recorded existing applied renderer', version=version, bundle=bundle)
                 return 0
-            if not self.args.force_version and not self.args.dry_run and (
+            # A same-version reinstall replaces the patched app; its files no longer match the
+            # snapshot taken after our installation, so that version is applied again.
+            applied = self.state['attempts'].get(version, {})
+            reinstalled = applied.get('status') == 'applied' and applied.get('snapshot') not in (None, before)
+            if reinstalled:
+                self.record(result='same version reinstalled; reapplying', version=version)
+            if not self.args.force_version and not self.args.dry_run and not reinstalled and (
                 version == self.state.get('appliedVersion') or version in self.state['attempts']
             ):
                 previous = self.state['attempts'].get(version, {})
@@ -331,7 +340,7 @@ class Automation:
             try:
                 self.command(['/usr/bin/codesign', '--verify', '--deep', '--strict', self.args.app])
                 source = self.prepare_source(version)
-                patch = self.apply_patch(source)
+                patch = self.apply_patch(source, version)
                 dist = self.build(source)
                 bundle = active_bundle(dist)
                 entry.update(source=str(source), patch=str(patch), bundle=bundle)

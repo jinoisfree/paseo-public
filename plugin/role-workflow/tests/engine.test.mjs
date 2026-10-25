@@ -310,6 +310,25 @@ test("cycle limits preserve the pending plan until the limit is raised", async (
   assert.equal(f.sent.length, 3);
 });
 
+test("resuming with a note after the cycle limit still dispatches the held plan", async (t) => {
+  const f = await fixture(t);
+  await f.engine.configure({ ...(await f.engine.settings()), maxCycles: 1 });
+  await f.finish("planner", "p1", "plan");
+  await f.finish(f.created[0].id, "e1", "result");
+  await f.finish("planner", "p2", "plan");
+  assert.equal((await f.view()).status, "paused");
+  assert.equal(f.sent.length, 2);
+  await f.engine.control(f.id, "resume", "로그도 함께 확인하세요");
+  assert.equal(f.sent.length, 3);
+  const last = f.sent.at(-1);
+  assert.equal(last.id, f.created[0].id, "the held plan goes to the executor");
+  assert.match(last.prompt, /next task/);
+  assert.match(last.prompt, /로그도 함께 확인하세요/);
+  const w = await stored(f);
+  assert.equal(w.limitPlan, "");
+  assert.equal(w.resumeNote, "");
+});
+
 test("a direct reply after needs_input resumes and dispatches the new plan once", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "question", "input");

@@ -55,6 +55,19 @@ class DaemonSetupTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             return setup.deploy(self.job, self.backup, action, dry=dry, system_dir=self.system)
 
+    def test_failed_system_bootstrap_restores_the_launch_agent(self):
+        original = self.agent.read_bytes()
+        def failing(args, *, dry=False, check=True):
+            if list(map(str, args))[1:3] == ['bootstrap', 'system']:
+                raise subprocess.CalledProcessError(5, args)
+            return self.command(args, dry=dry, check=check)
+        with mock.patch.object(setup, 'command', side_effect=failing), mock.patch.object(setup.os, 'geteuid', return_value=0):
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.deploy('install')
+        self.assertEqual(self.agent.read_bytes(), original)
+        self.assertFalse((self.system/'example.fold.plist').exists())
+        self.assertIn(f'gui/{self.owner.pw_uid}/example.fold', self.loaded)
+
     def test_system_shell_waits_for_volume_and_quotes_paths(self):
         root = Path(__file__).resolve().parents[1]
         source = root/'scripts/com.jino.paseo-fold-reapply.daemon.plist'
