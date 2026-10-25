@@ -2385,6 +2385,40 @@ test("a permission wait and a writer wait do not rewrite each other every tick",
   assert.equal(await readFile(f.file, "utf8"), before);
 });
 
+for (const status of ["idle", "running"]) {
+  test(`resolved question clears stale wait after a note (${status}) without starting work`, async (t) => {
+    const f = await fixture(t);
+    f.agents.get("planner").permission = true;
+    await f.engine.tick();
+    assert.match((await f.view()).detail, /사용자 응답/);
+    f.agents.get("planner").permission = false;
+    f.agents.get("planner").status = status;
+    await f.engine.ended("planner", "explanation", note(), null);
+    await f.engine.tick();
+    const w = await stored(f);
+    assert.equal(w.status, "active");
+    assert.match(w.detail, status === "idle" ? /자동 전달할 지시가 없습니다/ : /응답을 처리/);
+    assert.equal(w.pending, null);
+    assert.equal(f.sent.length, 0);
+    assert.equal(f.created.length, 0);
+    const before = await readFile(f.file, "utf8");
+    await f.engine.tick();
+    assert.equal(await readFile(f.file, "utf8"), before);
+  });
+}
+
+test("resolved question does not replace an explicit input decision", async (t) => {
+  const f = await fixture(t);
+  f.agents.get("planner").permission = true;
+  await f.engine.tick();
+  f.agents.get("planner").permission = false;
+  await f.engine.ended("planner", "approval", decision("input", "배포 승인 필요"), null);
+  await f.engine.tick();
+  assert.equal((await f.view()).status, "needs_input");
+  assert.equal((await f.view()).detail, "배포 승인 필요");
+  assert.equal(f.sent.length, 0);
+});
+
 test("flows stored before the new flags load as waiting questions and unread answers", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "p1", "plan");
@@ -4946,6 +4980,48 @@ test("general overlap warns both conversations without sending or blocking their
   f.agents.get("other").status = "idle";
   await f.engine.ended("other", "finished", "done", null);
   assert.ok((await f.engine.list()).workflows.every((w) => !w.conflict));
+});
+
+test("queued federation resumes exactly once by polling when the other writer's end event is lost", async (t) => {
+  const events = [];
+  const f = await fixture(t, async (event) => events.push(event));
+  await addWriter(f, path.dirname(f.file));
+  await f.finish("planner", "plan", "plan");
+  const pending = (await stored(f)).pending;
+  assert.equal(pending.stage, "queued");
+  assert.match((await f.view()).detail, /응답이 끝나면 자동 전달/);
+  await f.engine.tick();
+  assert.equal(f.sent.length, 0);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(events.filter((event) => event.kind === "waiting").length, 1);
+  assert.match(events.find((event) => event.kind === "waiting").body, /진행 후 #1 .*진행 예정/);
+  await f.engine.close();
+  const restored = new WorkflowEngine(f.file, f.port, async (event) => events.push(event));
+  t.after(() => restored.close());
+  await restored.tick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(events.filter((event) => event.kind === "waiting").length, 1);
+  f.agents.get("other").status = "idle";
+  // No ended() event: periodic observation must release the queued instruction.
+  await restored.tick();
+  assert.equal(f.sent.length, 1);
+  assert.equal(f.sent[0].messageId, pending.id);
+  assert.equal((await restored.list()).workflows[0].conflict, "");
+  await restored.tick();
+  await restored.tick();
+  assert.equal(f.sent.length, 1);
+});
+
+test("writer wait respects disabled stop notifications while still showing the schedule", async (t) => {
+  const events = [];
+  const f = await fixture(t, async (event) => events.push(event));
+  await f.engine.configure({ ...(await f.engine.settings()), notifyStopped: false });
+  await addWriter(f, path.dirname(f.file));
+  await f.finish("planner", "plan", "plan");
+  await f.engine.tick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match((await f.view()).detail, /진행 후 .*진행 예정/);
+  assert.equal(events.filter((event) => event.kind === "waiting").length, 0);
 });
 
 test("a running executor finishes into the general handoff; reload and late results never resend", async (t) => {

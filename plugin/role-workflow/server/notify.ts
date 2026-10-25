@@ -128,7 +128,7 @@ export function createNotifier(options: Options = {}) {
         serverId,
         workspaceId: event.workspaceId,
         agentId: event.agentId,
-        reason: { permission: "permission", stopped: "error", completed: "finished" }[event.kind],
+        reason: { permission: "permission", stopped: "error", completed: "finished", waiting: "permission" }[event.kind],
       };
       for (let i = 0; i < active.length; i += 100) {
         try {

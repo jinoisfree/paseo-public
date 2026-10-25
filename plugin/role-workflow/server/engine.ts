@@ -174,6 +174,8 @@ const workflowSchema = z.object({
   verification: z.array(verificationRecordSchema).max(30).default([]),
   constraints: z.record(z.string(), z.string()).default({}),
   conflict: z.string().default(""),
+  writerWait: z.object({ key: z.string(), text: z.string() }).nullable().default(null),
+  notifiedWriterWait: z.string().default(""),
   generalTransition: z.boolean().default(false),
   transitionTurns: z.array(inboxSchema).default([]),
   // The plan held at the cycle limit, and a resume note that goes out with it.
@@ -312,7 +314,7 @@ export interface WorkflowPort {
 }
 
 export interface NotificationEvent {
-  kind: "permission" | "stopped" | "completed";
+  kind: "permission" | "stopped" | "completed" | "waiting";
   title: string;
   body: string;
   agentId: string;
@@ -505,10 +507,36 @@ export class WorkflowEngine {
   private handoffPath(w: Workflow) {
     return path.join(path.dirname(this.store.file), "handoffs", `${w.id}.json`);
   }
+  private markWriterWaits(db: Database, events: NotificationEvent[]) {
+    const marked: [Workflow, string][] = [];
+    for (const w of db.workflows) {
+      if (
+        w.mode === "federated" &&
+        w.status === "active" &&
+        w.pending?.stage === "queued" &&
+        w.writerWait &&
+        w.writerWait.key !== w.notifiedWriterWait
+      ) {
+        marked.push([w, w.notifiedWriterWait]);
+        w.notifiedWriterWait = w.writerWait.key;
+        const member = w.plan ?? w.execute;
+        if (db.settings.notifyStopped && member)
+          events.push({
+            kind: "waiting",
+            title: `진행 예정 · #${w.number} ${w.title}`,
+            body: w.writerWait.text,
+            agentId: member.id,
+            workspaceId: member.workspaceId ?? "",
+          });
+      }
+    }
+    return marked;
+  }
   private async save() {
     const db = await this.db();
     const events: NotificationEvent[] = [];
     const marked: [Workflow, Workflow["notifiedStatus"]][] = [];
+    const markedWaits = this.markWriterWaits(db, events);
     for (const w of db.workflows) {
       if (w.notifiedStatus === w.status) continue;
       const previous = w.notifiedStatus;
@@ -540,6 +568,9 @@ export class WorkflowEngine {
       } catch (error) {
         // Unsent notifications stay pending for the next successful save.
         for (const [w, previous] of marked) w.notifiedStatus = previous;
+        markedWaits.forEach(([w, previous]) => {
+          w.notifiedWriterWait = previous;
+        });
         throw error;
       }
       this.savedDatabase = serialized;
@@ -1183,6 +1214,8 @@ export class WorkflowEngine {
         verification: [],
         constraints: {},
         conflict: "",
+        writerWait: null,
+        notifiedWriterWait: "",
         generalTransition: false,
         transitionTurns: [],
         limitPlan: "",
@@ -3001,6 +3034,7 @@ export class WorkflowEngine {
   }
   private async observe(w: Workflow) {
     this.asking.delete(w.id);
+    let responding = false;
     for (const member of [w.plan, w.execute]) {
       if (!member?.workspaceId) continue;
       const snapshot = await this.port.inspect(member.id);
@@ -3013,11 +3047,23 @@ export class WorkflowEngine {
         return;
       }
       member.usage = snapshot.usage;
+      responding ||= snapshot.status === "running" || snapshot.status === "initializing";
 
       const waiting = "권한 또는 질문에 대한 사용자 응답을 기다리고 있습니다.";
       if (!snapshot.permission) continue;
       this.asking.add(w.id);
       if (w.detail !== waiting) this.touch(w, waiting);
+    }
+    // Permission text is transient, not a durable workflow decision. A resolved
+    // question (including a note-only turn) must not leave a false wait forever.
+    if (
+      !this.asking.has(w.id) &&
+      w.detail === "권한 또는 질문에 대한 사용자 응답을 기다리고 있습니다."
+    ) {
+      let detail = "자동 전달할 지시가 없습니다. 다음 사용자 요청을 기다립니다.";
+      if (responding) detail = "담당 대화가 응답을 처리하고 있습니다.";
+      else if (w.pending) detail = "다음 담당자에게 전달할 지시를 확인하고 있습니다.";
+      this.touch(w, detail);
     }
   }
   private async recover(w: Workflow) {
@@ -3308,12 +3354,14 @@ export class WorkflowEngine {
     const busy = await this.busyWriter(w);
     if (busy) {
       // Unchanged text must not move updatedAt, or every tick would rewrite the state file.
-      const waiting = `같은 저장소의 다른 작업(#${busy.number} ${busy.title})이 끝나기를 기다립니다.`;
+      const waiting = `같은 저장소의 다른 작업 #${busy.number} ${busy.title} 진행 후 #${w.number} ${w.title} 진행 예정입니다. 해당 대화의 응답이 끝나면 자동 전달합니다.`;
       w.conflict = waiting;
+      w.writerWait = { key: `${pending.id}:${busy.id}`, text: waiting };
       if (w.detail !== waiting && !this.asking.has(w.id)) this.touch(w, waiting);
       return false;
     }
     w.conflict = "";
+    w.writerWait = null;
     // The baseline belongs to the plan; follow-up messages to the executor keep it.
     if (pending.instruction) {
       w.repositoryBaselines = await Promise.all(
