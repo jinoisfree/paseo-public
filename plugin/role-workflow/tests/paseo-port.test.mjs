@@ -449,6 +449,41 @@ test("completion uses only an identical history snapshot and fails closed when i
   assert.equal(calls, 0);
 });
 
+test("an empty turn-end timeline (Paseo 0.13.0) reads the finished turn from history", async () => {
+  const { items } = asyncPushTurn();
+  const saved = readTurn(
+    items,
+    "/repo",
+    items.map(() => "turn-1"),
+  );
+  let calls = 0;
+  const result = await readCompletedTurn([], "/repo", async () => {
+    calls++;
+    return saved;
+  });
+  assert.equal(calls, 1);
+  assert.equal(result.key, saved.key);
+  assert.equal(result.text, saved.text);
+  assert.deepEqual(result.evidence, saved.evidence);
+  assert.equal(result.evidence.pushes.length, 1);
+  assert.equal(result.maintenance, false);
+  assert.equal(result.request, saved.request);
+  const plain = await readCompletedTurn([], "/repo", async () => ({
+    key: "k",
+    text: "작업상태: 완료",
+    messageIds: [],
+    failed: null,
+  }));
+  assert.deepEqual(plain.evidence, { report: "작업상태: 완료", changed: false, pushes: [] });
+  assert.equal(plain.goal, "");
+  await assert.rejects(
+    readCompletedTurn([], "/repo", async () => {
+      throw Error("offline");
+    }),
+    /offline/,
+  );
+});
+
 test("explicit model validated before workspace creation, default remains resolved", async () => {
   const calls = [];
   const api = {

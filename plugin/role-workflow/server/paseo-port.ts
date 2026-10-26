@@ -113,6 +113,19 @@ export async function readCompletedTurn(
   cwd: string | undefined,
   history: () => Promise<History>,
 ): Promise<ReturnType<typeof readTurn>> {
+  // Paseo 0.13.0 ends turns with an empty timeline. Read the finished turn from history,
+  // or every later turn would share the empty turn's key and be dropped as already seen.
+  if (!items.length) {
+    const saved: History & Partial<ReturnType<typeof readTurn>> = await history();
+    return {
+      ...saved,
+      evidence: saved.evidence ?? { report: saved.text, changed: false, pushes: [] },
+      compacted: saved.compacted ?? false,
+      request: saved.request ?? "",
+      goal: saved.goal ?? "",
+      maintenance: saved.maintenance ?? false,
+    };
+  }
   const turn = readTurn(items, cwd);
   const lastUser = items.findLastIndex((item) => item.type === "user_message");
   if (lastUser < 0 || !isAsyncAnswerCandidate(items[lastUser])) return turn;

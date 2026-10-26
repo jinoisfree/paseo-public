@@ -190,8 +190,11 @@ export default function contribute(server: PluginServerContext) {
       attach(context.paseo);
       const turn = await readCompletedTurn(event.timeline, event.agent.cwd, () =>
         port.history(event.agent.id),
-      );
-      if (turn.maintenance) return;
+      ).catch((error: unknown) => {
+        report(error);
+        return null;
+      });
+      if (!turn || turn.maintenance) return;
       let failure: string | null = null;
       if (event.outcome.kind === "failed") failure = event.outcome.error.message;
       if (event.outcome.kind === "canceled") failure = event.outcome.reason;
