@@ -74,6 +74,24 @@ interface ExecutorModel {
   thinkingOptions?: { id: string; label: string; isDefault?: boolean }[];
   defaultThinkingOptionId?: string;
 }
+function executorModelChoices(
+  available: readonly ExecutorModel[],
+  first: ExecutorModel,
+  provider: string,
+): ExecutorModel[] {
+  const ordered = [first, ...available.filter((m) => m !== first)];
+  if (provider !== "claude") return ordered.slice(0, 4);
+  const families = new Set<string>();
+  const distinct = ordered
+    .filter((model) => {
+      const family = /^claude-([a-z]+)/.exec(model.id)?.[1] ?? model.id;
+      if (families.has(family)) return false;
+      families.add(family);
+      return true;
+    })
+    .slice(0, 4);
+  return [...distinct, ...ordered.filter((model) => !distinct.includes(model))].slice(0, 4);
+}
 export function executorModelPrompt(
   models: readonly ExecutorModel[],
   preferred: string,
@@ -87,12 +105,11 @@ export function executorModelPrompt(
     available.find((m) => m.isDefault) ??
     available[0];
   if (!first) return "";
-  const choices = [first, ...available.filter((m) => m !== first)]
-    .slice(0, 4)
+  const listed = executorModelChoices(available, first, provider);
+  const choices = listed
     .map((m) => `${m.label} (${provider}/${m.id})${thinkingChoices(m)}`)
     .join("\n");
   if (bundled) {
-    const listed = [first, ...available.filter((m) => m !== first)].slice(0, 4);
     const options = listed.map((model) =>
       Array.from(new Set((model.thinkingOptions ?? []).map((option) => option.id))),
     );

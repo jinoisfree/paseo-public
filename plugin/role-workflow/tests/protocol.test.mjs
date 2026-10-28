@@ -90,6 +90,76 @@ test("executor model format and prompt choices", async () => {
   assert.ok(!automationPrompt(prompt).includes("Model 4"));
 });
 
+const claudeModels = [
+  ["claude-opus-5-5", "Opus 5.5"],
+  ["claude-opus-5", "Opus 5"],
+  ["claude-fable-5-1", "Fable 5.1"],
+  ["claude-fable-5", "Fable 5"],
+  ["claude-opus-4-8[1m]", "Opus 4.8 1M"],
+  ["claude-opus-4-8", "Opus 4.8"],
+  ["claude-sonnet-5-5", "Sonnet 5.5"],
+  ["claude-sonnet-5", "Sonnet 5"],
+  ["claude-sonnet-5[1m]", "Sonnet 5 1M"],
+  ["claude-opus-4-7[1m]", "Opus 4.7 1M"],
+  ["claude-opus-4-7", "Opus 4.7"],
+  ["claude-opus-4-6[1m]", "Opus 4.6 1M"],
+  ["claude-opus-4-6", "Opus 4.6"],
+  ["claude-sonnet-4-6[1m]", "Sonnet 4.6 1M"],
+  ["claude-sonnet-4-6", "Sonnet 4.6"],
+  ["claude-haiku-4-5", "Haiku 4.5"],
+].map(([id, label], i) => ({ id, label, isDefault: i === 0 }));
+
+test("Claude executor choices include the newest model of each family", async () => {
+  const { executorModelPrompt } = await import("../server/protocol.ts");
+  for (const preferred of ["claude", "claude/claude-opus-5-5"]) {
+    for (const bundled of [false, true]) {
+      const prompt = executorModelPrompt(claudeModels, preferred, true, bundled);
+      assert.deepEqual(
+        [...prompt.matchAll(/\(claude\/([^)]+)\)/g)].map((match) => match[1]),
+        ["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5", "claude-haiku-4-5"],
+      );
+    }
+  }
+});
+
+test("Claude executor choices keep a preferred older model ahead of other families", async () => {
+  const { executorModelPrompt } = await import("../server/protocol.ts");
+  for (const bundled of [false, true]) {
+    const prompt = executorModelPrompt(claudeModels, "claude/claude-sonnet-5", true, bundled);
+    assert.deepEqual(
+      [...prompt.matchAll(/\(claude\/([^)]+)\)/g)].map((match) => match[1]),
+      ["claude-sonnet-5", "claude-opus-5-5", "claude-fable-5-1", "claude-haiku-4-5"],
+    );
+  }
+});
+
+test("Claude executor choices fill spare slots in catalogue order and keep unknown ids distinct", async () => {
+  const { executorModelPrompt } = await import("../server/protocol.ts");
+  const models = [
+    ...claudeModels.slice(0, 2),
+    { id: "hidden", label: "Hidden", isSelectable: false },
+    { id: "custom-a", label: "Custom A" },
+    { id: "custom-b", label: "Custom B" },
+  ];
+  const prompt = executorModelPrompt(models, "claude");
+  assert.deepEqual(
+    [...prompt.matchAll(/\(claude\/([^)]+)\)/g)].map((match) => match[1]),
+    ["claude-opus-5-5", "custom-a", "custom-b", "claude-opus-5"],
+  );
+});
+
+test("bundled Claude thinking choices come from the four listed families", async () => {
+  const { executorModelPrompt } = await import("../server/protocol.ts");
+  const models = claudeModels.map(({ id, label, isDefault }, i) => ({
+    id,
+    label,
+    isDefault,
+    thinkingOptions: [{ id: `effort-${i}`, label: `Effort ${i}` }],
+  }));
+  const prompt = executorModelPrompt(models, "claude", true, true);
+  assert.match(prompt, /추론 선택지는 다음 id를 쓴다: effort-0, effort-2, effort-6, effort-15\./);
+});
+
 test("mode prompt offers two choices and a safe default without duplicate blocks", async () => {
   const { modeSelectPrompt, automationPrompt } = await import("../server/protocol.ts");
   const prompt = modeSelectPrompt();
