@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { usageLimit, usageAvailable } from "../server/quota.ts";
+import { transientFailure, transientDelay } from "../server/transient.ts";
 import { quotaAccount, createPort } from "../server/paseo-port.ts";
 import { mkdtemp, mkdir, writeFile, symlink, unlink, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -25,6 +26,51 @@ test("quota classifier accepts only observed provider messages and parses local 
     assert.equal(usageLimit("claude", error), null);
 });
 const usage = (windows) => ({ providerId: "codex", status: "available", error: null, windows });
+test("transient failures classify capacity, server, transport and app-server errors without quota", () => {
+  for (const failure of [
+    "Selected model is at capacity. Please try a different model.",
+    "OVERLOADED",
+    "API error 529",
+    "HTTP 500",
+    "502 Bad Gateway",
+    "503 Service Unavailable",
+    "504 gateway timeout",
+    "request timeout",
+    "Request timed out",
+    "ECONNRESET",
+    "ECONNREFUSED",
+    "ETIMEDOUT",
+    "EPIPE",
+    "socket hang up",
+    "network error",
+    "fetch failed",
+    "DaemonConnectionError: Transport not connected (status: disconnected)",
+    "disconnected",
+    "Codex app-server exited with code 127 and signal null",
+  ])
+    assert.equal(transientFailure(failure), true, failure);
+  for (const failure of [
+    "",
+    "canceled",
+    "permission denied",
+    "context window limit",
+    "HTTP 401",
+    "HTTP 403",
+    "HTTP 404",
+    "HTTP 429 rate limit",
+    "rate limit: overloaded",
+    "Too many requests: 503",
+    "You've hit your usage limit: timeout",
+    "You’re out of extra usage: network error",
+    "자동 응답 횟수 한도에 도달했습니다.",
+    "전달 여부를 확인할 수 없습니다.",
+  ])
+    assert.equal(transientFailure(failure), false, failure);
+  assert.deepEqual(
+    [0, 1, 2, 3, 4, 5].map(transientDelay),
+    [1, 3, 10, 30, 60, 60].map((n) => n * 60_000),
+  );
+});
 const free = [
   { id: "session", remainingPct: 20 },
   { id: "weekly", usedPct: 30 },

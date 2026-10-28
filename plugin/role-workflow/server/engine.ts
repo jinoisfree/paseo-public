@@ -64,6 +64,7 @@ import {
   quotaCheckDue,
   QUOTA_ACCOUNT_SETTLE_MS,
 } from "./quota";
+import { transientPauseSchema, transientFailure, transientDelay } from "./transient";
 
 const memberSchema = z.object({
   id: z.string(),
@@ -207,6 +208,7 @@ const workflowSchema = z.object({
   held: pendingSchema.nullable().default(null),
   repairs: z.number().int().nonnegative().default(0),
   quotaPause: quotaPauseSchema.nullable().default(null),
+  transientPause: transientPauseSchema.nullable().default(null),
   baseline: baselineSchema.nullable().default(null),
   repositoryBaselines: z
     .array(z.object({ cwd: z.string(), snapshot: baselineSchema.nullable() }))
@@ -1239,6 +1241,7 @@ export class WorkflowEngine {
         baseline: null,
         repositoryBaselines: [],
         quotaPause: null,
+        transientPause: null,
         memories: [],
         memorySequence: 0,
         history: [],
@@ -1269,6 +1272,7 @@ export class WorkflowEngine {
       );
       if (!w) return;
       if (w.processed.includes(key) || w.inbox?.key === key) return;
+      if (failed === null || canceled) w.transientPause = null;
       this.invalidatePushAudit(w);
       await this.recordTurnEvidence(w, text, failed, evidence, agentId, key);
       await this.refreshConflicts();
@@ -2457,6 +2461,7 @@ export class WorkflowEngine {
   /** Returns a planner that never received an executor to working alone. */
   private generalize(w: Workflow) {
     w.quotaPause = null;
+    w.transientPause = null;
     w.mode = "general";
     w.status = "active";
     w.notifiedStatus = "active";
@@ -2499,6 +2504,7 @@ export class WorkflowEngine {
       w.status = "paused";
       w.notifiedStatus = "paused";
       w.quotaPause = null;
+      w.transientPause = null;
       this.touch(
         w,
         "일반개발 전환 대기: 현재 응답·권한 요청·압축이 끝난 뒤 계획 대화에서 이어갑니다.",
@@ -2670,6 +2676,7 @@ export class WorkflowEngine {
   }
   private async pause(w: Workflow) {
     w.quotaPause = null;
+    w.transientPause = null;
     w.status = "paused";
     w.notifiedStatus = "paused";
     this.touch(w, "일시정지: 현재 응답은 마무리하고 다음 자동 작업은 시작하지 않습니다.");
@@ -2685,6 +2692,8 @@ export class WorkflowEngine {
     await this.prepareResume(w, automatic);
     if (automatic && w.quotaPause && !w.pending && !w.inbox && !w.asker && !w.held)
       this.queue(w, w.quotaPause.role, w.quotaPause.prompt ?? CONTINUE, w.quotaPause.phase);
+    if (automatic && w.transientPause && !w.pending && !w.inbox && !w.asker && !w.held)
+      this.queue(w, w.transientPause.role, CONTINUE, w.transientPause.phase);
     if (message) this.redirect(w, message);
     this.touch(w, "자동 작업을 재개합니다.");
     await this.save();
@@ -2695,6 +2704,7 @@ export class WorkflowEngine {
   private async prepareResume(w: Workflow, automatic: boolean) {
     if (!automatic) {
       w.quotaPause = null;
+      w.transientPause = null;
       w.planFingerprint = "";
       w.repeatedPlans = 0;
     }
@@ -2969,6 +2979,113 @@ export class WorkflowEngine {
       this.touch(w, detail);
     }
   }
+  private async transientBlocked(w: Workflow) {
+    const settings = await this.settings();
+    return !!(
+      w.mode !== "federated" ||
+      w.generalTransition ||
+      w.asker ||
+      w.held ||
+      w.quotaPause ||
+      w.pending?.stage === "sending" ||
+      w.plan?.compaction ||
+      w.execute?.compaction ||
+      w.cycles >= settings.maxCycles ||
+      w.turns >= settings.maxTurns
+    );
+  }
+  private async recordTransient(w: Workflow, role: Role, failure: string, kind: "turn" | "error") {
+    const previous = w.transientPause;
+    w.transientPause = null;
+    if (w.status !== "active" || (await this.transientBlocked(w))) return;
+    if (!transientFailure(failure)) {
+      if (kind === "error") w.transientPause = previous;
+      return;
+    }
+    try {
+      if (!(await this.transientConversationsReady(w))) return;
+    } catch {
+      // A disconnected daemon cannot confirm conversation state until the retry preflight.
+    }
+    const same = previous?.role === role && previous.phase === w.phase;
+    const attempts = same ? previous.attempts : 0;
+    w.transientPause = {
+      role,
+      phase: w.phase,
+      failure,
+      kind,
+      attempts,
+      firstAt: same ? previous.firstAt : this.now(),
+      nextCheckAt: this.now() + transientDelay(attempts),
+    };
+  }
+  private describeTransient(w: Workflow) {
+    const record = w.transientPause;
+    if (!record) return;
+    let detail: string;
+    if (record.attempts >= 5) {
+      w.transientPause = null;
+      // Exhaustion is a new stop even when all five resumes were refused before activation.
+      w.notifiedStatus = "active";
+      detail = `일시 오류 자동 재개 5회 실패: ${record.failure}. 대화를 확인하고 재개하세요.`;
+    } else {
+      const time = new Date(record.nextCheckAt);
+      const hour = String(time.getHours()).padStart(2, "0");
+      const minute = String(time.getMinutes()).padStart(2, "0");
+      detail = `일시 오류로 중단: ${record.failure} · 자동 재개 ${record.attempts + 1}/5 · 다음 시도 ${hour}:${minute}`;
+    }
+    if (w.detail !== detail) this.touch(w, detail);
+  }
+  private async retryTransient(w: Workflow) {
+    const record = w.transientPause;
+    if (!record || w.mode !== "federated" || !["paused", "error"].includes(w.status)) return;
+    const settings = await this.settings();
+    if (!settings.autoResumeTransient) return;
+    if (await this.transientBlocked(w)) {
+      w.transientPause = null;
+      return;
+    }
+    if (this.now() < record.nextCheckAt) return;
+    const status = w.status;
+    const detail = w.detail;
+    record.attempts++;
+    record.nextCheckAt = this.now() + transientDelay(record.attempts);
+    try {
+      if (!(await this.transientConversationsReady(w))) {
+        w.transientPause = null;
+        this.touch(
+          w,
+          `응답 중단: ${record.failure}. 대화와 사용자 응답 대기를 확인하고 재개하세요.`,
+        );
+        return;
+      }
+      const resumed = await this.resume(w, "", true);
+      if (resumed === "active") return;
+      // A newly discovered question or an uncertain delivery keeps its own stop intact.
+      if (resumed === "needs_input" || (await this.transientBlocked(w))) {
+        w.transientPause = null;
+        return;
+      }
+      if (!w.transientPause && record.attempts >= 5) {
+        w.status = status;
+        return;
+      }
+    } catch {
+      // Connection failures and refused resumes consume the same bounded retry budget.
+    }
+    w.status = status;
+    w.detail = detail;
+    w.transientPause = record;
+    this.describeTransient(w);
+  }
+  private async transientConversationsReady(w: Workflow) {
+    for (const member of [w.plan, w.execute]) {
+      if (!member || (member === w.execute && member.workspaceId === null)) continue;
+      const snapshot = await this.port.inspect(member.id);
+      if (!snapshot || snapshot.archived || snapshot.permission) return false;
+    }
+    return true;
+  }
   syncProjectTitles() {
     return this.serial(async () => {
       if (!this.stopped) await this.port.syncProjectTitles?.();
@@ -3024,6 +3141,7 @@ export class WorkflowEngine {
     }
     if (w.mode === "general") await this.deliverGeneral(w);
     await this.retryQuota(w);
+    await this.retryTransient(w);
     return w.mode === "federated" && w.status === "active";
   }
   private async stepWorkflow(w: Workflow) {
@@ -3038,8 +3156,10 @@ export class WorkflowEngine {
       this.tickFailures.set(w.id, failures);
       if (failures < 3) return;
       this.tickFailures.delete(w.id);
+      await this.recordTransient(w, w.pending?.role ?? this.floor(w), String(error), "error");
       w.status = "error";
       this.touch(w, String(error));
+      this.describeTransient(w);
     }
   }
   private async observe(w: Workflow) {
@@ -3203,8 +3323,11 @@ export class WorkflowEngine {
       await this.prepareMember(w, "execute");
       await this.deliver(w);
     } catch (error) {
+      const failure = error instanceof Error ? error.message : String(error);
+      await this.recordTransient(w, w.pending?.role ?? this.floor(w), failure, "error");
       w.status = "error";
-      this.touch(w, error instanceof Error ? error.message : String(error));
+      this.touch(w, failure);
+      this.describeTransient(w);
       await this.save();
     }
   }
@@ -3268,6 +3391,7 @@ export class WorkflowEngine {
         (error) =>
           this.serial(async () => {
             member.compaction = null;
+            w.transientPause = null;
             w.status = "error";
             this.touch(w, `컨텍스트 압축 실패: ${String(error)}. 확인 후 재개하세요.`);
             await this.save();
@@ -3439,6 +3563,12 @@ export class WorkflowEngine {
       this.invalidatePushAudit(w);
       // A later user turn supersedes the deferred colour change, even before it replies.
       w.pushRetry = null;
+      const automatic =
+        w.status === "active" &&
+        w.pending &&
+        w.pending.stage !== "queued" &&
+        w[w.pending.role]?.id === agentId;
+      if (!automatic) w.transientPause = null;
       if (w?.mode === "general" && w.generalDelivery?.stage === "uncertain") {
         w.generalDelivery = null;
         w.status = "active";
@@ -3558,11 +3688,21 @@ export class WorkflowEngine {
   /** The reply to a delivered instruction. Whatever it says, that instruction is over. */
   private async answered(w: Workflow, role: Role, inbox: Inbox) {
     if (inbox.failed !== null) await this.quotaFailure(w, role, inbox);
+    const pending = w.pending;
     w.pending = null;
     w.asker = null;
     if (inbox.failed !== null) {
       this.seen(w, inbox.key);
       w.inbox = null;
+      if (!inbox.canceled) await this.recordTransient(w, role, inbox.failed, "turn");
+      if (w.transientPause && w.transientPause.attempts < 5)
+        this.queue(
+          w,
+          role,
+          pending?.prompt ?? CONTINUE,
+          pending?.phase ?? w.phase,
+          pending?.instruction,
+        );
       // A turn the user stopped is picked up by their next message; a failure waits for a resume.
       w.status = inbox.canceled ? "needs_input" : "paused";
       this.touch(
@@ -3571,6 +3711,7 @@ export class WorkflowEngine {
           ? "응답이 중단되었습니다. 대화에서 직접 이어가거나 재개하세요."
           : `응답 중단: ${inbox.failed}. 대화를 확인하고 재개하세요.`,
       );
+      this.describeTransient(w);
       return;
     }
     const d = this.read(w, role, inbox, true);
@@ -3586,8 +3727,11 @@ export class WorkflowEngine {
       await this.quotaFailure(w, role, inbox);
       this.seen(w, inbox.key);
       w.inbox = null;
+      await this.recordTransient(w, role, inbox.failed, "turn");
+      if (w.transientPause && w.transientPause.attempts < 5) this.queue(w, role, CONTINUE, w.phase);
       w.status = "paused";
       this.touch(w, `응답 중단: ${inbox.failed}. 대화를 확인하고 재개하세요.`);
+      this.describeTransient(w);
       return;
     }
     // While the flow waits for the user, a turn that decides nothing leaves that wait as it is.
@@ -3701,6 +3845,7 @@ export class WorkflowEngine {
   /** Stores what a turn on the main line reported and returns it as the other role reads it. */
   private record(w: Workflow, role: Role, d: Decision, inbox: Inbox): string {
     if (w.quotaPause?.role === role) w.quotaPause = null;
+    w.transientPause = null;
     this.remember(w, d.remember);
     this.recordCompaction(w[role]!, inbox);
     w[role]!.handoff = d.handoff;
@@ -3735,6 +3880,7 @@ export class WorkflowEngine {
   }
   private complete(w: Workflow) {
     w.quotaPause = null;
+    w.transientPause = null;
     w.status = "completed";
     w.asker = null;
     w.held = null;

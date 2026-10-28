@@ -28,6 +28,7 @@ export const settingsSchema = z.object({
   rememberProjectChoices: z.boolean().default(true),
   autoStart: z.boolean().default(true),
   autoResumeQuota: z.boolean().default(true),
+  autoResumeTransient: z.boolean().default(true),
   threshold: z.number().min(0.05).max(0.9).default(0.8),
   maxCycles: z.number().int().min(1).max(50).default(5),
   maxTurns: z.number().int().min(2).max(200).default(30),
