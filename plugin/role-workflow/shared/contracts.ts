@@ -119,6 +119,7 @@ export const workflowViewSchema = z.object({
   verification: z.array(verificationRecordSchema).default([]),
   artifactNotice: z.string().default(""),
   conflict: z.string().default(""),
+  waitingFor: z.number().optional(),
   generalTransition: z.boolean().default(false),
   deliveryUnconfirmed: z.boolean().default(false),
 });

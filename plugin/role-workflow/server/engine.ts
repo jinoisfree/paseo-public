@@ -174,7 +174,10 @@ const workflowSchema = z.object({
   verification: z.array(verificationRecordSchema).max(30).default([]),
   constraints: z.record(z.string(), z.string()).default({}),
   conflict: z.string().default(""),
-  writerWait: z.object({ key: z.string(), text: z.string() }).nullable().default(null),
+  writerWait: z
+    .object({ key: z.string(), text: z.string(), blocker: z.number().default(0) })
+    .nullable()
+    .default(null),
   notifiedWriterWait: z.string().default(""),
   generalTransition: z.boolean().default(false),
   transitionTurns: z.array(inboxSchema).default([]),
@@ -1125,6 +1128,7 @@ export class WorkflowEngine {
         verification: w.verification,
         artifactNotice: w.artifactNotice,
         conflict: w.conflict,
+        waitingFor: this.waitingFor(w),
         generalTransition: w.generalTransition,
         deliveryUnconfirmed: w.pending?.stage === "sending" && w.status !== "active",
         updatedAt: w.updatedAt,
@@ -1978,6 +1982,11 @@ export class WorkflowEngine {
   private pushTitleState(w: Workflow) {
     return w.managedPush?.state ?? (w.pushUnverified ? "unknown" : undefined);
   }
+  private waitingFor(w: Workflow) {
+    return w.mode === "federated" && w.status === "active" && w.pending?.stage === "queued"
+      ? w.writerWait?.blocker || undefined
+      : undefined;
+  }
   /** Each workspace keeps its current name unless a new title was just chosen. */
   private async titles(
     w: Workflow,
@@ -2020,6 +2029,7 @@ export class WorkflowEngine {
           generation: member.generation,
           pushReview,
           pushState: this.pushTitleState(w),
+          waitingFor: this.waitingFor(w),
         }).slice(0, 120),
       });
     }
@@ -3356,12 +3366,16 @@ export class WorkflowEngine {
       // Unchanged text must not move updatedAt, or every tick would rewrite the state file.
       const waiting = `같은 저장소의 다른 작업 #${busy.number} ${busy.title} 진행 후 #${w.number} ${w.title} 진행 예정입니다. 해당 대화의 응답이 끝나면 자동 전달합니다.`;
       w.conflict = waiting;
-      w.writerWait = { key: `${pending.id}:${busy.id}`, text: waiting };
+      if (w.writerWait?.blocker !== busy.number) this.pendingTitles.add(w.id);
+      w.writerWait = { key: `${pending.id}:${busy.id}`, text: waiting, blocker: busy.number };
       if (w.detail !== waiting && !this.asking.has(w.id)) this.touch(w, waiting);
       return false;
     }
     w.conflict = "";
-    w.writerWait = null;
+    if (w.writerWait) {
+      w.writerWait = null;
+      this.pendingTitles.add(w.id);
+    }
     // The baseline belongs to the plan; follow-up messages to the executor keep it.
     if (pending.instruction) {
       w.repositoryBaselines = await Promise.all(

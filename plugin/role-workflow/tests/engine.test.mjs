@@ -4989,8 +4989,18 @@ test("queued federation resumes exactly once by polling when the other writer's 
   await f.finish("planner", "plan", "plan");
   const pending = (await stored(f)).pending;
   assert.equal(pending.stage, "queued");
+  assert.equal((await f.view()).waitingFor, 2);
   assert.match((await f.view()).detail, /응답이 끝나면 자동 전달/);
   await f.engine.tick();
+  assert.equal((await stored(f)).writerWait.blocker, 2);
+  assert.match(
+    f.renamed.findLast((row) => row.workspaceId === "initial").title,
+    /\[#02 때문에 대기\]/,
+  );
+  const renameCount = f.renamed.length;
+  await f.engine.tick();
+  await f.engine.tick();
+  assert.equal(f.renamed.length, renameCount, "unchanged waits must not rename every tick");
   assert.equal(f.sent.length, 0);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(events.filter((event) => event.kind === "waiting").length, 1);
@@ -5007,9 +5017,66 @@ test("queued federation resumes exactly once by polling when the other writer's 
   assert.equal(f.sent.length, 1);
   assert.equal(f.sent[0].messageId, pending.id);
   assert.equal((await restored.list()).workflows[0].conflict, "");
+  assert.equal((await restored.list()).workflows[0].waitingFor, undefined);
+  assert.equal((await stored(f)).writerWait, null);
+  // Title sync runs before delivery, so the following tick removes the released badge.
   await restored.tick();
+  assert.doesNotMatch(
+    f.renamed.findLast((row) => row.workspaceId === "initial").title,
+    /때문에 대기/,
+  );
+  const releasedRenames = f.renamed.length;
   await restored.tick();
+  assert.equal(f.renamed.length, releasedRenames);
   assert.equal(f.sent.length, 1);
+});
+
+test("writer wait title changes when another work item becomes the blocker", async (t) => {
+  const f = await fixture(t);
+  await addWriter(f, path.dirname(f.file));
+  await addWriter(f, path.dirname(f.file), "general", "other2");
+  await f.finish("planner", "plan", "plan");
+  await f.engine.tick();
+  assert.match(
+    f.renamed.findLast((row) => row.workspaceId === "initial").title,
+    /\[#02 때문에 대기\]/,
+  );
+  f.agents.get("other").status = "idle";
+  await f.engine.tick();
+  assert.equal((await f.view()).waitingFor, 3);
+  await f.engine.tick();
+  assert.match(
+    f.renamed.findLast((row) => row.workspaceId === "initial").title,
+    /\[#03 때문에 대기\]/,
+  );
+  const count = f.renamed.length;
+  await f.engine.tick();
+  assert.equal(f.renamed.length, count);
+  assert.equal(f.sent.length, 0);
+});
+
+test("stored writer waits without a blocker number remain readable and acquire the number", async (t) => {
+  const events = [];
+  const f = await fixture(t, async (event) => events.push(event));
+  await addWriter(f, path.dirname(f.file));
+  await f.finish("planner", "plan", "plan");
+  await f.engine.tick();
+  await f.engine.close();
+  const db = JSON.parse(await readFile(f.file, "utf8"));
+  delete db.workflows[0].writerWait.blocker;
+  await writeFile(f.file, JSON.stringify(db));
+  const restored = new WorkflowEngine(f.file, f.port, async (event) => events.push(event));
+  t.after(() => restored.close());
+  assert.equal((await restored.list()).workflows[0].waitingFor, undefined);
+  await restored.tick();
+  await restored.tick();
+  assert.equal((await restored.list()).workflows[0].waitingFor, 2);
+  assert.match(
+    f.renamed.findLast((row) => row.workspaceId === "initial").title,
+    /\[#02 때문에 대기\]/,
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(events.filter((event) => event.kind === "waiting").length, 1);
 });
 
 test("writer wait respects disabled stop notifications while still showing the schedule", async (t) => {

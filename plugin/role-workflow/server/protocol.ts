@@ -294,7 +294,7 @@ export function stripTitleDecor(title: string): string {
       "",
     )
     .replace(
-      /^\[(?:PUSH|푸시 확인 대기|푸시 완료|푸시 대기|푸시 확인중|푸시 확인필요|푸시 실패)\]\s*/,
+      /^(?:\[(?:#\d+ 때문에 대기|PUSH|푸시 확인 대기|푸시 완료|푸시 대기|푸시 확인중|푸시 확인필요|푸시 실패)\]\s*)+/,
       "",
     )
     .trim();
@@ -313,6 +313,7 @@ export function decorateTitle(
     generation?: number;
     pushReview?: boolean;
     pushState?: "prepared" | "running" | "checking" | "pushed" | "failed" | "unknown";
+    waitingFor?: number;
   } = {},
 ): string {
   const badges = {
@@ -325,7 +326,10 @@ export function decorateTitle(
   };
   const progressBadge = detail.progress === "pushed" ? PUSH_REVIEW_MARKER : "";
   const badge = detail.pushState ? badges[detail.pushState] : progressBadge;
-  const base = badge + stripTitleDecor(title);
+  const waiting = detail.waitingFor
+    ? `[#${String(detail.waitingFor).padStart(2, "0")} 때문에 대기] `
+    : "";
+  const base = waiting + badge + stripTitleDecor(title);
   const name = PROVIDER_NAMES[provider.split("/")[0]];
   if (!name || (!role && !marker)) return base;
   const generation = detail.generation ?? 1;

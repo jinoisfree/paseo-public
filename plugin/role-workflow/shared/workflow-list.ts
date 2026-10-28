@@ -6,6 +6,7 @@ export function workflowLabel(w: WorkflowView) {
   if (w.status === "needs_input") return "답변 필요";
   if (w.status === "error") return "확인 필요";
   if (w.generalTransition) return "일반개발 전환 대기";
+  if (w.waitingFor) return `#${String(w.waitingFor).padStart(2, "0")} 때문에 대기`;
   if (w.conflict) return "동시 작업 확인";
   if (w.status === "paused") return "일시정지";
   if (w.progress === "pushed") return "푸시 완료";

@@ -184,6 +184,42 @@ test("title decorations carry project, provider, role, number and progress and s
   assert.equal(decorateTitle("other", null, "🟢 제목", true), "제목");
 });
 
+test("writer wait badges precede push badges and redecorate without duplicates", async () => {
+  const { stripTitleDecor, decorateTitle } = await import("../server/protocol.ts");
+  for (const [waitingFor, badge] of [
+    [7, "07"],
+    [123, "123"],
+  ]) {
+    const detail = { projectName: "AIpet", number: 3, waitingFor };
+    const title = decorateTitle("codex", "pair", "제목", true, detail);
+    assert.equal(title, `🟠 G[AIpet]-03 [#${badge} 때문에 대기] 제목`);
+    assert.equal(stripTitleDecor(title), "제목");
+    assert.equal(decorateTitle("codex", "pair", title, true, detail), title);
+    for (const pushState of ["prepared", "running", "checking", "pushed", "failed", "unknown"]) {
+      const pushed = decorateTitle("codex", "pair", title, true, { ...detail, pushState });
+      assert.match(pushed, new RegExp(`\\[#${badge} 때문에 대기\\] \\[`));
+      assert.equal(stripTitleDecor(pushed), "제목");
+      assert.equal(decorateTitle("codex", "pair", pushed, true, { ...detail, pushState }), pushed);
+    }
+    for (const badges of [
+      `[#${badge} 때문에 대기] [PUSH] `,
+      `[PUSH] [#${badge} 때문에 대기] `,
+      `[푸시 확인필요] [#${badge} 때문에 대기] [푸시 실패] [#${badge} 때문에 대기] `,
+    ]) {
+      assert.equal(stripTitleDecor(`🔵 G[AIpet]-03 ${badges}제목`), "제목");
+      assert.equal(decorateTitle("codex", "pair", badges + "제목", true, detail), title);
+    }
+    assert.equal(
+      decorateTitle("codex", "pair", title, true, { ...detail, waitingFor: undefined }),
+      "🟠 G[AIpet]-03 제목",
+    );
+  }
+  assert.equal(
+    decorateTitle("other", null, "제목", false, { waitingFor: 7, progress: "pushed" }),
+    "[#07 때문에 대기] [PUSH] 제목",
+  );
+});
+
 test("project labels keep short names and abbreviate long names without breaking decoration", async () => {
   const { projectTitleLabel, decorateTitle, stripTitleDecor } =
     await import("../server/protocol.ts");

@@ -101,6 +101,22 @@ test("dashboard sorts actionable work first and recognizes general completion wi
   assert.equal(rows[0].status, "active");
 });
 
+test("writer wait labels identify the blocking work before the generic conflict label", () => {
+  for (const [waitingFor, expected] of [
+    [2, "#02 때문에 대기"],
+    [123, "#123 때문에 대기"],
+  ]) {
+    assert.equal(
+      workflowLabel({ mode: "federated", status: "active", conflict: "busy", waitingFor }),
+      expected,
+    );
+  }
+  assert.equal(
+    workflowLabel({ mode: "federated", status: "active", conflict: "busy", waitingFor: 0 }),
+    "동시 작업 확인",
+  );
+});
+
 test("old push completion never hides a current wait, error or overlapping work", () => {
   for (const [status, expected] of [
     ["needs_input", "답변 필요"],
