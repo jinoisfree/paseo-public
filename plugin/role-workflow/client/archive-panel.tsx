@@ -64,7 +64,7 @@ export function ArchivePanel({ archives = [], styles: s, button, run, notice, er
         {archives.map((item) => (
           <View key={item.id}>
             <Text style={s.text}>
-              {item.progress === "pushed" ? "🔵" : "🟢"} {item.folder} #
+              {item.progress !== "done" ? "🔵" : "🟢"} {item.folder} #
               {String(item.number).padStart(2, "0")} {item.title}
             </Text>
             <Text style={s.muted}>{new Date(item.archivedAt).toLocaleString()}</Text>

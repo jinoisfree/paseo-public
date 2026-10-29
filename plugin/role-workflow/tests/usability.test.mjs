@@ -144,3 +144,19 @@ test("old push completion never hides a current wait, error or overlapping work"
     "동시 작업 확인",
   );
 });
+
+test("no-push work has a distinct completed label while attention stays visible", () => {
+  const row = {
+    id: "local",
+    mode: "general",
+    status: "active",
+    progress: "no_push",
+    updatedAt: "2026-10-29",
+  };
+  assert.equal(workflowLabel(row), "완료 · 푸시 불필요");
+  assert.equal(workflowLabel({ ...row, status: "needs_input" }), "답변 필요");
+  assert.deepEqual(
+    visibleWorkflows([row, { ...row, id: "working", progress: "active" }], "all").map((w) => w.id),
+    ["working", "local"],
+  );
+});

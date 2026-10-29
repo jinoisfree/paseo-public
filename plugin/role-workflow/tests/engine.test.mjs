@@ -6514,3 +6514,81 @@ test("more push targets than the state can hold are refused, keeping the file lo
   t.after(() => restarted.close());
   assert.equal((await restarted.list()).workflows.length, 1);
 });
+
+test("no-push completion is blue, durable and separate from push receipts", async (t) => {
+  const f = await fixture(t, undefined, "general", true);
+  await f.engine.ended(
+    "planner",
+    "local-done",
+    "로컬 설정만 변경했습니다.\n작업상태: 푸시 불필요",
+    null,
+  );
+  assert.equal((await f.view()).progress, "no_push");
+  assert.match(f.renamed.at(-1).title, /^🔵 .*\[푸시 불필요\]/u);
+  let saved = JSON.parse(await readFile(f.file, "utf8")).workflows[0];
+  assert.equal(saved.pushReceipt, null);
+  assert.deepEqual(saved.pushTargets, []);
+  await f.engine.ended("planner", "read-followup", "설정 설명입니다.", null);
+  assert.equal((await f.view()).progress, "no_push");
+  await f.engine.close();
+  const restored = new WorkflowEngine(f.file, f.port);
+  t.after(() => restored.close());
+  assert.match((await restored.retitle(false, []))[0].title, /^🔵 .*\[푸시 불필요\]/u);
+  await restored.ended("planner", "new-edit", "새 수정", null, "", false, "", false, undefined, {
+    report: "새 수정",
+    changed: true,
+    pushes: [],
+  });
+  saved = JSON.parse(await readFile(f.file, "utf8")).workflows[0];
+  assert.equal(saved.progress, "active");
+  assert.match(f.renamed.at(-1).title, /^🟠 /u);
+  assert.doesNotMatch(f.renamed.at(-1).title, /푸시 불필요/);
+});
+
+test("explicit no-push setting accepts completed quiet work but rejects active work and running conversations", async (t) => {
+  const f = await fixture(t, undefined, "general", true);
+  await assert.rejects(f.engine.setProgress(1, "no_push"), /완료한 작업/);
+  await f.engine.setProgress(1, "done");
+  f.agents.get("planner").status = "running";
+  await assert.rejects(f.engine.setProgress(1, "no_push"), /진행 중인 대화/);
+  f.agents.get("planner").status = "idle";
+  assert.match((await f.engine.setProgress(1, "no_push"))[0], /^🔵 .*\[푸시 불필요\]/u);
+  await f.engine.setProgress(1, "active");
+  assert.equal((await f.view()).progress, "active");
+});
+
+test("no-push declaration cannot hide push targets or pending approval", async (t) => {
+  const f = await fixture(t, undefined, "general", true, "claude", verifiedPushProbe);
+  const target = { ...pushedCommit, repository: path.dirname(f.file) };
+  await f.engine.ended(
+    "planner",
+    "target",
+    `푸시대상: ${JSON.stringify([target])}\n작업상태: 완료`,
+    null,
+  );
+  assert.equal((await f.view()).pushTargets.length, 1);
+  await assert.rejects(f.engine.setProgress(1, "no_push"), /푸시 대상/);
+  await f.engine.ended("planner", "false-local", "작업상태: 푸시 불필요", null);
+  assert.equal((await f.view()).progress, "done");
+  const g = await fixture(t, undefined, "general", true);
+  await g.engine.ended(
+    "planner",
+    "approval",
+    "푸시 승인이 필요합니다.\n작업상태: 푸시 불필요",
+    null,
+  );
+  assert.equal((await g.view()).progress, "done");
+  await assert.rejects(g.engine.setProgress(1, "no_push"), /푸시 대상/);
+});
+
+test("federated complete preserves explicit no-push completion", async (t) => {
+  const f = await fixture(t, undefined, "federated", false);
+  await f.engine.ended(
+    "planner",
+    "local-complete",
+    "작업상태: 푸시 불필요\n" + decision("complete"),
+    null,
+  );
+  assert.equal((await f.view()).progress, "no_push");
+  assert.equal((await f.view()).status, "completed");
+});

@@ -9,6 +9,7 @@ import {
   forgetProject,
   control,
   setRepositories,
+  setProgress,
   testNotification,
   models,
   type Settings,
@@ -36,6 +37,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
     forget = useRpc(forgetProject),
     act = useRpc(control),
     saveRepositories = useRpc(setRepositories),
+    saveProgress = useRpc(setProgress),
     testPush = useRpc(testNotification),
     readModels = useRpc(models);
   const [archiveDays, setArchiveDays] = useState<string | null>(null);
@@ -523,6 +525,22 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
     const trimPath = (entry: string) => entry.trim();
     return (
       <>
+        {w.progress === "done" && !w.pushTargets?.length && !w.managedPush && (
+          <>
+            <Text style={s.muted}>
+              조사·답변 또는 로컬 전용 작업을 마쳤다면 푸시 불필요로 완료할 수 있습니다. 원격에 보낼
+              변경이나 승인 대기가 있으면 사용하지 마세요.
+            </Text>
+            {button(
+              "푸시 불필요로 완료",
+              () =>
+                void run(
+                  () => saveProgress({ number: w.number, project: w.cwd, progress: "no_push" }),
+                  "푸시 불필요로 완료했습니다. 파란색으로 표시하고 완료 접기에 포함합니다.",
+                ),
+            )}
+          </>
+        )}
         {!!w.conflict && <Text style={s.error}>{w.conflict}</Text>}
         {!!w.artifactNotice && <Text style={s.muted}>{w.artifactNotice}</Text>}
         {!!w.repositories?.length && (

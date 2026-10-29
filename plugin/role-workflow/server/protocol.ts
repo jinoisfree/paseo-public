@@ -209,18 +209,20 @@ export function parseTitle(text: string): string | null {
   return title ? Array.from(title).slice(0, 60).join("") : null;
 }
 
-export type Progress = "plan" | "active" | "done" | "pushed";
+export type Progress = "plan" | "active" | "done" | "pushed" | "no_push";
 const PROGRESS_WORDS: Record<string, Progress> = {
   계획: "plan",
   진행: "active",
   완료: "done",
   푸시: "pushed",
+  "푸시 불필요": "no_push",
 };
 const PROGRESS_SYMBOLS: Record<Progress, string> = {
   plan: "🟣",
   active: "🟠",
   done: "🟢",
   pushed: "🔵",
+  no_push: "🔵",
 };
 const PROVIDER_NAMES: Record<string, string> = { claude: "C", codex: "G" };
 
@@ -242,13 +244,14 @@ Git 푸시는 사용자의 명시적 승인을 받은 뒤에만 실행한다. �
 
 export function progressPrompt(): string {
   return `\n<paseo-progress-v1>
-워크스페이스 제목 앞의 색 표식은 작업 상태를 뜻한다. 상태가 바뀐 응답에서만 응답 맨 끝(제목 줄이 있으면 그 다음 줄, 상태 블록이 있으면 그 바로 앞 줄)에 '작업상태: 계획|진행|완료|푸시' 중 하나를 한 줄로 쓴다. 바뀌지 않았으면 쓰지 않는다.
+워크스페이스 제목 앞의 색 표식은 작업 상태를 뜻한다. 상태가 바뀐 응답에서만 응답 맨 끝(제목 줄이 있으면 그 다음 줄, 상태 블록이 있으면 그 바로 앞 줄)에 '작업상태: 계획|진행|완료|푸시|푸시 불필요' 중 하나를 한 줄로 쓴다. 바뀌지 않았으면 쓰지 않는다.
 - 계획(보라): 계획만 세웠고 구현을 시작하지 않았다.
 - 진행(주황): 구현·수정이 진행 중이거나 중단됐다. 완료 뒤 새 작업을 시작할 때도 쓴다.
 - 완료(초록): 구현·검증 완료. 커밋만 했거나 푸시 승인을 기다리는 작업은 최종 미완료이며 자동 접기 대상이 아니다.
+- 푸시 불필요(파랑): 조사·답변 또는 로컬 전용 변경을 마쳤고 이 작업에서 원격에 보낼 변경이 없다. 사유를 본문에 설명하고 작업상태: 푸시 불필요로 명시한다. 실제 푸시 완료와 구분해 [푸시 불필요]로 표시하며 완료 접기에 포함한다. 커밋·푸시 승인 대기, 미푸시 변경, 실패·확인 불가를 이 상태로 처리하지 않는다. 단순히 미푸시 커밋 수가 0이거나 원격 설정이 없다는 이유만으로 선언하지 않는다.
 - 푸시(파랑): 사용자가 승인한 git push의 성공 또는 거절 후 대상 커밋이 이미 원격에 포함됨을 확인했다. 최종 완료·자동 접기 기준이다.
 푸시 성공을 보고할 때는 이전 응답의 선언 여부와 관계없이 실제 푸시대상과 '작업상태: 푸시'를 함께 기록한다. 검증은 이 작업의 대상 커밋을 기준으로 하며 같은 저장소의 다른 작업이나 이후 HEAD를 대신 사용하지 않는다.
-푸시 후 설명·설치 안내·같은 코드의 설치만 이어갈 때는 기존 푸시 상태를 유지한다. 새 구현·수정이 시작되면 진행으로 바꾸고 새 커밋의 푸시를 별도로 확인한다.
+푸시 후 설명·설치 안내·같은 코드의 설치만 이어갈 때는 기존 푸시 상태를 유지한다. 푸시 완료 또는 푸시 불필요로 끝낸 뒤 새 구현·수정이 시작되면 진행으로 바꾸고, 원격에 보낼 변경은 새 커밋의 푸시를 별도로 확인한다.
 제목의 [PUSH]는 확인된 푸시 표시이며 상단 고정 해제 후에도 유지한다. 전용 푸시의 확인중·실패·확인필요 표시는 호스트의 실행 기록을 따른다. 대화의 완료 문장으로 이 기록을 덮어쓰지 않는다.
 푸시 승인을 요청하는 응답에는 반드시 '작업상태: 완료'를 기록한다. 다른 작업의 푸시나 이전 작업 기록만으로 완료를 선언하지 않는다. 이번 승인된 실행이 거절됐어도 동일 대상의 원격 포함을 확인한 경우는 인정한다. 푸시 명령은 성공·실패와 대상이 도구 기록에 남도록 별도로 실행하고, 성공한 실제 대상과 원격 확인 결과를 보고한다.
 사용자가 상태를 직접 지정하면 그대로 쓴다. 확인하지 못한 완료·푸시는 선언하지 않는다.
@@ -258,12 +261,15 @@ export function parseProgress(text: string): Progress | null {
   const prose = stripFences(text)
     .replace(/<paseo-workflow>[\s\S]*?<\/paseo-workflow>/g, "")
     .replace(/<paseo-workflow>[\s\S]*$/, "");
-  const last = [...prose.matchAll(/^작업상태:[ \t]*(계획|진행|완료|푸시)[ \t]*$/gm)].at(-1)?.[1];
+  const last = [...prose.matchAll(/^작업상태:[ \t]*(계획|진행|완료|푸시|푸시 불필요)[ \t]*$/gm)].at(
+    -1,
+  )?.[1];
   return last ? PROGRESS_WORDS[last] : null;
 }
 
 /** The colour a title already carries, for workspaces whose state is nowhere but the title. */
 export function titleProgress(title: string): Progress | null {
+  if (/^🔵\s.*\[푸시 불필요\]/u.test(title.trim())) return "no_push";
   const symbol = Array.from(title.trim())[0];
   const found = Object.entries(PROGRESS_SYMBOLS).find(([, value]) => value === symbol);
   return found ? (found[0] as Progress) : null;
@@ -311,7 +317,7 @@ export function stripTitleDecor(title: string): string {
       "",
     )
     .replace(
-      /^(?:\[(?:#\d+ 때문에 대기|PUSH|푸시 확인 대기|푸시 완료|푸시 대기|푸시 확인중|푸시 확인필요|푸시 실패)\]\s*)+/,
+      /^(?:\[(?:#\d+ 때문에 대기|PUSH|푸시 확인 대기|푸시 완료|푸시 대기|푸시 확인중|푸시 확인필요|푸시 실패|푸시 불필요)\]\s*)+/,
       "",
     )
     .trim();
@@ -341,7 +347,9 @@ export function decorateTitle(
     failed: "[푸시 실패] ",
     unknown: "[푸시 확인필요] ",
   };
-  const progressBadge = detail.progress === "pushed" ? PUSH_REVIEW_MARKER : "";
+  let progressBadge = "";
+  if (detail.progress === "pushed") progressBadge = PUSH_REVIEW_MARKER;
+  if (detail.progress === "no_push") progressBadge = "[푸시 불필요] ";
   const badge = detail.pushState ? badges[detail.pushState] : progressBadge;
   const waiting = detail.waitingFor
     ? `[#${String(detail.waitingFor).padStart(2, "0")} 때문에 대기] `

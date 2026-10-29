@@ -69,7 +69,7 @@ export const archiveEntrySchema = z.object({
   title: z.string(),
   projectId: z.string(),
   folder: z.string(),
-  progress: z.enum(["done", "pushed"]),
+  progress: z.enum(["done", "pushed", "no_push"]),
   workspaceIds: z.array(z.string()),
   agentIds: z.array(z.string()),
   archivedAt: z.string(),
@@ -104,7 +104,7 @@ export const workflowViewSchema = z.object({
   turns: z.number(),
   detail: z.string(),
   updatedAt: z.string(),
-  progress: z.enum(["plan", "active", "done", "pushed"]).default("active"),
+  progress: z.enum(["plan", "active", "done", "pushed", "no_push"]).default("active"),
   planAgentId: z.string().nullable(),
   executeAgentId: z.string().nullable(),
   planGeneration: z.number(),
@@ -193,7 +193,7 @@ export const setProgress = defineRpc({
   name: "workflow.progress",
   input: z.object({
     number: z.number().int().positive(),
-    progress: z.enum(["plan", "active", "done", "pushed"]),
+    progress: z.enum(["plan", "active", "done", "pushed", "no_push"]),
     // Numbers repeat across projects; a project id, folder path or folder name picks one.
     project: z.string().max(500).default(""),
     // Repair an existing task against its reported commit, not another task's current HEAD.

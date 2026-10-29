@@ -9,6 +9,7 @@ export function workflowLabel(w: WorkflowView) {
   if (w.waitingFor) return `#${String(w.waitingFor).padStart(2, "0")} 때문에 대기`;
   if (w.conflict) return "동시 작업 확인";
   if (w.status === "paused") return "일시정지";
+  if (w.progress === "no_push") return "완료 · 푸시 불필요";
   if (w.progress === "pushed") return "푸시 완료";
   if (w.status === "completed" || (w.mode !== "federated" && w.progress === "done"))
     return "구현 완료 · 미푸시";
@@ -20,7 +21,8 @@ export function visibleWorkflows(workflows: readonly WorkflowView[], filter: Wor
   const rank = (w: WorkflowView) => {
     if (["needs_input", "error"].includes(w.status) || w.conflict) return 0;
     if (w.status === "paused") return 2;
-    if (["구현 완료 · 미푸시", "푸시 완료"].includes(workflowLabel(w))) return 3;
+    if (["구현 완료 · 미푸시", "푸시 완료", "완료 · 푸시 불필요"].includes(workflowLabel(w)))
+      return 3;
     return 1;
   };
   return workflows

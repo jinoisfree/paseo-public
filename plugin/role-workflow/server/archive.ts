@@ -39,7 +39,10 @@ export interface ArchiveFlow {
   generalDelivery?: { stage: string } | null;
 }
 export function isFinished(w: Pick<ArchiveFlow, "progress" | "mode">): boolean {
-  return w.mode !== "undecided" && (w.progress === "done" || w.progress === "pushed");
+  return (
+    w.mode !== "undecided" &&
+    (w.progress === "done" || w.progress === "pushed" || w.progress === "no_push")
+  );
 }
 function hasUnsettledWork(w: ArchiveFlow): boolean {
   return !!(

@@ -546,3 +546,18 @@ test("only line-start fences hide metadata; inline backticks and nested fences d
     1,
   );
 });
+
+test("no-push completion round-trips without impersonating a push", async () => {
+  const { parseProgress, decorateTitle, titleProgress, stripTitleDecor, progressPrompt } =
+    await import("../server/protocol.ts");
+  assert.equal(parseProgress("조사 완료\n작업상태: 푸시 불필요"), "no_push");
+  assert.equal(parseProgress("```\n작업상태: 푸시 불필요\n```"), null);
+  assert.equal(parseProgress("작업상태: 푸시 불필요합니다"), null);
+  const title = decorateTitle("codex", null, "조사", true, { number: 1, progress: "no_push" });
+  assert.match(title, /^🔵 .*\[푸시 불필요\]/u);
+  assert.doesNotMatch(title, /\[PUSH\]/);
+  assert.equal(titleProgress(title), "no_push");
+  assert.equal(titleProgress("🔵 C[project]-01 [PUSH] 완료"), "pushed");
+  assert.equal(stripTitleDecor(title), "조사");
+  assert.match(progressPrompt(), /미푸시 변경/);
+});

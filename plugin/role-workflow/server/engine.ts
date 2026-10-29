@@ -124,7 +124,7 @@ const workflowSchema = z.object({
   goal: z.string(),
   titled: z.boolean().default(true),
   number: z.number().int().nonnegative().default(0),
-  progress: z.enum(["plan", "active", "done", "pushed"]).default("active"),
+  progress: z.enum(["plan", "active", "done", "pushed", "no_push"]).default("active"),
   mode: z.enum(["undecided", "general", "federated"]).default("federated"),
   notifiedStatus: z.string().nullable().default(null),
   status: z.enum(["active", "paused", "needs_input", "completed", "error"]),
@@ -155,6 +155,7 @@ const workflowSchema = z.object({
     .default(null),
   pushCheck: pushCheckSchema.nullable().default(null),
   pushUnverified: z.boolean().default(false),
+  pushApprovalPending: z.boolean().default(false),
   pushReceipt: z
     .object({
       key: z.string(),
@@ -718,9 +719,10 @@ export class WorkflowEngine {
     w.pushReceipt = null;
     w.pushCheck = null;
     w.pushRetry = null;
-    if (w.progress === "pushed") w.progress = progress;
+    if (w.progress === "pushed" || w.progress === "no_push") w.progress = progress;
   }
   private newPushPhase(w: Workflow) {
+    w.pushApprovalPending = false;
     this.invalidatePushAudit(w);
     this.setPushUnverified(w, false);
     if (!w.managedPush) return;
@@ -824,6 +826,7 @@ export class WorkflowEngine {
       if (w.managedPush?.state !== "prepared") this.newPushPhase(w);
       this.invalidatePush(w);
       w.progress = progress === "active" || progress === "plan" ? progress : "done";
+      w.pushApprovalPending = true;
       w.artifactNotice =
         "푸시 승인 또는 실행을 기다립니다. 다른 작업의 원격 반영으로 완료 처리하지 않습니다.";
       return;
@@ -1214,6 +1217,7 @@ export class WorkflowEngine {
         pushRetry: null,
         pushCheck: null,
         pushUnverified: false,
+        pushApprovalPending: false,
         pushReceipt: null,
         artifactNotice: "",
         invalidTargets: false,
@@ -1621,11 +1625,54 @@ export class WorkflowEngine {
     w.pushUnverified = value;
     this.pendingTitles.add(w.id);
   }
+  private hasPushObligation(w: Workflow) {
+    return !!(
+      w.pushTargets.length ||
+      w.invalidTargets ||
+      w.managedPush ||
+      w.pushReceipt ||
+      w.pushUnverified ||
+      w.pushApprovalPending
+    );
+  }
+  private noPushProgress(w: Workflow): Workflow["progress"] {
+    if (this.hasPushObligation(w)) {
+      w.artifactNotice = "푸시 대상 또는 미확인 실행이 남아 있어 푸시 불필요로 완료할 수 없습니다.";
+      return "done";
+    }
+    w.pushRetry = null;
+    w.artifactNotice = "";
+    return "no_push";
+  }
+  private async assertNoPushCompletion(w: Workflow) {
+    if (w.progress !== "done" && w.progress !== "no_push")
+      throw new Error("완료한 작업만 푸시 불필요로 정리할 수 있습니다.");
+    if (this.hasPushObligation(w)) throw new Error("푸시 대상 또는 미확인 실행이 남아 있습니다.");
+    if (
+      w.pending ||
+      w.inbox ||
+      w.held ||
+      w.asker ||
+      w.generalTransition ||
+      ["needs_input", "error"].includes(w.status)
+    )
+      throw new Error("대기 중인 작업이나 확인 요청을 먼저 마쳐 주세요.");
+    await this.assertQuietProgressChange(w);
+  }
+  private async assertQuietProgressChange(w: Workflow) {
+    for (const member of [w.plan, w.execute]) {
+      if (!member) continue;
+      const snapshot = await this.port.inspect(member.id);
+      if (!snapshot || !this.quiet(snapshot))
+        throw new Error("진행 중인 대화가 끝난 뒤 완료 또는 푸시 상태를 변경하세요.");
+    }
+  }
   /** A same-flow execution receipt and remote confirmation are both required. */
   private async verified(
     w: Workflow,
     declared: Workflow["progress"] | null,
   ): Promise<Workflow["progress"] | null> {
+    if (declared === "no_push") return this.noPushProgress(w);
     const managed = await this.managedProgress(w, declared);
     if (managed) return managed;
     if (declared !== "pushed") {
@@ -1965,7 +2012,7 @@ export class WorkflowEngine {
     if (stated) return stated;
     // A block completes the work only from a federation's planner or a lone legacy executor.
     const finishes = w.plan ? w.mode === "federated" && w.plan.id === agentId : true;
-    if (!finishes || w.progress === "pushed") return null;
+    if (!finishes || w.progress === "pushed" || w.progress === "no_push") return null;
     try {
       return parseDecision(text).status === "complete" ? "done" : null;
     } catch {
@@ -2244,6 +2291,7 @@ export class WorkflowEngine {
             .join(", ")}). 프로젝트 폴더 이름을 함께 지정하세요.`,
         );
       const w = matches[0];
+      if (progress === "no_push") await this.assertNoPushCompletion(w);
       if (source) {
         if (progress !== "pushed" || targets !== undefined)
           throw new Error(
@@ -2259,12 +2307,7 @@ export class WorkflowEngine {
         this.invalidatePush(w, progress);
       }
       if (targets) {
-        for (const member of [w.plan, w.execute]) {
-          if (!member) continue;
-          const snapshot = await this.port.inspect(member.id);
-          if (!snapshot || !this.quiet(snapshot))
-            throw new Error("진행 중인 대화가 끝난 뒤 푸시 상태를 확인하세요.");
-        }
+        await this.assertQuietProgressChange(w);
         const next = await resolvedPushTargets(
           this.probe,
           w.cwd,
@@ -2830,7 +2873,7 @@ export class WorkflowEngine {
       title: w.title,
       projectId: w.projectId,
       folder: path.basename(w.cwd),
-      progress: w.progress as "done" | "pushed",
+      progress: w.progress as "done" | "pushed" | "no_push",
       workspaceIds: [...new Set(members.flatMap((m) => (m.workspaceId ? [m.workspaceId] : [])))],
       agentIds: [...new Set([...members.map((m) => m.id), ...w.history])],
       archivedAt,
@@ -3103,7 +3146,12 @@ export class WorkflowEngine {
       if (!this.pushTitlesChecked) {
         this.pushTitlesChecked = true;
         for (const w of (await this.db()).workflows)
-          if (w.progress === "pushed" || w.managedPush || w.pushUnverified)
+          if (
+            w.progress === "pushed" ||
+            w.progress === "no_push" ||
+            w.managedPush ||
+            w.pushUnverified
+          )
             await this.renameWorkspaces(w, (await this.settings()).titleMarker);
       }
       // One workflow's failed read must not skip the others or the final save.
@@ -3884,7 +3932,7 @@ export class WorkflowEngine {
     w.status = "completed";
     w.asker = null;
     w.held = null;
-    if (w.progress !== "pushed") w.progress = "done";
+    if (w.progress !== "pushed" && w.progress !== "no_push") w.progress = "done";
   }
   private async consumeInbox(w: Workflow) {
     const progress = w.progress;
