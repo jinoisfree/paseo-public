@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+privacy_deny_file=${PASEO_PUBLIC_DENY_FILE:-"$HOME/.config/paseo-public/sync-deny.txt"}
+if [ -f "$privacy_deny_file" ]; then
+  exec python3 scripts/privacy_scan.py --staged --deny-file "$privacy_deny_file"
+fi
+exec python3 scripts/privacy_scan.py --staged

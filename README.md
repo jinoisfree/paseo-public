@@ -1,8 +1,7 @@
 # paseo-public
 
 Paseo용 한국어 개발 워크플로 플러그인과 macOS 접기 패치 관리 도구입니다.
-공개 저장소 이름은 `jinoisfree/paseo-public`입니다.
-이 저장소의 공유 코드는 개발 저장소에서 검사·테스트를 거쳐 자동 동기화됩니다.
+이 저장소에서 플러그인과 공용 스크립트를 직접 개발하고 배포합니다.
 
 ## 기능
 
@@ -161,13 +160,20 @@ macOS의 접기 결과 알림은 위 휴대폰 설정과 별개입니다.
 사용자 설정, 작업, 인계, 로그, 빌드, 백업, 현재 앱 renderer는 삭제하거나 되돌리지 않습니다.
 Paseo가 실행 중인 상태에서 플러그인 등록을 해제하세요.
 
-## 개발 검사
+## 개발
+
+플러그인과 공용 스크립트·패치의 원본은 이 저장소입니다. 개인 설정·백업은 별도로 관리합니다.
+커밋 전 훅은 Git index의 파일을 개인정보 검사하며, 개인 차단 목록은 저장소 밖에 둡니다.
+`PASEO_PUBLIC_DENY_FILE`을 지정하거나 기본 `~/.config/paseo-public/sync-deny.txt`를 사용할 수 있습니다.
+목록 파일이 없으면 기본 검사를 실행합니다. 푸시는 대상 커밋에 대한 사용자 승인 후 실행합니다.
 
 ```sh
-npm ci --ignore-scripts
+npm install
+git config core.hooksPath .githooks
 npx playwright install chromium
 npm test
 npm run typecheck
+(cd plugin/role-workflow && npm run rules:sync)
 python3 -m unittest -v scripts/test_auto_reapply_fold.py scripts/test_install_pushed_fold.py scripts/test_setup.py scripts/test_privacy_scan.py scripts/test_fold_daemon_setup.py
 python3 scripts/privacy_scan.py --staged
 ```
