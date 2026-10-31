@@ -5,7 +5,8 @@ import { build } from "esbuild";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-test("general agent timeline card renders the durable agent, model and thinking without a state block", async () => {
+for (const planner of [undefined, { provider: "codex", model: "planner", thinking: "medium" }])
+test(`general timeline card renders ${planner ? "both role assignments" : "legacy assignment"} without a state block`, async () => {
   const result = await build({
     entryPoints: [new URL("../client/general-agent-card.tsx", import.meta.url).pathname],
     bundle: true,
@@ -27,6 +28,7 @@ test("general agent timeline card renders the durable agent, model and thinking 
       item: {
         data: {
           choice: { provider: "codex", model: "chosen", thinking: "high" },
+          ...(planner ? { planner } : {}),
           message: "선택한 담당 대화로 넘겼습니다",
         },
       },
@@ -36,4 +38,9 @@ test("general agent timeline card renders the durable agent, model and thinking 
   assert.ok(html.includes("Codex · chosen · high"));
   assert.ok(html.includes("선택한 담당 대화로 넘겼습니다"));
   assert.ok(!html.includes("paseo-workflow"));
+  if (planner) {
+    assert.ok(html.includes("기획·설계·검증"));
+    assert.ok(html.includes("Codex · planner · medium"));
+    assert.ok(html.includes("구현"));
+  }
 });

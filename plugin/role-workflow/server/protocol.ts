@@ -26,7 +26,7 @@ const AUTOMATION_OPEN = "<paseo-automation-v1>";
 export const AUTOMATION_INSTRUCTIONS = `
 ${AUTOMATION_OPEN}
 이 대화는 사용자가 승인한 Paseo 자동 작업 흐름에 속한다. 실제 대화 생성과 전달은 호스트 플러그인이 수행한다. 너는 다른 에이전트를 직접 실행하거나 메시지를 보내지 않는다.
-계획 담당은 분석·계획·검토를, 실행 담당은 구현·검증을 맡는다. 이 대화의 역할은 paseo-role-workflow-v1 블록에 명시되어 있다. 사용자가 직접 역할을 지정하거나 자동화를 중단하면 그 지시를 우선한다.
+계획 담당은 기획·설계·최종 검증을, 실행 담당은 구현·자체 시험을 맡는다. 이 대화의 역할은 paseo-role-workflow-v1 블록에 명시되어 있다. 사용자가 직접 역할을 지정하거나 자동화를 중단하면 그 지시를 우선한다.
 완료 조건을 먼저 정하고 요청 범위만 수행한다. 계획 담당은 코드와 실제 검증 결과를 읽어 검토한다. 실행 담당은 실행한 명령과 실제 결과, 미실행 검증을 구분하여 보고한다. 보고만 믿고 완료를 선언하지 않는다.
 각 응답은 인계 가능한 작업 경계에서 마친다. 다음 응답을 위해 목표, 결정과 이유, 파일 경로, 변경 사항, 검증 결과, 남은 작업을 handoff에 기록한다. 컨텍스트는 같은 대화에서 압축된다. 압축 후에도 이 기록과 실제 파일을 확인하며 작업을 이어간다.
 summary는 결과를 짧게, next는 다음 행동만, handoff는 새 결정·변경·남은 문제를 중심으로 쓴다. checks의 검증 내용을 다른 필드에 반복하지 않는다. 전체 로그는 파일에 두고 경로를 전달한다.
@@ -136,7 +136,7 @@ export function executorModelPrompt(
       return `담당 에이전트가 ${provider === "claude" ? "Claude Code" : "Codex"}일 때, ${BUNDLED_QUESTION_INSTRUCTION}
 질문/header: ${GENERAL_QUESTIONS.model.question}/${GENERAL_QUESTIONS.model.header}, ${GENERAL_QUESTIONS.thinking.question}/${GENERAL_QUESTIONS.thinking.header}.
 ${bundledChoices(choices, thinking)}
-답변이 실제로 도착하기 전에는 조사·구현하지 않는다. 선택 후 호스트가 적용하도록 응답을 마친다. 현재 설정과 다르면 이 대화에서는 작업하지 않는다. 상태 블록은 출력하지 않는다.`;
+답변이 실제로 도착하기 전에는 조사·구현하지 않는다. 선택은 구현 담당에게만 적용하며 최초 대화의 모델·추론을 바꾸지 않는다. 선택 후 최초 대화가 기획·설계를 계속하고 인계서를 작성한 뒤 plan 상태로 별도 구현 대화에 넘긴다.`;
     return `\n<paseo-executor-model-v1>
 ${gated ? `${FEDERATED_ONLY}\n연합개발로 정해진 직후, 조사를 시작하기 전에` : "이 대화의 첫 응답을 쓰기 전에, 조사를 시작하기 전에"} 질문 도구를 한 번만 호출한다. 계획을 세운 뒤로 미루지 않는다.
 ${BUNDLED_QUESTION_INSTRUCTION}${gated ? " 진행 방식 질문과 같은 호출에 넣지 않으며, 진행 방식이 일반개발이면 모델·추론을 묻지 않는다. 일반개발로 진행하다가 연합개발로 바뀐 경우에도 연합개발로 정해진 직후에 묻는다." : ""}
@@ -173,6 +173,7 @@ ${choices}
 export function modeSelectPrompt(
   provider: WorkflowProvider = "claude",
   start: "ask" | "general" | "federated" = "ask",
+  sharedRoles = false,
 ): string {
   const planner = provider === "claude" ? "Claude" : "Codex";
   const executor = provider === "claude" ? "Codex" : "Claude";
@@ -186,6 +187,12 @@ ${provider === "codex" ? "Codex에서는 사용 가능한 request_user_input_asy
     deciding = `기본 진행 방식은 일반개발이다. 진행 방식을 묻지 않는다. 사용자의 메시지가 '연합개발'을 명시해 요청한 경우에만 연합개발로 진행한다.`;
   else
     deciding = `저장된 진행 방식은 연합개발이다. 진행 방식을 다시 묻지 않는다. 사용자가 이번 대화에서 일반개발을 명시적으로 선택하면 그 선택을 우선하고 실행 모델·추론을 묻지 않는다.`;
+  if (sharedRoles) return `\n<paseo-mode-select-v1>
+일반개발과 연합개발 모두 최초 대화가 기획·설계·검증을 맡고 별도 대화가 구현·자체 시험을 맡는다. 호스트가 plan → result → 검증과 보완을 자동 인계한다. 최초 모델·추론을 구현 모델 선택으로 바꾸지 않는다. 일반개발도 역할·자동 인계·상태 블록 지침을 따른다.
+${start === "ask" ? deciding.replace("일반개발은 이 대화에서 직접 조사·구현·검증", "일반개발도 역할을 분리하여 자동 인계") : `저장된 진행 방식은 ${start === "general" ? "일반개발" : "연합개발"}이다. 진행 방식을 묻지 않는다. 사용자가 이번 대화에서 명시적으로 선택한 방식을 우선한다.`}
+일반개발에서는 구현 에이전트·모델·추론을 선택하고, 연합개발에서는 해당 실행 모델 선택 지침을 따른다. 구현 담당이 확정되면 다시 묻지 않는다. 모델 선택 중에는 구현하지 않는다. 같은 모델을 선택해도 별도 구현 대화를 사용하며 단일 모델 검증으로 보고한다.
+진행 방식·역할·선택된 구현 담당을 압축 뒤에도 유지한다. 제품 코드는 구현 담당만 고치고 최종 검증은 최초 대화에서 수행한다.
+</paseo-mode-select-v1>`;
   return `\n<paseo-mode-select-v1>
 이 대화는 아래 두 방식 중 하나로만 진행한다. 방식에 따라 따를 지침이 다르므로 다른 지침보다 먼저 방식을 정한다.
 - 일반개발: 이 워크스페이스에서 직접 조사·구현·검증.

@@ -272,7 +272,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
             </Text>
             <Text style={s.muted}>
               {saved.mode === "general" ? "일반개발" : "연합개발"}
-              {saved.general ? ` · 담당: ${generalAgentLabel(saved.general)}` : ""}
+              {saved.general ? ` · 구현: ${generalAgentLabel(saved.general)}` : ""}
               {saved.codex
                 ? ` · GPT 실행: ${saved.codex.model} (${saved.codex.thinking || "기본 추론"})`
                 : ""}
@@ -365,10 +365,10 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
           )}
         </View>
         <View style={s.row}>
-          {modelChoice("Claude 시작 → GPT 실행", "codex", executorProvider === "codex", () =>
+          {modelChoice("GPT 구현 설정", "codex", executorProvider === "codex", () =>
             setExecutorProvider("codex"),
           )}
-          {modelChoice("GPT 시작 → Claude 실행", "claude", executorProvider === "claude", () =>
+          {modelChoice("Claude 구현 설정", "claude", executorProvider === "claude", () =>
             setExecutorProvider("claude"),
           )}
         </View>
@@ -474,7 +474,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
   }
   /** Escapes from a stop that only the user can settle; each says what it skips. */
   function recoveryControls(w: Parameters<typeof workflowLabel>[0]) {
-    if (w.mode !== "federated") return null;
+    if (!w.automatic && w.mode !== "federated") return null;
     return (
       <>
         {w.deliveryUnconfirmed && !w.generalTransition && (
@@ -655,12 +655,13 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
           </Text>
           <Text style={s.muted}>{w.cwd}</Text>
           <Text style={s.text}>{w.detail}</Text>
+          {w.plannerAgent && <Text style={s.muted}>기획·설계·검증 · {generalAgentLabel(w.plannerAgent)}</Text>}
           {w.mode === "general" && w.generalAgent && (
-            <Text style={s.muted}>{generalAgentLabel(w.generalAgent)}</Text>
+            <Text style={s.muted}>{w.automatic ? "구현 · " : ""}{generalAgentLabel(w.generalAgent)}</Text>
           )}
           {repositoryPanel(w)}
           <ManagedPushPanel workflow={w} refresh={load} styles={s} />
-          {w.mode === "federated" && (
+          {(w.automatic || w.mode === "federated") && (
             <Text style={s.muted}>
               반복 {w.cycles}회 · 자동 응답 {w.turns}회 · 압축 계획 {w.planCompactions}회 / 실행{" "}
               {w.executeCompactions}회
@@ -669,7 +670,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
           <View style={s.row}>
             {w.planAgentId &&
               button(
-                `${w.mode === "federated" ? "계획" : "대화"}${w.planGeneration > 1 ? w.planGeneration : ""} 열기 · ${w.planUsage === null ? "사용량 미제공" : Math.round(w.planUsage * 100) + "%"}`,
+                `${w.automatic || w.mode === "federated" ? "기획·설계·검증" : "대화"}${w.planGeneration > 1 ? w.planGeneration : ""} 열기 · ${w.planUsage === null ? "사용량 미제공" : Math.round(w.planUsage * 100) + "%"}`,
                 () => navigation?.openAgent({ agentId: w.planAgentId! }),
               )}
             {w.executeAgentId &&
@@ -678,10 +679,10 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
                 () => navigation?.openAgent({ agentId: w.executeAgentId! }),
               )}
           </View>
-          {w.mode === "federated" && w.status === "completed" && (
+          {(w.automatic || w.mode === "federated") && w.status === "completed" && (
             <Text style={s.muted}>이 계획 대화에 새 지시를 보내면 다시 시작합니다</Text>
           )}
-          {w.mode === "federated" && !w.generalTransition && w.status !== "completed" && (
+          {(w.automatic || w.mode === "federated") && !w.generalTransition && w.status !== "completed" && (
             <>
               <Text style={s.muted}>사용자 답변·추가 지시 (필요한 경우)</Text>
               {field(`${w.title} 추가 지시`, messages[w.id] ?? "", (value) =>

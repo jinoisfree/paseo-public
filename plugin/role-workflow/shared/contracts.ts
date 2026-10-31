@@ -129,6 +129,8 @@ export const workflowViewSchema = z.object({
   conflict: z.string().default(""),
   waitingFor: z.number().optional(),
   generalAgent: generalAgentSchema.nullable().default(null),
+  plannerAgent: generalAgentSchema.nullable().default(null),
+  automatic: z.boolean().default(false),
   verdict: verdictViewSchema.nullable().default(null),
   generalTransition: z.boolean().default(false),
   deliveryUnconfirmed: z.boolean().default(false),

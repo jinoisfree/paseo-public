@@ -219,7 +219,7 @@ for (const provider of ["claude", "codex"]) {
           assert.match(config.systemPrompt, /진행 방식이 일반개발이면 모델·추론을 묻지 않는다/);
         } else {
           assert.match(config.systemPrompt, /저장된 진행 방식은 연합개발이다/);
-          assert.match(config.systemPrompt, /일반개발을 명시적으로 선택하면 그 선택을 우선/);
+          assert.match(config.systemPrompt, /명시적으로 선택한 방식을 우선/);
           assert.doesNotMatch(config.systemPrompt, /한 번만 질문 도구로 진행 방식을 묻는다/);
         }
       } else {

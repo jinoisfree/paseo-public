@@ -576,7 +576,7 @@ export function createPort(
       if (agent.id !== transfer.agentId)
         throw new Error("생성된 일반개발 대화 ID가 선택 대상과 다릅니다.");
     },
-    async generalNotice(id, choice, message, noticeId) {
+    async generalNotice(id, choice, message, noticeId, planner) {
       await getApi()
         .agents.ref(id)
         .timeline.append({
@@ -584,7 +584,7 @@ export function createPort(
           type: "plugin",
           kind: "general-agent",
           version: 1,
-          data: { choice, message },
+          data: { choice, message, ...(planner ? { planner } : {}) },
         });
     },
     async compact(id, messageId) {

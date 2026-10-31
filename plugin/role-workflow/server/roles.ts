@@ -63,10 +63,12 @@ export function appendRoleInstructions(
   provider: string,
   existing?: string,
   role?: WorkflowRole,
-  options: { automated?: boolean; gated?: boolean } = {},
+  options: { automated?: boolean; gated?: boolean; sharedRoles?: boolean } = {},
 ): string | undefined {
   if (provider !== "claude" && provider !== "codex") return existing;
-  const counterpart = NAMES[provider === "claude" ? "codex" : "claude"];
+  const counterpart = options.sharedRoles
+    ? "선택된 담당 모델"
+    : NAMES[provider === "claude" ? "codex" : "claude"];
   const automated = options.automated ?? false;
   // Without an explicit role each provider keeps its original one.
   const instructions =
@@ -93,10 +95,11 @@ export function composePrompt(
     mode?: string;
     trailing?: string;
     rulesReadme?: string | null;
+    sharedRoles?: boolean;
   },
 ): string | undefined {
   if (provider !== "claude" && provider !== "codex") return existing;
-  const gated = !!parts.mode;
+  const gated = !!parts.mode && !parts.sharedRoles;
   const original = stripManagedBlocks((existing ?? "").replace(BLOCK, ""));
   const lead = [original, agentRulesBlock(parts.rulesReadme), parts.mode?.trim()]
     .filter(Boolean)
@@ -104,6 +107,7 @@ export function composePrompt(
   const role = appendRoleInstructions(provider, lead, parts.role, {
     automated: parts.automated,
     gated,
+    sharedRoles: parts.sharedRoles,
   })!;
   return (parts.automated ? role + "\n" + automationBlock(gated) : role) + (parts.trailing ?? "");
 }

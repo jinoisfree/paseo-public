@@ -1,6 +1,12 @@
 import { z } from "zod";
 
 export const GENERAL_QUESTIONS = {
+  agent: { header: "구현 담당", question: "일반개발의 구현을 맡을 에이전트를 선택하세요" },
+  model: { header: "구현 모델", question: "일반개발 구현 모델을 선택하세요" },
+  thinking: { header: "구현 추론", question: "일반개발 구현 추론 강도를 선택하세요" },
+} as const;
+// Persisted conversations keep their original immutable prompts and question text.
+export const LEGACY_GENERAL_QUESTIONS = {
   agent: { header: "일반 담당", question: "일반개발을 맡을 에이전트를 선택하세요" },
   model: { header: "일반 모델", question: "일반개발 담당 모델을 선택하세요" },
   thinking: { header: "일반 추론", question: "일반개발 담당 추론 강도를 선택하세요" },
@@ -29,6 +35,7 @@ export const generalStateSchema = z.object({
 });
 export const generalCardSchema = z.object({
   choice: generalAgentSchema,
+  planner: generalAgentSchema.optional(),
   message: z.string(),
 });
 export function generalAgentLabel(

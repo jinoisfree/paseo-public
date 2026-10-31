@@ -15,6 +15,8 @@ export function workflowLabel(w: WorkflowView) {
     return "구현 완료 · 미푸시";
   if (w.mode === "undecided") return "방식 선택 전";
   if (w.progress === "plan") return "계획";
+  if (w.automatic)
+    return { plan: "기획·설계", execute: "구현", review: "검증" }[w.phase];
   return "진행 중";
 }
 export function visibleWorkflows(workflows: readonly WorkflowView[], filter: WorkflowFilter) {

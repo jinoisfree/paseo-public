@@ -331,7 +331,7 @@ test("remembered general choice leads the agent options and its model catalog", 
   assert.match(prompt, /선택지: Codex, Claude Code/);
   assert.ok(prompt.indexOf("Chosen (codex/chosen)") < prompt.indexOf("Other (codex/other)"));
   assert.match(prompt, /일반개발 전용/);
-  assert.match(prompt, /기본값\(현재 대화 설정\) 사용/);
+  assert.match(prompt, /최초 대화의 모델·추론·역할은 바꾸지 않는다/);
   assert.equal(generalAgentLabel(choice), "Codex · chosen · high");
 });
 

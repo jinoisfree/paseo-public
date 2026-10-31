@@ -1,4 +1,4 @@
-import { GENERAL_QUESTIONS, type GeneralAgent } from "../shared/general-agent";
+import { GENERAL_QUESTIONS, LEGACY_GENERAL_QUESTIONS, type GeneralAgent } from "../shared/general-agent";
 import type { PaseoAgentConfig } from "@getpaseo/client";
 import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
 
@@ -9,7 +9,8 @@ export function generalQuestionNames(input: unknown): GeneralQuestion[] {
   return questions.flatMap((q) =>
     Object.entries(GENERAL_QUESTIONS).flatMap(([name, value]) =>
       q &&
-      (q.question === value.question || q.title === value.question || q.header === value.header)
+      [value, LEGACY_GENERAL_QUESTIONS[name as GeneralQuestion]].some((v) =>
+        q.question === v.question || q.title === v.question || q.header === v.header)
         ? [name as GeneralQuestion]
         : [],
     ),
@@ -24,7 +25,9 @@ export function generalAnswers(
   return Object.fromEntries(
     names.flatMap((name, index) => {
       const q = GENERAL_QUESTIONS[name];
+      const legacy = LEGACY_GENERAL_QUESTIONS[name];
       const value =
+        Reflect.get(answers, legacy.question) ?? Reflect.get(answers, legacy.header) ??
         Reflect.get(answers, q.question) ??
         Reflect.get(answers, q.header) ??
         Reflect.get(answers, `Question ${index + 1}`);
@@ -53,8 +56,10 @@ export function asyncGeneralAnswers(
     if (next?.type !== "user_message" || next.text !== "Answers to your questions:\n\n" + detail)
       continue;
     for (const [name, q] of Object.entries(GENERAL_QUESTIONS)) {
-      const entry = detail.split("\n\n").find((part) => part.startsWith(q.question + "\n"));
-      if (entry) result[name as GeneralQuestion] = entry.slice(q.question.length + 1).trim();
+      for (const variant of [q, LEGACY_GENERAL_QUESTIONS[name as GeneralQuestion]]) {
+        const entry = detail.split("\n\n").find((part) => part.startsWith(variant.question + "\n"));
+        if (entry) result[name as GeneralQuestion] = entry.slice(variant.question.length + 1).trim();
+      }
     }
   }
   return result;

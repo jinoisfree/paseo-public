@@ -2119,10 +2119,10 @@ test("delivered context states the mode and role and no longer lists unused ids"
   await f.finish("planner", "p1", "plan");
   assert.match(
     f.sent[0].prompt,
-    /^작업 ID: .+\n진행 방식: 연합개발 · 이 대화의 역할: 구현·검증 담당\n/,
+    /^작업 ID: .+\n진행 방식: 연합개발 · 이 대화의 역할: 구현·자체 시험 담당\n/,
   );
   await f.finish(f.created[0].id, "e1", "result");
-  assert.match(f.sent[1].prompt, /이 대화의 역할: 계획·검토 담당/);
+  assert.match(f.sent[1].prompt, /이 대화의 역할: 기획·설계·검증 담당/);
   for (const message of f.sent) assert.doesNotMatch(message.prompt, /이전 대화 ID/);
   for (let i = 0; i < 230; i++) await f.engine.ended("planner", `chat-${i}`, "잡담", null);
   assert.ok((await stored(f)).processed.length <= 200);

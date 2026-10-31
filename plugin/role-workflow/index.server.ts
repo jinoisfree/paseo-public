@@ -127,7 +127,7 @@ export default function contribute(server: PluginServerContext) {
       );
     }
     let trailing = "";
-    if (settings.askExecutorModel) {
+    if (settings.askExecutorModel && mode !== "general") {
       trailing += await modelPrompt(
         paseo,
         config.cwd,
@@ -137,7 +137,13 @@ export default function contribute(server: PluginServerContext) {
       );
     }
     // Without a model catalog the question cannot be offered; fall back to the saved choice.
-    if (!trailing) trailing += savedExecutorPrompt(settings, config.provider);
+    if (!trailing && mode !== "general") trailing += savedExecutorPrompt(settings, config.provider);
+    if (!settings.askExecutorModel && mode === "general") {
+      const preferred = await engine.generalDefault(config.cwd);
+      if (preferred) generalSelection = `구현 담당은 저장된 설정 ${preferred.provider}/${preferred.model} · ${preferred.thinking || "모델 기본값"}을 사용한다. 최초 대화는 기획·설계·검증을 유지하고 별도 구현 대화로 자동 인계한다.`;
+      else generalSelection = "구현 담당의 저장된 선택이 없다. 최초 모델이 구현을 대신하지 말고 구현 담당 선택을 요청한다.";
+      generalSelection = `<paseo-general-agent-v1>\n${generalSelection}\n</paseo-general-agent-v1>`;
+    }
     return { generalSelection, trailing };
   };
   const removers = [
@@ -169,7 +175,7 @@ export default function contribute(server: PluginServerContext) {
       const titles =
         titlePrompts(addsTitle, automated && settings.titleMarker) + pushApprovalPrompt();
       const systemPrompt =
-        mode === "general"
+        ready
           ? await generalPrompt(
               directory,
               request.config.systemPrompt,
@@ -187,8 +193,9 @@ export default function contribute(server: PluginServerContext) {
               rulesReadme,
               role,
               automated,
+              sharedRoles: automated,
               mode: gated
-                ? modeSelectPrompt(provider, mode === "federated" ? "federated" : "ask")
+                ? modeSelectPrompt(provider, mode === "undecided" ? "ask" : mode!, true)
                 : "",
               trailing: trailing + generalSelection + titles,
             })!;
@@ -239,7 +246,7 @@ export default function contribute(server: PluginServerContext) {
         const snapshot = await port.inspect(agent.id).catch(() => null);
         if (!snapshot) continue;
         await engine
-          .enroll(snapshot, seed.config, seed.env, seed.mode, seed.titled, 2)
+          .enroll(snapshot, seed.config, seed.env, seed.mode, seed.titled, 3)
           .catch(report);
         return;
       }

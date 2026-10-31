@@ -245,9 +245,17 @@ const workflowSchema = z.object({
 });
 export type Workflow = z.infer<typeof workflowSchema>;
 
+/** Contract 3 keeps the original planner and shares the automatic role engine. */
+function splitGeneral(w: Workflow): boolean {
+  return w.mode === "general" && w.contract >= 3;
+}
+function automates(w: Workflow): boolean {
+  return w.mode === "federated" || splitGeneral(w);
+}
+
 function generalView(w: Workflow): GeneralAgent | null {
   if (w.mode !== "general" || !w.plan) return null;
-  return w.generalState.selected ?? configChoice(w.plan.config);
+  return w.generalState.selected ?? (splitGeneral(w) ? null : configChoice(w.plan.config));
 }
 
 function isReadOnlyReview(
@@ -257,7 +265,7 @@ function isReadOnlyReview(
   evidence: TurnEvidence | undefined,
 ) {
   return (
-    w.mode === "federated" &&
+    automates(w) &&
     agentId === w.plan?.id &&
     decision?.status === "complete" &&
     !!evidence &&
@@ -344,6 +352,7 @@ export interface WorkflowPort {
     choice: GeneralAgent,
     message: string,
     noticeId: string,
+    planner?: GeneralAgent,
   ): Promise<void>;
   send(id: string, prompt: string, messageId: string): Promise<void>;
   /** Reads the latest turn. `through` is a message id the search must reach back to. */
@@ -553,7 +562,7 @@ export class WorkflowEngine {
     const marked: [Workflow, string][] = [];
     for (const w of db.workflows) {
       if (
-        w.mode === "federated" &&
+        automates(w) &&
         w.status === "active" &&
         w.pending?.stage === "queued" &&
         w.writerWait &&
@@ -594,7 +603,7 @@ export class WorkflowEngine {
       else if (w.status === "completed" && w.cycles >= 1 && db.settings.notifyCompleted)
         kind = "completed";
       const member = w.plan ?? w.execute;
-      if (kind && member && w.mode === "federated")
+      if (kind && member && automates(w))
         events.push({
           kind,
           title: `${kind === "stopped" ? "작업 중단" : "작업 완료"} · ${w.title}`,
@@ -1185,6 +1194,8 @@ export class WorkflowEngine {
         conflict: w.conflict,
         waitingFor: this.waitingFor(w),
         generalAgent: generalView(w),
+        plannerAgent: w.contract >= 3 && w.plan ? configChoice(w.plan.config) : null,
+        automatic: automates(w),
         verdict: verdictView(w),
         generalTransition: w.generalTransition,
         deliveryUnconfirmed: w.pending?.stage === "sending" && w.status !== "active",
@@ -1224,7 +1235,12 @@ export class WorkflowEngine {
         id: snapshot.id,
         workspaceId: snapshot.workspaceId,
         generation: 1,
-        config: slimConfig(config),
+        config: slimConfig(contract >= 3 ? {
+          ...config,
+          provider: snapshot.config?.provider || config.provider,
+          modeId: snapshot.config?.modeId ?? config.modeId,
+          thinkingOptionId: snapshot.config?.thinkingOptionId ?? config.thinkingOptionId,
+        } : config),
         env,
         usage: snapshot.usage,
         lastTurnKey: "",
@@ -1236,7 +1252,7 @@ export class WorkflowEngine {
       };
       const w: Workflow = {
         id: randomUUID(),
-        contract: mode === "general" ? 1 : contract,
+        contract: mode === "general" && contract < 3 ? 1 : contract,
         completeRepairs: 0,
         verdict: null,
         verdictIssue: "",
@@ -1348,7 +1364,7 @@ export class WorkflowEngine {
         resumed: false,
         answers: true,
       };
-      if (await this.finishGeneralChoice(w, agentId, text, goal, request, failed)) return;
+      if (await this.finishGeneralChoice(w, agentId, text, goal, request, failed, key)) return;
       if (await this.transitionTurn(w, turn, request, messageIds)) return;
       const chatResume = await this.chatResume(w, turn, request);
       const role: Role = w.plan?.id === agentId ? "plan" : "execute";
@@ -1418,7 +1434,7 @@ export class WorkflowEngine {
   ): Promise<"resumed" | "blocked" | null> {
     const said = userText(request);
     if (
-      w.mode !== "federated" ||
+      !automates(w) ||
       !["paused", "error", "needs_input"].includes(w.status) ||
       w.generalTransition ||
       turn.failed !== null ||
@@ -1472,10 +1488,21 @@ export class WorkflowEngine {
     messageIds?: readonly string[],
   ) {
     const switching =
-      w.mode === "federated" &&
+      automates(w) &&
       !!w.execute &&
       w.plan?.id === turn.agentId &&
       requestedMode(userText(request)) === "general";
+    if (splitGeneral(w) && requestedMode(userText(request)) === "federated") {
+      w.mode = "federated";
+      await this.rememberProject(w);
+      await this.save();
+    }
+    if (switching && w.contract >= 3) {
+      w.mode = "general";
+      await this.rememberProject(w);
+      await this.save();
+      return false;
+    }
     if (switching || w.generalTransition) {
       if (w.inbox && !w.transitionTurns.some((entry) => entry.key === w.inbox!.key))
         w.transitionTurns.push(w.inbox);
@@ -1512,12 +1539,12 @@ export class WorkflowEngine {
     report = text,
   ): Promise<boolean> {
     let transitioned = false;
-    if (w.mode === "federated" && !w.execute && requestedMode(userText(request)) === "general") {
+    if (automates(w) && !w.execute && requestedMode(userText(request)) === "general") {
       this.generalize(w);
       await this.rememberProject(w);
       await this.save();
     }
-    if (w.mode !== "federated") {
+    if (!automates(w)) {
       // The request counts even when the turn that carried it failed.
       await this.noteModeRequest(w, userText(request));
       if (failed !== null) return false;
@@ -2055,7 +2082,7 @@ export class WorkflowEngine {
     report = text,
     key = "",
   ): Workflow["progress"] | null {
-    if (pushPending(report)) return "done";
+    if (pushPending(report)) return w.contract >= 3 && automates(w) && w.status !== "completed" ? null : "done";
     // The user's own line wins and works in conversations created before the progress prompt.
     // Messages delivered by this plugin start with the flow id and are never read as one.
     const user = parseProgress(userText(request));
@@ -2068,10 +2095,12 @@ export class WorkflowEngine {
       w.pushReceipt.turnKey === key
     )
       return "pushed";
+    // Contract 3 promotes completion only after the planner verdict gate in complete().
+    if (w.contract >= 3 && automates(w) && ["done", "no_push"].includes(stated ?? "")) return null;
     if (stated) return stated;
     // A block completes the work only from a federation's planner or a lone legacy executor.
-    const finishes = w.plan ? w.mode === "federated" && w.plan.id === agentId : true;
-    if (!finishes || w.progress === "pushed" || w.progress === "no_push") return null;
+    const finishes = w.plan ? automates(w) && w.plan.id === agentId : true;
+    if (!finishes || w.progress === "pushed" || w.progress === "no_push" || w.contract >= 3) return null;
     try {
       return parseDecision(text).status === "complete" ? "done" : null;
     } catch {
@@ -2080,7 +2109,7 @@ export class WorkflowEngine {
   }
   /** Flows from before progress tracking are green when finished or awaiting a read complete. */
   private legacyProgress(w: Workflow): Workflow["progress"] {
-    if (w.progress !== "active" || w.mode !== "federated") return w.progress;
+    if (w.progress !== "active" || !automates(w)) return w.progress;
     const waiting = w.inbox?.failed === null && this.declared(w, w.inbox.agentId, w.inbox.text);
     return w.status === "completed" || waiting === "done" ? "done" : w.progress;
   }
@@ -2093,7 +2122,7 @@ export class WorkflowEngine {
     return w.managedPush?.state ?? (w.pushUnverified ? "unknown" : undefined);
   }
   private waitingFor(w: Workflow) {
-    return w.mode === "federated" && w.status === "active" && w.pending?.stage === "queued"
+    return automates(w) && w.status === "active" && w.pending?.stage === "queued"
       ? w.writerWait?.blocker || undefined
       : undefined;
   }
@@ -2104,7 +2133,7 @@ export class WorkflowEngine {
     detail: { number: number; progress: Workflow["progress"] },
     keep: boolean,
   ) {
-    const paired = w.mode === "federated" && !!w.plan;
+    const paired = automates(w) && !!w.plan;
     // The executor is a tab in the planner's workspace. Only flows from before that keep
     // two workspaces, each naming its role.
     const apart = !!w.execute?.workspaceId && w.execute.workspaceId !== w.plan?.workspaceId;
@@ -2444,6 +2473,8 @@ export class WorkflowEngine {
     });
   }
   private executorProvider(w: Workflow) {
+    if (w.contract >= 3 && w.generalState.selected)
+      return w.generalState.selected.provider;
     // Existing standalone executors have no planner and keep their provider.
     return w.plan
       ? oppositeProvider(w.plan.config.provider)
@@ -2452,9 +2483,11 @@ export class WorkflowEngine {
   private async restoreExecutor(w: Workflow) {
     const member = w.execute!;
     const defaults = executorDefaults(await this.settings(), this.executorProvider(w));
-    member.config.provider = defaults.model;
+    const selected = w.contract >= 3 ? w.generalState.selected : null;
+    member.config.provider = selected ? (selected.model ? `${selected.provider}/${selected.model}` : selected.provider) : defaults.model;
     member.config.modeId = defaults.mode;
-    if (defaults.thinking) member.config.thinkingOptionId = defaults.thinking;
+    const thinking = selected ? selected.thinking : defaults.thinking;
+    if (thinking) member.config.thinkingOptionId = thinking;
     else delete member.config.thinkingOptionId;
   }
   private dispatch(event: NotificationEvent) {
@@ -2507,7 +2540,7 @@ export class WorkflowEngine {
       }
       if (
         !w ||
-        w.mode !== "federated" ||
+        !automates(w) ||
         !db.settings.notifyPermission ||
         this.permissions.has(key)
       )
@@ -2548,13 +2581,13 @@ export class WorkflowEngine {
       // Clear stale questions before queuing a transition as well as before an immediate choice.
       for (const pending of this.modeQuestions.keys())
         if (pending.startsWith(`${agentId}:`)) this.modeQuestions.delete(pending);
-      if (mode === "general" && w.execute) {
+      if (mode === "general" && w.execute && w.contract < 3) {
         await this.returnToGeneral(w);
         return;
       }
       const established = w.mode !== "undecided";
-      if (mode === "general") this.generalize(w);
-      else w.mode = "federated";
+      if (mode === "general" && !(w.contract >= 3 && automates(w))) this.generalize(w);
+      else w.mode = mode;
       w.wantsFederation = false;
       await this.rememberProject(w);
       await this.save();
@@ -2569,11 +2602,43 @@ export class WorkflowEngine {
     goal: string,
     request: string,
     failed: string | null,
+    key: string,
   ) {
     if (w.mode === "undecided" && requestedMode(userText(request)) === "general")
       this.generalize(w);
     if (w.mode !== "general" || w.plan?.id !== agentId) return false;
     if (!w.goal) w.goal = goal || request;
+    if (splitGeneral(w)) {
+      if (failed !== null) return false;
+      const wasSettled = w.generalState.settled;
+      if (!wasSettled) {
+        const explicit = explicitGeneralChoice(userText(request));
+        if (explicit) w.generalState.selected = explicit;
+      }
+      await this.applyGeneralChoice(w);
+      if (!wasSettled && w.generalState.settled && w.asker === "plan") {
+        w.asker = null;
+        w.status = "active";
+      }
+      try {
+        if (parseDecision(text).status !== "note" || wasSettled || !w.generalState.settled) return false;
+      } catch {
+        // The model may end a question-only turn without an automation block.
+      }
+      if (wasSettled) return false;
+      this.seen(w, key);
+      if (w.generalState.settled) {
+        this.queue(
+          w,
+          "plan",
+          "구현 담당 선택을 저장했습니다. 최초 모델의 기획·설계 역할로 계속하세요. 제품 코드를 고치지 말고, 설계 인계서를 작성한 뒤 plan으로 구현 담당에게 인계하세요.",
+          "plan",
+        );
+        await this.save();
+        await this.advance(w);
+      } else await this.save();
+      return true;
+    }
     return (
       failed === null && this.applyGeneralChoice(w, text.includes("기본값(현재 대화 설정) 사용"))
     );
@@ -2647,6 +2712,14 @@ export class WorkflowEngine {
     if (!w.plan || w.generalState.settled) return false;
     const state = w.generalState;
     const settings = await this.settings();
+    if (splitGeneral(w)) {
+      if (Object.keys(state.questions).length) return false;
+      const selected =
+        state.selected ?? explicitGeneralChoice(w.goal) ??
+        (!settings.askExecutorModel ? await this.generalDefault(w.cwd) : null);
+      if (selected) await this.settleGeneralChoice(w, selected);
+      return false;
+    }
     const live = await this.port.inspect(w.plan.id).catch(() => null);
     const current = configChoice(live?.config ?? w.plan.config);
     const selected = state.selected ?? explicitGeneralChoice(w.goal);
@@ -2678,7 +2751,13 @@ export class WorkflowEngine {
     await this.save();
     if (w.plan)
       await this.port
-        .generalNotice?.(w.plan.id, selected, generalAgentLabel(selected), w.id)
+        .generalNotice?.(
+          w.plan.id,
+          selected,
+          (splitGeneral(w) ? "구현 담당 · " : "") + generalAgentLabel(selected),
+          w.id,
+          splitGeneral(w) ? configChoice(w.plan.config) : undefined,
+        )
         .catch(() => {});
   }
   private async transferGeneralChoice(
@@ -2761,7 +2840,7 @@ export class WorkflowEngine {
   private generalize(w: Workflow) {
     w.quotaPause = null;
     w.transientPause = null;
-    if (w.mode === "undecided") w.contract = 1;
+    if (w.mode === "undecided" && w.contract < 3) w.contract = 1;
     w.mode = "general";
     w.status = "active";
     w.notifiedStatus = "active";
@@ -2777,8 +2856,14 @@ export class WorkflowEngine {
     return this.serial(async () => {
       const w = (await this.db()).workflows.find((candidate) => candidate.id === id);
       if (!w) throw new Error("자동 작업을 찾을 수 없습니다.");
-      if (w.mode !== "federated") throw new Error("연합개발이 시작되지 않은 대화입니다.");
+      if (!automates(w)) throw new Error("연합개발이 시작되지 않은 대화입니다.");
       if (action === "general") {
+        if (w.contract >= 3) {
+          w.mode = "general";
+          await this.rememberProject(w);
+          await this.save();
+          return { ok: true as const, status: w.status, detail: w.detail };
+        }
         await this.returnToGeneral(w);
         return { ok: true as const, status: w.status, detail: w.detail };
       }
@@ -3086,7 +3171,7 @@ export class WorkflowEngine {
       );
       if (!w) return;
       if (isFinished(w)) await this.collectArchived(w);
-      else if (w.mode !== "federated" && w.plan?.id === agentId) await this.removeUndecided(w);
+      else if (!automates(w) && w.plan?.id === agentId) await this.removeUndecided(w);
     });
   }
   private async removeUndecided(w: Workflow, entry?: ArchiveEntry) {
@@ -3110,7 +3195,7 @@ export class WorkflowEngine {
   }
   private async cleanupArchived() {
     const candidates = (await this.db()).workflows.filter(
-      (w) => w.mode !== "federated" || isFinished(w),
+      (w) => !automates(w) || isFinished(w),
     );
     for (const w of candidates) {
       try {
@@ -3247,7 +3332,7 @@ export class WorkflowEngine {
 
   private async retryQuota(w: Workflow) {
     const record = w.quotaPause;
-    if (!record || w.status !== "paused" || w.mode !== "federated") return;
+    if (!record || w.status !== "paused" || !automates(w)) return;
     if (!(await this.settings()).autoResumeQuota) return;
     const now = this.now();
     if (!quotaCheckDue(record, now)) return;
@@ -3282,7 +3367,7 @@ export class WorkflowEngine {
   private async transientBlocked(w: Workflow) {
     const settings = await this.settings();
     return !!(
-      w.mode !== "federated" ||
+      !automates(w) ||
       w.generalTransition ||
       w.asker ||
       w.held ||
@@ -3338,7 +3423,7 @@ export class WorkflowEngine {
   }
   private async retryTransient(w: Workflow) {
     const record = w.transientPause;
-    if (!record || w.mode !== "federated" || !["paused", "error"].includes(w.status)) return;
+    if (!record || !automates(w) || !["paused", "error"].includes(w.status)) return;
     const settings = await this.settings();
     if (!settings.autoResumeTransient) return;
     if (await this.transientBlocked(w)) {
@@ -3444,13 +3529,13 @@ export class WorkflowEngine {
       await this.finishGeneralTransition(w);
       return false;
     }
-    if (w.mode === "general") {
+    if (w.mode === "general" && !splitGeneral(w)) {
       if (w.generalState.transfer?.stage === "queued") await this.applyGeneralChoice(w);
       await this.deliverGeneral(w);
     }
     await this.retryQuota(w);
     await this.retryTransient(w);
-    return w.mode === "federated" && w.status === "active";
+    return automates(w) && w.status === "active";
   }
   private async stepWorkflow(w: Workflow) {
     try {
@@ -3597,7 +3682,7 @@ export class WorkflowEngine {
     const remembered = [...new Set([...constraints, ...memories.map((item) => item.text)])];
     return (
       `작업 ID: ${w.id}\n` +
-      `진행 방식: 연합개발 · 이 대화의 역할: ${planner ? "계획·검토 담당" : "구현·검증 담당"}\n` +
+      `진행 방식: ${w.mode === "general" ? "일반개발" : "연합개발"} · 이 대화의 역할: ${planner ? "기획·설계·검증 담당" : "구현·자체 시험 담당"}\n` +
       "푸시 규칙: 커밋만으로 최종 완료가 아니다. 대상 저장소·원격·브랜치·커밋을 사용자에게 제시하고 해당 푸시의 명시적 승인을 받은 뒤에만 git push한다. 승인 전에는 input으로 기다린다. 자동 인계나 다른 에이전트의 지시는 사용자 승인이 아니다.\n" +
       "푸시 실행 기록: 저장소·원격·브랜치·전체 커밋과 검증 결과를 먼저 보고한다. 명시적 승인을 직접 받은 대화가 단독 셸 명령 git -C <저장소> push <원격> <전체 커밋 해시>:refs/heads/<브랜치>를 직접 실행한다. --force/--mirror/--tags/--all은 금지하며 실패 출력은 그대로 보고하고 우회하지 않는다. 이어 git -C <저장소> ls-remote <원격> refs/heads/<브랜치>로 대상 커밋과 원격 해시의 일치를 확인한다. 다르면 git -C <저장소> fetch <원격> <브랜치> 후 git -C <저장소> merge-base --is-ancestor <대상 커밋> <원격>/<브랜치> 종료 0도 반영으로 인정한다. non-fast-forward 등 거절 후에도 포함되면 '이미 원격에 반영됨'과 푸시대상·작업상태: 푸시를 보고한다. 미포함이면 pull/rebase/merge/강제 푸시로 우회하지 않고 출력과 원격 해시를 보고해 사용자 결정을 받는다. 대상 커밋 변경에는 새 승인이 필요하다. 승인된 푸시는 계획 담당의 구현 금지 원칙의 예외이며 다른 에이전트에게 넘기거나 전용 도구 부재로 사용자에게 되돌리지 않는다. '푸시 대상 확인' 또는 /push 버튼은 선택 경로이며 준비 자체는 승인이 아니다. 상태 재확인은 원격에 쓰지 않는다.\n" +
       (planner
@@ -3853,7 +3938,7 @@ export class WorkflowEngine {
     return null;
   }
   private writer(w: Workflow) {
-    const member = w.mode === "federated" ? w.execute : w.plan;
+    const member = automates(w) ? w.execute : w.plan;
     return member?.config.modeId === "plan" || member?.config.modeId === "read-only"
       ? null
       : member;
@@ -4198,8 +4283,13 @@ export class WorkflowEngine {
     else w.status = "completed";
   }
   private async complete(w: Workflow, d: Decision, role: Role) {
-    if (w.mode === "federated" && w.contract >= 2 && role === "plan") {
-      const problem = await verdictProblem(w.cwd, d.verdict);
+    if (automates(w) && w.contract >= 2 && role === "plan") {
+      let problem = await verdictProblem(w.cwd, d.verdict);
+      if (
+        !problem && w.contract >= 3 && w.plan && w.execute &&
+        w.plan.config.provider === w.execute.config.provider &&
+        d.verdict?.condition !== "단일 모델"
+      ) problem = "같은 모델의 별도 대화 검증은 단일 모델로 보고해야 합니다.";
       w.verdict = d.verdict ? { ...d.verdict, recordedAt: new Date().toISOString() } : null;
       w.verdictIssue = problem;
       if (problem && w.completeRepairs === 0) {
@@ -4208,7 +4298,14 @@ export class WorkflowEngine {
         this.touch(w, `완료 판정 정보를 한 번 다시 요청합니다: ${problem}`);
         return;
       }
-      if (problem) this.touch(w, problem === "판정 없음" ? problem : `판정 불일치: ${problem}`);
+      if (problem) {
+        this.touch(w, problem === "판정 없음" ? problem : `판정 불일치: ${problem}`);
+        if (w.contract >= 3) {
+          w.status = "needs_input";
+          w.asker = "plan";
+          return;
+        }
+      }
     }
     w.completeRepairs = 0;
     w.quotaPause = null;
@@ -4216,7 +4313,10 @@ export class WorkflowEngine {
     w.status = "completed";
     w.asker = null;
     w.held = null;
-    if (w.progress !== "pushed" && w.progress !== "no_push") w.progress = "done";
+    if (w.progress !== "pushed" && w.progress !== "no_push") {
+      w.progress = w.contract >= 3 && parseProgress(`${d.summary}\n${d.handoff}`) === "no_push"
+        ? this.noPushProgress(w) : "done";
+    }
   }
   private async consumeInbox(w: Workflow) {
     const progress = w.progress;
@@ -4269,6 +4369,12 @@ export class WorkflowEngine {
     replaces: boolean,
   ) {
     const settings = await this.startSettings(w.cwd, w.plan?.config.provider ?? "claude");
+    if (splitGeneral(w) && (!w.generalState.settled || !w.generalState.selected)) {
+      w.status = "needs_input";
+      w.asker = "plan";
+      this.touch(w, "구현 담당이 정해지지 않았습니다. 구현 에이전트·모델·추론을 선택한 뒤 인계하세요.");
+      return;
+    }
     if (!replaces && (await this.reassessRepeatedPlan(w, d))) return;
     if (!replaces && w.cycles >= settings.maxCycles) {
       // Keep the plan as inbox so raising the limit and resuming dispatches it.
@@ -4284,12 +4390,22 @@ export class WorkflowEngine {
       this.invalidatePush(w, "active");
       w.progress = "active";
       if (hadManagedPush) await this.renameWorkspaces(w, settings.titleMarker);
+      if (w.contract >= 3) {
+        w.verdict = null;
+        w.verdictIssue = "";
+        w.completeRepairs = 0;
+      }
       w.lastPlan = report;
       w.lastInstruction = d.next;
       if (!w.execute) {
         const defaults = executorDefaults(settings, this.executorProvider(w));
-        const model = d.executorModel ?? defaults.model;
-        const thinking = d.executorThinking ?? (model === defaults.model ? defaults.thinking : "");
+        const selected = w.contract >= 3 ? w.generalState.selected : null;
+        const model = selected
+          ? (selected.model ? `${selected.provider}/${selected.model}` : selected.provider)
+          : d.executorModel ?? defaults.model;
+        const thinking = selected
+          ? selected.thinking
+          : d.executorThinking ?? (model === defaults.model ? defaults.thinking : "");
         w.execute = {
           id: randomUUID(),
           workspaceId: null,

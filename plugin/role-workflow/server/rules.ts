@@ -78,7 +78,7 @@ export function agentRulesBlock(readme?: string | null): string {
 규칙 원본: ${JSON.stringify(readme)}. 작업 시작·압축 복구·모델 교대 때 README의 표에 따라 맡은 역할 문서를 직접 읽는다.
 plan: 00-common.md, 10-planning.md, 30-verification.md, 40-paseo-role-workflow.md.
 execute: 00-common.md, 20-implementation.md, 40-paseo-role-workflow.md.
-일반개발: 00-common.md 3.4절을 읽고 단계별로 10-planning.md → 20-implementation.md → 30-verification.md를 읽는다.
+일반개발: 00-common.md 3.4절을 읽고 현재 대화의 plan·execute 역할에 해당하는 문서를 읽는다.
 프로젝트 작업 폴더의 AGENTS.md·CLAUDE.md가 있으면 그것도 따르며, 충돌 시 00-common 1절 우선순위를 따른다.
 </paseo-agent-rules-v1>`;
 }

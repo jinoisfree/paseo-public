@@ -17,7 +17,10 @@ export function GeneralAgentCard({
   );
   return (
     <View>
-      <Text style={styles.text}>일반개발 · {generalAgentLabel(item.data.choice)}</Text>
+      {item.data.planner && (
+        <Text style={styles.text}>기획·설계·검증 · {generalAgentLabel(item.data.planner)}</Text>
+      )}
+      <Text style={styles.text}>{item.data.planner ? "구현" : "일반개발"} · {generalAgentLabel(item.data.choice)}</Text>
       <Text style={styles.muted}>{item.data.message}</Text>
     </View>
   );

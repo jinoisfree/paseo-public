@@ -233,9 +233,9 @@ for (const provider of ["claude", "codex"]) {
         /첫 응답을 쓰기 전에 한 번만 질문 도구로 진행 방식을 묻는다/,
       );
       assert.doesNotMatch(block(prompt, "mode-select"), /저장된 진행 방식은/);
-      assert.match(block(prompt, "role-workflow"), /연합개발 전용/);
+      assert.doesNotMatch(block(prompt, "role-workflow"), /연합개발 전용/);
       assert.match(block(prompt, "role-workflow"), /기획설계·검증 역할/);
-      assert.match(block(prompt, "automation"), /연합개발 전용/);
+      assert.doesNotMatch(block(prompt, "automation"), /연합개발 전용/);
       const model = block(prompt, "executor-model");
       if (catalog) {
         const other = provider === "claude" ? "codex" : "claude";
@@ -271,15 +271,14 @@ test("fresh managed executor receives rules and the execution role without mode 
   assert.equal(f.errors.mock.callCount(), 0);
 });
 
-test("fresh home with a saved general choice receives rules and the general guide only", async (t) => {
+test("fresh general mode receives the common planner and automatic handoff contract", async (t) => {
   const f = await freshUser(t, { general: true });
   const prompt = await f.prompt("claude");
   await assertRules(prompt, f.home);
-  block(prompt, "general");
-  assert.doesNotMatch(
-    prompt,
-    /<paseo-role-workflow-v1>|<paseo-automation-v1>|<paseo-mode-select-v1>/,
-  );
+  block(prompt, "mode-select");
+  assert.match(block(prompt, "role-workflow"), /기획설계·검증 역할/);
+  block(prompt, "automation");
+  assert.doesNotMatch(prompt, /<paseo-general-v1>|현재 대화에서 직접 조사·구현·검증/);
   assert.equal(f.errors.mock.callCount(), 0);
 });
 
@@ -300,14 +299,16 @@ test("fresh saved general mode receives the agent block without a federation gat
   assert.doesNotMatch(selection, /일반개발 전용/);
   assert.match(selection, /담당 에이전트/);
   assert.match(selection, /모델·추론 두 질문을 한 번의 호출/);
-  assert.doesNotMatch(prompt, /<paseo-role-workflow-v1>/);
+  assert.match(block(prompt, "role-workflow"), /기획설계·검증 역할/);
+  assert.match(block(prompt, "automation"), /호스트 플러그인/);
 });
 
 test("fresh general mode with askExecutorModel disabled has no agent questions", async (t) => {
   const f = await freshUser(t, { general: true, catalog: true, ask: false });
   const prompt = await f.prompt("claude");
-  block(prompt, "general");
-  assert.doesNotMatch(prompt, /<paseo-general-agent-v1>/);
+  block(prompt, "mode-select");
+  assert.match(prompt, /구현 담당의 저장된 선택이 없다/);
+  assert.doesNotMatch(block(prompt, "general-agent"), /질문 도구|선택하세요/);
   assert.deepEqual(f.calls, []);
 });
 
@@ -324,10 +325,10 @@ test("the selected replacement conversation receives general rules without askin
 });
 
 for (const provider of ["claude", "codex"])
-  test(`fresh ${provider} federation enrollment uses contract 2 and exactly one verdict instruction`, async (t) => {
+  test(`fresh ${provider} federation enrollment uses contract 3 and exactly one verdict instruction`, async (t) => {
     const f = await freshUser(t);
     const result = await f.enroll(provider);
-    assert.equal(result.state.contract, 2);
+    assert.equal(result.state.contract, 3);
     assert.equal(result.state.mode, "federated");
     assert.equal(result.state.completeRepairs, 0);
     assert.equal(
@@ -336,17 +337,17 @@ for (const provider of ["claude", "codex"])
     );
   });
 
-test("fresh saved general enrollment retains contract 1 without automation or a verdict gate", async (t) => {
+test("fresh saved general enrollment uses contract 3 with automatic roles and a verdict gate", async (t) => {
   const f = await freshUser(t, { general: true });
   const result = await f.enroll("claude");
-  assert.equal(result.state.contract, 1);
-  assert.doesNotMatch(result.prompt, /<paseo-automation-v1>/);
+  assert.equal(result.state.contract, 3);
+  assert.match(block(result.prompt, "automation"), /계획 담당이 complete를 낼 때 verdict/);
 });
 
-test("fresh ask-mode general choice records contract 1 without a complete gate", async (t) => {
+test("fresh ask-mode general choice retains contract 3 for role separation", async (t) => {
   const f = await freshUser(t);
   const result = await f.enroll("codex", "일반개발");
   assert.equal(result.state.mode, "general");
-  assert.equal(result.state.contract, 1);
+  assert.equal(result.state.contract, 3);
   assert.equal(result.state.completeRepairs, 0);
 });

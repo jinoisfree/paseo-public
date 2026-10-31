@@ -306,7 +306,7 @@ test("the start setting decides the question, the enrolled mode and which blocks
     assert.match(asked.prompt, /첫 응답을 쓰기 전에 한 번만 질문 도구로 진행 방식을 묻는다/);
     assert.match(asked.prompt, /진행 방식 질문은 모델·추론 질문과 묶지 않는다/);
     assert.doesNotMatch(asked.prompt, /세 질문/);
-    assert.equal(conditional(asked.prompt), 3);
+    assert.equal(conditional(asked.prompt), 1);
     assert.ok(
       asked.prompt.indexOf("<paseo-mode-select-v1>") <
         asked.prompt.indexOf("<paseo-role-workflow-v1>"),
@@ -314,23 +314,18 @@ test("the start setting decides the question, the enrolled mode and which blocks
     assert.equal(asked.label, undefined);
 
     const general = await start("general", { askMode: false, defaultMode: "general" });
-    assert.match(general.prompt, /기본 진행 방식은 일반개발이다\. 진행 방식을 묻지 않는다/);
+    assert.match(general.prompt, /저장된 진행 방식은 일반개발이다\. 진행 방식을 묻지 않는다/);
     assert.doesNotMatch(general.prompt, /질문 도구로 진행 방식을 묻는다/);
     assert.equal(conditional(general.prompt), 0);
-    assert.doesNotMatch(
-      general.prompt,
-      /<paseo-role-workflow-v1>|<paseo-automation-v1>|<paseo-executor-model-v1>/,
-    );
-    const guidePath = JSON.parse(/자동 인계 지침을 적용한다: ("[^\n]+")/.exec(general.prompt)[1]);
-    const guide = await readFile(guidePath, "utf8");
-    assert.match(guide, /실행 지시는 상태 블록 next에만 쓴다/);
-    assert.match(guide, /<paseo-executor-model-v1>/);
-    assert.ok(general.prompt.length < asked.prompt.length - 2000);
+    assert.match(general.prompt, /<paseo-role-workflow-v1>/);
+    assert.match(general.prompt, /<paseo-automation-v1>/);
+    assert.match(general.prompt, /최초 대화는 기획·설계·검증을 유지/);
+    assert.doesNotMatch(general.prompt, /<paseo-general-v1>|<paseo-executor-model-v1>/);
     assert.equal(general.label, undefined);
 
     const federated = await start("federated", { askMode: false });
     assert.match(federated.prompt, /저장된 진행 방식은 연합개발이다/);
-    assert.equal(conditional(federated.prompt), 3);
+    assert.equal(conditional(federated.prompt), 1);
     assert.match(
       federated.prompt,
       /연합개발로 정해진 직후, 조사를 시작하기 전에 질문 도구를 한 번만/,
