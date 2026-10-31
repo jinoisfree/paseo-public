@@ -1,5 +1,10 @@
 import { z } from "zod";
-import { repositoryPathsSchema, pushTargetsSchema, verificationSchema } from "./artifacts";
+import {
+  repositoryPathsSchema,
+  pushTargetsSchema,
+  verificationSchema,
+  verdictSchema,
+} from "./artifacts";
 
 export const decisionSchema = z
   .object({
@@ -21,6 +26,7 @@ export const decisionSchema = z
     repositories: repositoryPathsSchema.optional(),
     pushTargets: pushTargetsSchema.optional(),
     verification: z.array(verificationSchema).max(30).optional(),
+    verdict: verdictSchema.optional(),
     constraints: z
       .array(z.object({ id: z.string().min(1).max(120), text: z.string().max(1000) }))
       .max(10)

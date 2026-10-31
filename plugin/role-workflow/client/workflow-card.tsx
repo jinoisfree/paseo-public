@@ -51,6 +51,13 @@ export function WorkflowCard({
         <Text selectable style={styles.text}>
           {d.summary}
         </Text>
+        {(d.verdict || d.status === "complete") && (
+          <Text selectable style={styles.muted}>
+            {d.verdict
+              ? `판정: ${d.verdict.judgement} · ${d.verdict.condition} · ${d.verdict.path}`
+              : "판정: 판정 없음"}
+          </Text>
+        )}
         {!!d.checks.length && (
           <Text
             selectable

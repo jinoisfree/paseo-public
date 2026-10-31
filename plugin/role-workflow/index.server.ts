@@ -1,9 +1,12 @@
+import { generalAgentPrompt } from "./server/general-agent-prompt";
+import { configChoice } from "./server/general-agent";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import type { PaseoApi, PaseoAgentConfig } from "@getpaseo/client";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import path from "node:path";
 import { creationRole, executorDefaults, oppositeProvider } from "./shared/assignment";
+import { materializeRules } from "./server/rules";
 import { composePrompt } from "./server/roles";
 import { generalPrompt } from "./server/start-guide";
 import {
@@ -49,6 +52,7 @@ export default function contribute(server: PluginServerContext) {
   const directory =
     process.env.PASEO_ROLE_WORKFLOW_STATE_DIR ??
     path.join(process.env.PASEO_HOME ?? path.join(homedir(), ".paseo"), "role-workflow");
+  const rulesReady = materializeRules(directory);
   const notifier = createNotifier();
   const engine = new WorkflowEngine(
     path.join(directory, "state.json"),
@@ -87,6 +91,55 @@ export default function contribute(server: PluginServerContext) {
     fatal = error instanceof Error ? error.message : String(error);
     console.error("role-workflow:", fatal);
   };
+  const selectionPrompts = async (
+    config: { provider: string; cwd: string; model?: string; thinkingOptionId?: string },
+    paseo: PaseoApi,
+    settings: Settings,
+    mode: StartMode | null,
+    gated: boolean,
+    ready: boolean,
+  ) => {
+    if (ready || !mode) return { generalSelection: "", trailing: "" };
+    let generalSelection = "";
+    if (settings.askExecutorModel) {
+      const preferred =
+        (await engine.generalDefault(config.cwd)) ??
+        configChoice({
+          provider: config.model ? `${config.provider}/${config.model}` : config.provider,
+          thinkingOptionId: config.thinkingOptionId,
+        });
+      const catalogs = await Promise.all(
+        (["claude", "codex"] as const).map((base) =>
+          modelPrompt(
+            paseo,
+            config.cwd,
+            preferred.provider === base && preferred.model ? `${base}/${preferred.model}` : base,
+            false,
+            true,
+            true,
+          ),
+        ),
+      );
+      generalSelection = generalAgentPrompt(
+        { claude: catalogs[0], codex: catalogs[1] },
+        preferred,
+        mode !== "general",
+      );
+    }
+    let trailing = "";
+    if (settings.askExecutorModel) {
+      trailing += await modelPrompt(
+        paseo,
+        config.cwd,
+        executorDefaults(settings, oppositeProvider(config.provider)).model,
+        gated,
+        config.provider === "claude",
+      );
+    }
+    // Without a model catalog the question cannot be offered; fall back to the saved choice.
+    if (!trailing) trailing += savedExecutorPrompt(settings, config.provider);
+    return { generalSelection, trailing };
+  };
   const removers = [
     server.before("agent.create", async ({ request }, context) => {
       attach(context.paseo);
@@ -99,20 +152,19 @@ export default function contribute(server: PluginServerContext) {
         return null;
       });
       if (!settings) return { config: request.config, env: request.env };
+      const rulesReadme = await rulesReady;
       const env = request.env ?? {};
-      const { automated, role, mode, gated } = creation(settings, env);
-      let trailing = "";
-      if (mode && settings.askExecutorModel) {
-        trailing += await modelPrompt(
-          context.paseo,
-          request.config.cwd,
-          executorDefaults(settings, oppositeProvider(provider)).model,
-          gated,
-          provider === "claude",
-        );
-      }
-      // Without a model catalog the question cannot be offered; fall back to the saved choice.
-      if (mode && !trailing) trailing += savedExecutorPrompt(settings, provider);
+      const ready = env.PASEO_ROLE_WORKFLOW_GENERAL_READY === "1";
+      const { automated, role, mode: originalMode, gated } = creation(settings, env);
+      const mode = ready ? "general" : originalMode;
+      const { generalSelection, trailing } = await selectionPrompts(
+        request.config,
+        context.paseo,
+        settings,
+        mode,
+        gated,
+        ready,
+      );
       const addsTitle = !!mode && settings.koreanTitle;
       const titles =
         titlePrompts(addsTitle, automated && settings.titleMarker) + pushApprovalPrompt();
@@ -123,24 +175,28 @@ export default function contribute(server: PluginServerContext) {
               request.config.systemPrompt,
               composePrompt(provider, undefined, {
                 role,
+                rulesReadme,
                 automated,
                 trailing: trailing + titlePrompts(false, automated && settings.titleMarker),
               })!,
               titles,
+              rulesReadme,
+              generalSelection,
             )
           : composePrompt(provider, request.config.systemPrompt, {
+              rulesReadme,
               role,
               automated,
               mode: gated
                 ? modeSelectPrompt(provider, mode === "federated" ? "federated" : "ask")
                 : "",
-              trailing: trailing + titles,
+              trailing: trailing + generalSelection + titles,
             })!;
       const config = { ...request.config, systemPrompt };
       if (await hasClaudeStartMode(context.paseo, config, env, settings.claudeStartMode)) {
         config.modeId = settings.claudeStartMode;
       }
-      if (!mode) return { config, env };
+      if (!mode || ready) return { config, env };
       const token = randomUUID();
       seeds.set(token, {
         titled: !(addsTitle || settings.titleMarker),
@@ -148,6 +204,7 @@ export default function contribute(server: PluginServerContext) {
         // The planner's workspace is never recreated; the engine keeps only what it reads.
         config: {
           provider: config.model ? `${provider}/${config.model}` : provider,
+          systemPrompt: request.config.systemPrompt,
           modeId: config.modeId,
           thinkingOptionId: config.thinkingOptionId,
         },
@@ -181,7 +238,9 @@ export default function contribute(server: PluginServerContext) {
         if (attempt) await new Promise((resolve) => setTimeout(resolve, 1000));
         const snapshot = await port.inspect(agent.id).catch(() => null);
         if (!snapshot) continue;
-        await engine.enroll(snapshot, seed.config, seed.env, seed.mode, seed.titled).catch(report);
+        await engine
+          .enroll(snapshot, seed.config, seed.env, seed.mode, seed.titled, 2)
+          .catch(report);
         return;
       }
       report(new Error(`대화 ${agent.id}를 작업에 연결하지 못했습니다. 대화 상태를 확인하세요.`));
@@ -198,6 +257,8 @@ export default function contribute(server: PluginServerContext) {
       let failure: string | null = null;
       if (event.outcome.kind === "failed") failure = event.outcome.error.message;
       if (event.outcome.kind === "canceled") failure = event.outcome.reason;
+      if (event.outcome.kind === "completed")
+        await engine.generalTimeline(event.agent.id, event.timeline, turn.generalAnswers);
       await engine
         .ended(
           event.agent.id,
@@ -379,6 +440,7 @@ export default function contribute(server: PluginServerContext) {
     clearInterval(timer);
     projectSubscription?.();
     removers.forEach((remove) => remove());
+    await rulesReady;
     await engine.close();
     await pins.close();
   };
@@ -444,6 +506,7 @@ async function modelPrompt(
   preferred: string,
   gated: boolean,
   bundled: boolean,
+  general = false,
 ): Promise<string> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -453,7 +516,8 @@ async function modelPrompt(
         timeout = setTimeout(() => reject(new Error("model timeout")), 5000);
       }),
     ]);
-    if (!catalog.error) return executorModelPrompt(catalog.models ?? [], preferred, gated, bundled);
+    if (!catalog.error)
+      return executorModelPrompt(catalog.models ?? [], preferred, gated, bundled, general);
   } catch {
     /* Model selection is optional. */
   } finally {

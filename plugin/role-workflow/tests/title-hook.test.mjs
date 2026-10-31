@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import contribute from "../index.server.ts";
@@ -179,7 +179,7 @@ test("both initial providers plan, managed executors keep their role, and model 
         labels: { custom: "keep" },
       };
       const initial = await hooks.get("agent.create")({ request }, context);
-      assert.match(initial.config.systemPrompt, /문제 분석·계획·검토 담당/);
+      assert.match(initial.config.systemPrompt, /기획설계·검증 역할/);
       assert.match(initial.config.systemPrompt, /<paseo-mode-select-v1>/);
       if (provider === "codex")
         assert.match(initial.config.systemPrompt, /request_user_input_async/);
@@ -205,7 +205,7 @@ test("both initial providers plan, managed executors keep their role, and model 
         context,
       );
       assert.deepEqual(Object.keys(unrelated).sort(), ["config", "env"]);
-      assert.match(managed.config.systemPrompt, /구현·검증 담당/);
+      assert.match(managed.config.systemPrompt, /구현 역할/);
       assert.ok(!managed.config.systemPrompt.includes("<paseo-mode-select-v1>"));
       assert.ok(!managed.env.PASEO_ROLE_WORKFLOW_SEED);
       await rpcs.get("workflow.models")({ provider }, context);
@@ -323,7 +323,7 @@ test("the start setting decides the question, the enrolled mode and which blocks
     );
     const guidePath = JSON.parse(/자동 인계 지침을 적용한다: ("[^\n]+")/.exec(general.prompt)[1]);
     const guide = await readFile(guidePath, "utf8");
-    assert.match(guide, /Codex에게 줄 실행 지시는 응답 끝 상태 블록의 next에만 쓴다/);
+    assert.match(guide, /실행 지시는 상태 블록 next에만 쓴다/);
     assert.match(guide, /<paseo-executor-model-v1>/);
     assert.ok(general.prompt.length < asked.prompt.length - 2000);
     assert.equal(general.label, undefined);
@@ -338,7 +338,7 @@ test("the start setting decides the question, the enrolled mode and which blocks
     assert.equal(federated.label, undefined);
 
     for (const { prompt } of [asked, federated]) {
-      assert.match(prompt, /Codex에게 줄 실행 지시는 응답 끝 상태 블록의 next에만 쓴다/);
+      assert.match(prompt, /실행 지시는 상태 블록 next에만 쓴다/);
       assert.ok(!prompt.includes("전달할 명령"));
     }
     const state = await rpcs.get("workflow.status")({}, context);
@@ -364,6 +364,37 @@ test("the start setting decides the question, the enrolled mode and which blocks
       if (previous[key] === undefined) delete process.env[name];
       else process.env[name] = previous[key];
     }
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("failed rules publication preserves new conversation creation without the guide block", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "rules-hook-"));
+  const previous = process.env.PASEO_ROLE_WORKFLOW_STATE_DIR;
+  process.env.PASEO_ROLE_WORKFLOW_STATE_DIR = dir;
+  await writeFile(path.join(dir, "rules"), "blocked");
+  const errors = t.mock.method(console, "error", () => {});
+  const hooks = new Map();
+  const close = contribute({
+    before(name, fn) {
+      hooks.set(name, fn);
+      return () => {};
+    },
+    on: () => () => {},
+    handle: () => {},
+  });
+  try {
+    const result = await hooks.get("agent.create")(
+      { request: { config: { provider: "claude", cwd: dir } } },
+      { paseo: {} },
+    );
+    assert.match(result.config.systemPrompt, /<paseo-role-workflow-v1>/);
+    assert.doesNotMatch(result.config.systemPrompt, /<paseo-agent-rules-v1>/);
+    assert.equal(errors.mock.callCount(), 1);
+  } finally {
+    await close();
+    if (previous === undefined) delete process.env.PASEO_ROLE_WORKFLOW_STATE_DIR;
+    else process.env.PASEO_ROLE_WORKFLOW_STATE_DIR = previous;
     await rm(dir, { recursive: true, force: true });
   }
 });

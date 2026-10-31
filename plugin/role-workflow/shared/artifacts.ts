@@ -1,6 +1,20 @@
 import { z } from "zod";
 import { stripFences } from "./fences";
 
+export const verdictSchema = z.object({
+  path: z.string().min(1).max(1000),
+  judgement: z.enum(["완료", "부분 완료", "미완료"]),
+  condition: z.enum(["교차 모델", "단일 모델", "자체 점검"]),
+});
+export const verdictRecordSchema = verdictSchema.extend({ recordedAt: z.string() });
+export const verdictViewSchema = z.object({
+  status: z.enum([...verdictSchema.shape.judgement.options, "판정 없음", "판정 불일치"]),
+  path: verdictSchema.shape.path.nullable(),
+  condition: verdictSchema.shape.condition.nullable(),
+  recordedAt: z.string().nullable(),
+  reason: z.string(),
+});
+
 export const repositoryPathsSchema = z.array(z.string().trim().min(1).max(4096)).max(8);
 export const pushTargetSchema = z.object({
   repository: z.string().trim().min(1).max(4096),

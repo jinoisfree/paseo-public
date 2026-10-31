@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsgo --noEmit",
-    "test": "tsx --test tests/*.test.mjs"
+    "test": "tsx --test tests/*.test.mjs",
+    "rules:sync": "tsx scripts/sync-rules.mts"
   },
   "devDependencies": {
     "@getpaseo/client": "0.10.3",

@@ -128,6 +128,28 @@ function VerificationRecords({ workflow: w, styles: s }: Pick<Props, "workflow" 
   );
 }
 
+function VerdictRecord({ workflow: w, styles: s }: Pick<Props, "workflow" | "styles">) {
+  return (
+    <>
+      <Text selectable style={s.text}>
+        판정: {w.verdict?.status ?? "판정 없음"}
+      </Text>
+      {w.verdict?.condition && <Text style={s.muted}>검증 조건: {w.verdict.condition}</Text>}
+      {w.verdict?.path && (
+        <Text selectable style={s.muted}>
+          판정 보고: {w.verdict.path}
+        </Text>
+      )}
+      {!!w.verdict?.reason && <Text style={s.muted}>{w.verdict.reason}</Text>}
+      {w.verdict?.status !== "완료" && (
+        <Text accessibilityRole="alert" style={s.muted}>
+          검증 완료 판정이 없습니다. 푸시 전 확인하세요.
+        </Text>
+      )}
+    </>
+  );
+}
+
 function requestState(push: Workflow["managedPush"], uncertain: string) {
   return {
     waiting: !!push && ["running", "checking", "unknown"].includes(push.state),
@@ -220,6 +242,7 @@ export function ManagedPushPanel({ workflow: w, refresh, styles: s }: Props) {
   return (
     <View style={s.spacing} testID={`managed-push-${w.id}`}>
       <Text style={s.title}>{push ? labels[push.state] : "푸시"}</Text>
+      <VerdictRecord workflow={w} styles={s} />
       {!!notice && (
         <Text accessibilityRole="alert" style={s.muted}>
           {notice}

@@ -1099,7 +1099,9 @@ test("review report occurs once; second-cycle and resume omit own context until 
   await f.finish("planner", "p1", "plan");
   const executor = f.created[0].id;
   assert.match(f.sent[0].prompt, /원래 목표:\noriginal goal/);
+  assert.match(f.sent[0].prompt, /규칙 00-common 8절에 따라/);
   await f.finish(executor, "e1", "result");
+  assert.doesNotMatch(f.sent[1].prompt, /규칙 00-common 8절에 따라/);
   assert.equal(f.sent[1].prompt.split("result summary").length - 1, 1);
   assert.doesNotMatch(f.sent[1].prompt, /원래 목표:|직전 인계:|최근 계획:|이전 대화 ID:/);
   await f.finish("planner", "p2", "plan");
@@ -1115,6 +1117,7 @@ test("review report occurs once; second-cycle and resume omit own context until 
   await new Promise((resolve) => setImmediate(resolve));
   await f.engine.tick();
   assert.match(f.sent.at(-1).prompt, /원래 목표:\noriginal goal/);
+  assert.match(f.sent.at(-1).prompt, /규칙 00-common 8절에 따라/);
   assert.equal(f.sent.at(-1).prompt.split("result summary").length - 1, 1);
 });
 
@@ -6592,3 +6595,50 @@ test("federated complete preserves explicit no-push completion", async (t) => {
   assert.equal((await f.view()).progress, "no_push");
   assert.equal((await f.view()).status, "completed");
 });
+
+test("review delivery references verification documents and displays actual planner limits", async (t) => {
+  const f = await fixture(t);
+  await f.engine.configure({ ...(await f.engine.settings()), maxCycles: 3, maxTurns: 9 });
+  await f.finish("planner", "p1", "plan");
+  assert.doesNotMatch(f.sent[0].prompt, /王復|왕복: /);
+  await f.finish(f.created[0].id, "e1", "result");
+  const review = f.sent.at(-1).prompt;
+  assert.match(review, /왕복: 1\/3 · 응답: 2\/9/);
+  assert.match(
+    review,
+    /구현 결과를 검토하세요. 규칙 30-verification 3.2–7절에 따라 handoff·impl-report와 실제 변경 파일·시험을 직접 확인하고, 설계 적합성\(4.2\)을 따로 판정한 뒤 작업 문서 폴더에 verdict.md를 쓰세요/,
+  );
+  assert.match(
+    review,
+    /완료 조건 충족 시 complete, 부분 완료·미완료면 원인을 분류해 구체적 수정 계획과 함께 plan을 반환하세요/,
+  );
+});
+
+for (const limit of ["cycles", "turns"]) {
+  test(`${limit} limit pauses with bounded last-plan and last-result summaries`, async (t) => {
+    const f = await fixture(t);
+    await f.engine.configure({
+      ...(await f.engine.settings()),
+      maxCycles: limit === "cycles" ? 1 : 5,
+      maxTurns: limit === "turns" ? 2 : 30,
+    });
+    const report = (status, summary) =>
+      `<paseo-workflow>${JSON.stringify({ status, summary, next: "do work", handoff: "handoff", checks: [] })}</paseo-workflow>`;
+    await f.engine.ended("planner", "p1", report("plan", "계".repeat(350)), null, "goal");
+    const executor = f.created[0].id;
+    f.agents.get(executor).status = "idle";
+    await f.engine.ended(executor, "e1", report("result", "실".repeat(350)), null, "goal");
+    f.agents.get("planner").status = "idle";
+    await f.engine.ended("planner", "p2", report("plan", "후".repeat(350)), null, "goal");
+    const view = await f.view();
+    assert.equal(view.status, "paused");
+    assert.match(view.detail, /왕복 한도 도달/);
+    assert.ok(
+      view.detail.includes("마지막 계획 요약: " + (limit === "cycles" ? "계" : "후").repeat(300)),
+    );
+    assert.ok(view.detail.includes("마지막 실행 결과 요약: " + "실".repeat(300)));
+    assert.ok(!view.detail.includes("계".repeat(301)));
+    assert.ok(!view.detail.includes("실".repeat(301)));
+    assert.equal(f.sent.length, 2);
+  });
+}

@@ -94,6 +94,10 @@ createRoot(document.getElementById('root')).render(<Dashboard theme={{colors}} h
       .getByText("푸시할 대상을 확인하고 승인하면 앱이 실행 결과를 기록합니다.", { exact: true })
       .waitFor();
     assert.equal(await page.getByTestId("managed-push-execute-task").count(), 0);
+    await panel.getByText("판정: 판정 없음", { exact: true }).waitFor();
+    await panel
+      .getByText("검증 완료 판정이 없습니다. 푸시 전 확인하세요.", { exact: true })
+      .waitFor();
     await page.evaluate(() => window.__invokePush());
     await page.getByTestId("managed-push-execute-task").waitFor();
     assert.deepEqual(await page.evaluate(() => window.__calls.map((call) => call.name)), [
@@ -104,6 +108,36 @@ createRoot(document.getElementById('root')).render(<Dashboard theme={{colors}} h
     await panel.getByText("원격: origin · https://example.com/repo.git", { exact: true }).waitFor();
     await panel.getByText("npm test", { exact: true }).waitFor();
     assert.ok(!(await panel.textContent()).includes("/private/test.log"));
+    assert.equal(
+      await page.getByTestId("managed-push-execute-task").isEnabled(),
+      true,
+      "missing verdict is nonblocking",
+    );
+    for (const status of ["부분 완료", "미완료", "판정 불일치", "완료"]) {
+      await page.evaluate((judgement) => {
+        window.__state.workflows[0].verdict = {
+          status: judgement,
+          path: "docs/task/verdict.md",
+          condition: "교차 모델",
+          recordedAt: "2026-11-01",
+          reason: judgement === "판정 불일치" ? "판정 보고 경로 없음" : "",
+        };
+      }, status);
+      await panel.getByText(`판정: ${status}`, { exact: true }).waitFor();
+      await panel.getByText("검증 조건: 교차 모델", { exact: true }).waitFor();
+      await panel.getByText("판정 보고: docs/task/verdict.md", { exact: true }).waitFor();
+      assert.equal(
+        await panel
+          .getByText("검증 완료 판정이 없습니다. 푸시 전 확인하세요.", { exact: true })
+          .count(),
+        status === "완료" ? 0 : 1,
+      );
+      assert.equal(
+        await page.getByTestId("managed-push-execute-task").isEnabled(),
+        true,
+        "judgement must not change approval availability",
+      );
+    }
     await page.getByTestId("managed-push-execute-task").evaluate((element) => {
       element.click();
       element.click();
@@ -162,6 +196,18 @@ createRoot(document.getElementById('root')).render(<Dashboard theme={{colors}} h
       await page.evaluate(() => window.__calls.filter((call) => call.name === "execute").length),
       2,
     );
+    await page.evaluate(() => {
+      window.__state.workflows[0].mode = "general";
+      window.__state.workflows[0].generalAgent = {
+        provider: "codex",
+        model: "chosen",
+        thinking: "high",
+      };
+    });
+    await page
+      .getByTestId("workflow-task")
+      .getByText("Codex · chosen · high", { exact: true })
+      .waitFor();
     assert.deepEqual(errors, []);
   },
 );

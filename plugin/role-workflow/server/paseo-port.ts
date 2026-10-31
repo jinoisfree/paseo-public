@@ -1,3 +1,4 @@
+import { asyncGeneralAnswers } from "./general-agent";
 import { lstat, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -89,6 +90,7 @@ export function readTurn(
   const first = items.find((item) => item.type === "user_message");
   return {
     text,
+    generalAnswers: asyncGeneralAnswers(items),
     // Keep persisted text/key/request semantics; only the tool evidence spans an async answer.
     evidence: turnEvidence(items.slice(evidenceBoundary(items, turnIds) + 1), cwd),
     compacted: turn.some((item) => item.type === "compaction" && item.status === "completed"),
@@ -123,6 +125,7 @@ export async function readCompletedTurn(
       compacted: saved.compacted ?? false,
       request: saved.request ?? "",
       goal: saved.goal ?? "",
+      generalAnswers: saved.generalAnswers ?? {},
       maintenance: saved.maintenance ?? false,
     };
   }
@@ -501,6 +504,11 @@ export function createPort(
         archivedAt: agent.archivedAt ?? null,
         permission: agent.pendingPermissions.length > 0,
         usage: contextRatio(agent.lastUsage),
+        config: {
+          provider: agent.model ? `${agent.provider}/${agent.model}` : agent.provider,
+          thinkingOptionId: agent.thinkingOptionId ?? undefined,
+          modeId: agent.currentModeId ?? undefined,
+        },
       };
     },
     async create(w, role, member, marker = false) {
@@ -544,6 +552,40 @@ export function createPort(
       });
       if (agent.id !== member.id) throw new Error("생성된 대화 ID가 인계 대상과 다릅니다.");
       return workspace.id;
+    },
+    async createGeneral(w, transfer, mode) {
+      const api = getApi();
+      if (!w.plan?.workspaceId) throw new Error("일반개발 담당을 열 workspace가 없습니다.");
+      const { choice } = transfer;
+      const config: PaseoAgentConfig = {
+        provider: `${choice.provider}/${choice.model}`,
+        thinkingOptionId: choice.thinking || undefined,
+        modeId: mode,
+        systemPrompt: w.plan.config.systemPrompt,
+      };
+      await validateMode(api, choice.provider, w.cwd, config);
+      const agent = await api.workspaces.ref(w.plan.workspaceId).agents.create({
+        agentId: transfer.agentId,
+        idempotencyKey: `role-workflow-general:${transfer.id}`,
+        title: `${choice.provider === "codex" ? "Codex" : "Claude Code"} 일반개발`,
+        config,
+        env: { PASEO_ROLE_WORKFLOW_GENERAL_READY: "1" },
+        prompt: w.goal,
+        clientMessageId: `role-workflow-general-request:${transfer.id}`,
+      });
+      if (agent.id !== transfer.agentId)
+        throw new Error("생성된 일반개발 대화 ID가 선택 대상과 다릅니다.");
+    },
+    async generalNotice(id, choice, message, noticeId) {
+      await getApi()
+        .agents.ref(id)
+        .timeline.append({
+          id: `role-workflow-general-notice:${noticeId}`,
+          type: "plugin",
+          kind: "general-agent",
+          version: 1,
+          data: { choice, message },
+        });
     },
     async compact(id, messageId) {
       const agent = getApi().agents.ref(id);

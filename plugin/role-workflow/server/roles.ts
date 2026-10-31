@@ -1,3 +1,4 @@
+import { agentRulesBlock } from "./rules";
 import type { WorkflowRole } from "../shared/assignment";
 import { FEDERATED_ONLY, automationBlock, stripManagedBlocks } from "./protocol";
 
@@ -9,13 +10,15 @@ const NAMES: Record<string, string> = { claude: "Claude", codex: "Codex" };
 // Connected conversations hand work over through the state block. The copy-and-paste wording
 // is only for conversations the plugin does not connect, where the user carries each message.
 export function plannerInstructions(executor: string, automated: boolean): string {
-  const handover = automated
-    ? `4. ${executor}에게 줄 실행 지시는 응답 끝 상태 블록의 next에만 쓴다. 앞선 대화를 보지 못한 ${executor}도 이해할 수 있도록 목표, 관련 파일, 단계별 작업, 제약, 검증 명령과 기대 결과, 보고 항목을 담는다. 아직 확인하지 못한 경로나 명령은 확정된 사실처럼 쓰지 않는다. 본문에는 사용자를 위한 분석과 계획 요약을 쓰고, next의 지시문을 본문에 다시 옮겨 적지 않는다.
-5. ${executor}의 실행 결과가 전달되면 계획 충족 여부, 변경 내용, 테스트 결과, 누락과 회귀 가능성을 검토한다. 보고만 믿지 말고 실제 코드와 검증 결과를 확인한다.
-6. 추가 작업이 필요하면 보완 계획을 세워 next에 새 실행 지시를 쓴다. 완료 조건을 충족했다면 근거와 함께 완료라고 판단하고 불필요한 후속 작업을 만들지 않는다.
+  if (automated)
+    return `당신은 이 사용자의 기획설계·검증 역할이다. 구현 실행은 별도의 ${executor} 대화에서 진행한다.
+규칙 10-planning.md, 30-verification.md, 40-paseo-role-workflow.md를 따른다. 제품 코드는 고치지 않는다. 사용자가 명시 승인한 푸시만 직접 실행한다. 실행 지시는 상태 블록 next에만 쓴다.
+사용자가 명시적으로 역할 변경을 요청하면 그 요청을 따른다.
+본문에는 사용자를 위한 분석과 계획 요약을 쓰고, next의 지시문을 본문에 다시 옮겨 적지 않는다.
+완료 조건을 충족했다면 근거와 함께 완료라고 판단하고 불필요한 후속 작업을 만들지 않는다.
 
-한국어로 설명한다. 전달은 호스트의 자동 작업 흐름이 담당한다.`
-    : `4. 답변 마지막에 '${executor}에게 전달할 명령'을 작성한다. 사용자가 그대로 복사할 수 있도록 하나의 코드 블록에 목표, 관련 파일, 단계별 작업, 제약, 검증 명령과 기대 결과, 보고 항목을 담는다. 아직 확인하지 못한 경로나 명령은 확정된 사실처럼 쓰지 않는다. 앞선 대화를 보지 못한 ${executor}도 이해할 수 있어야 한다.
+한국어로 설명한다. 전달은 호스트의 자동 작업 흐름이 담당한다.`;
+  const handover = `4. 답변 마지막에 '${executor}에게 전달할 명령'을 작성한다. 사용자가 그대로 복사할 수 있도록 하나의 코드 블록에 목표, 관련 파일, 단계별 작업, 제약, 검증 명령과 기대 결과, 보고 항목을 담는다. 아직 확인하지 못한 경로나 명령은 확정된 사실처럼 쓰지 않는다. 앞선 대화를 보지 못한 ${executor}도 이해할 수 있어야 한다.
 5. 사용자가 ${executor}의 작업 결과를 붙여넣으면 계획 충족 여부, 변경 내용, 테스트 결과, 누락과 회귀 가능성을 검토한다. 필요하면 실제 코드를 읽어 결과를 확인한다.
 6. 추가 작업이 필요하면 다음 계획과 새로운 ${executor}용 실행 명령을 작성한다. 완료 조건을 충족했다면 근거와 함께 완료라고 판단하고 불필요한 후속 작업을 만들지 않는다.
 
@@ -30,15 +33,16 @@ ${handover}`;
 }
 
 export function executorInstructions(planner: string, automated: boolean): string {
-  const source = automated
-    ? `1. 전달받은 계획이나 실행 지시는 ${planner}가 세운 계획으로 간주한다. 사용자가 직접 요청한 작업도 그 요청의 범위에서 수행한다.`
-    : `1. 사용자가 전달한 계획이나 실행 지시문은 ${planner}가 세운 계획으로 간주한다. 사용자가 직접 요청한 작업도 그 요청의 범위에서 수행한다.`;
-  const report = automated
-    ? `5. 작업 결과는 응답 끝 상태 블록으로 보고한다. summary에 완료한 작업과 계획에서 달라진 점을, handoff에 원래 목표·변경 파일과 이유·미완료와 차단 사항·추가 검토가 필요한 내용을, checks에 실행한 검증 명령과 실제 결과를 쓴다. 본문에는 사용자를 위한 요약을 쓰고 같은 보고문을 다시 옮겨 적지 않는다.
-6. 실행하지 않은 테스트와 확인하지 못한 결과는 명확히 구분한다. 실제로 완료하지 않은 일을 완료했다고 보고하지 않는다.
+  if (automated)
+    return `당신은 이 사용자의 구현 역할이다. 문제 분석과 구현 계획은 별도의 ${planner} 대화에서 준비한다.
+규칙 20-implementation.md, 40-paseo-role-workflow.md를 따른다. 인계 보고와 멈춤 보고는 result로 낸다.
+전달받은 계획이나 실행 지시는 ${planner}가 세운 계획으로 간주한다. 사용자가 직접 요청한 작업도 그 요청의 범위에서 수행한다.
+기존 사용자의 변경 사항을 보존한다. 사소한 구현 세부 사항은 판단하여 처리하되, 목표나 구조의 중대한 변경이 필요하면 ${planner}가 판단할 쟁점을 정리한다.
+summary에 완료한 작업과 계획에서 달라진 점을, handoff에 원래 목표·변경 파일과 이유·미완료와 차단 사항·추가 검토가 필요한 내용을, checks에 실행한 검증 명령과 실제 결과를 쓴다. 본문에는 사용자를 위한 요약을 쓰고 같은 보고문을 다시 옮겨 적지 않는다.
 
-한국어로 설명한다. 전달은 호스트의 자동 작업 흐름이 담당한다.`
-    : `5. 작업 후 답변 마지막에 '${planner}에게 전달할 결과'를 작성한다. 그대로 복사할 수 있도록 하나의 코드 블록에 원래 목표, 완료한 작업, 변경 파일과 이유, 실행한 검증 명령과 실제 결과, 미완료·차단 사항, 계획에서 달라진 점, 추가 검토가 필요한 내용을 담는다.
+한국어로 설명한다. 전달은 호스트의 자동 작업 흐름이 담당한다.`;
+  const source = `1. 사용자가 전달한 계획이나 실행 지시문은 ${planner}가 세운 계획으로 간주한다. 사용자가 직접 요청한 작업도 그 요청의 범위에서 수행한다.`;
+  const report = `5. 작업 후 답변 마지막에 '${planner}에게 전달할 결과'를 작성한다. 그대로 복사할 수 있도록 하나의 코드 블록에 원래 목표, 완료한 작업, 변경 파일과 이유, 실행한 검증 명령과 실제 결과, 미완료·차단 사항, 계획에서 달라진 점, 추가 검토가 필요한 내용을 담는다.
 6. 실행하지 않은 테스트와 확인하지 못한 결과는 명확히 구분한다. 실제로 완료하지 않은 일을 완료했다고 보고하지 않는다.
 
 한국어로 설명한다. ${planner}에게 자동으로 메시지를 보내지 않는다. 사용자가 결과 보고문을 복사하여 전달한다.`;
@@ -83,12 +87,20 @@ export function appendRoleInstructions(
 export function composePrompt(
   provider: string,
   existing: string | undefined,
-  parts: { role?: WorkflowRole; automated: boolean; mode?: string; trailing?: string },
+  parts: {
+    role?: WorkflowRole;
+    automated: boolean;
+    mode?: string;
+    trailing?: string;
+    rulesReadme?: string | null;
+  },
 ): string | undefined {
   if (provider !== "claude" && provider !== "codex") return existing;
   const gated = !!parts.mode;
   const original = stripManagedBlocks((existing ?? "").replace(BLOCK, ""));
-  const lead = [original, parts.mode?.trim()].filter(Boolean).join("\n\n");
+  const lead = [original, agentRulesBlock(parts.rulesReadme), parts.mode?.trim()]
+    .filter(Boolean)
+    .join("\n\n");
   const role = appendRoleInstructions(provider, lead, parts.role, {
     automated: parts.automated,
     gated,

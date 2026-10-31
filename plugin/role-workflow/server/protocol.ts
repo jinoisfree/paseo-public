@@ -1,3 +1,4 @@
+import { GENERAL_QUESTIONS } from "../shared/general-agent";
 import type { WorkflowProvider } from "../shared/assignment";
 import { stripFences } from "../shared/fences";
 export { decisionSchema, parseDecision, DecisionError, type Decision } from "../shared/decision";
@@ -31,6 +32,7 @@ ${AUTOMATION_OPEN}
 summary는 결과를 짧게, next는 다음 행동만, handoff는 새 결정·변경·남은 문제를 중심으로 쓴다. checks의 검증 내용을 다른 필드에 반복하지 않는다. 전체 로그는 파일에 두고 경로를 전달한다.
 checks에는 명령, 실제 종료 코드, 검증한 변경본(커밋 또는 변경 파일), 로그 경로를 확인한 범위에서 기록한다. 미실행·실패·통과를 구분하고 확인하지 못한 값은 만들지 않는다. 검토자는 변경 코드와 검증 증거를 읽고, 코드 변경·검사 실패·증거 누락이 없으면 같은 전체 검사를 반복하지 않는다.
 필요할 때만 상태 블록에 repositories(실제 Git 저장소 경로 배열), pushTargets([{repository,remote,branch,commit}]·전체 커밋 해시), verification([{command,cwd,commit,exitCode,logPath,criterion}]·logPath는 cwd 기준), constraints([{id,text}])를 추가한다. verification은 실행한 검사만 기록하며 로그와 변경본을 직접 확인한다. constraints는 오래 유지할 사용자 제약에 안정적인 id를 쓰며 같은 id로 갱신한다. 삭제는 사용자가 제약을 해제했을 때만 text를 빈 문자열로 기록한다. remember로 저장한 기존 제약은 자동 삭제되지 않는다.
+계획 담당이 complete를 낼 때 verdict {path, judgement, condition}을 함께 적는다. path는 작업 문서 폴더의 verdict.md이고, judgement는 완료·부분 완료·미완료, condition은 교차 모델·단일 모델·자체 점검 중 하나다.
 응답 마지막에 아래 XML 태그 안에 유효한 JSON 객체 하나를 출력한다. 코드 펜스로 감싸지 않는다. 태그 뒤에 다른 텍스트를 쓰지 않는다.
 <paseo-workflow>{"status":"plan|result|continue|complete|input|note","summary":"현재 결과 요약","next":"다음 담당자가 그대로 실행할 구체적인 지시","handoff":"독립적으로 이해 가능한 인계 기록","checks":["검증 명령: 실제 결과"],"remember":["압축 뒤에도 반드시 지킬 사항"]}</paseo-workflow>
 remember에는 사용자의 결정, 제약, 금지 사항, 완료 조건처럼 압축 뒤에도 반드시 지켜야 할 사항이 새로 생겼을 때만 한 줄씩 적는다. 이미 적은 것은 반복하지 않는다. 없으면 생략한다.
@@ -48,6 +50,8 @@ status 규칙:
 /** Removes every block this plugin owns except the role block, which roles.ts replaces. */
 export function stripManagedBlocks(existing: string): string {
   return existing
+    .replace(/\n?<paseo-general-agent-v1>[^]*?<\/paseo-general-agent-v1>/g, "")
+    .replace(/\n?<paseo-agent-rules-v1>[^]*?<\/paseo-agent-rules-v1>/g, "")
     .replace(/\n?<paseo-title-v1>[^]*?<\/paseo-title-v1>/g, "")
     .replace(/\n?<paseo-push-approval-v1>[^]*?<\/paseo-push-approval-v1>/g, "")
     .replace(/\n?<paseo-progress-v1>[^]*?<\/paseo-progress-v1>/g, "")
@@ -92,11 +96,18 @@ function executorModelChoices(
     .slice(0, 4);
   return [...distinct, ...ordered.filter((model) => !distinct.includes(model))].slice(0, 4);
 }
+const BUNDLED_QUESTION_INSTRUCTION = "모델·추론 두 질문을 한 번의 호출에 함께 묻는다.";
+function bundledChoices(choices: string, thinking: string[]): string {
+  return `실행 모델 선택지는 다음 목록이며 그 외는 직접 입력한다:
+${choices}
+추론 선택지는 다음 id를 쓴다: ${thinking.join(", ") || "없음"}. 그 외는 직접 입력한다.`;
+}
 export function executorModelPrompt(
   models: readonly ExecutorModel[],
   preferred: string,
   gated = false,
   bundled = false,
+  general = false,
 ): string {
   const provider = preferred.split("/")[0];
   const available = models.filter((m) => m.isSelectable !== false);
@@ -121,12 +132,15 @@ export function executorModelPrompt(
       .sort((a, b) => support(b) - support(a) || order.indexOf(a) - order.indexOf(b))
       .slice(0, 4)
       .sort((a, b) => order.indexOf(a) - order.indexOf(b));
+    if (general)
+      return `담당 에이전트가 ${provider === "claude" ? "Claude Code" : "Codex"}일 때, ${BUNDLED_QUESTION_INSTRUCTION}
+질문/header: ${GENERAL_QUESTIONS.model.question}/${GENERAL_QUESTIONS.model.header}, ${GENERAL_QUESTIONS.thinking.question}/${GENERAL_QUESTIONS.thinking.header}.
+${bundledChoices(choices, thinking)}
+답변이 실제로 도착하기 전에는 조사·구현하지 않는다. 선택 후 호스트가 적용하도록 응답을 마친다. 현재 설정과 다르면 이 대화에서는 작업하지 않는다. 상태 블록은 출력하지 않는다.`;
     return `\n<paseo-executor-model-v1>
 ${gated ? `${FEDERATED_ONLY}\n연합개발로 정해진 직후, 조사를 시작하기 전에` : "이 대화의 첫 응답을 쓰기 전에, 조사를 시작하기 전에"} 질문 도구를 한 번만 호출한다. 계획을 세운 뒤로 미루지 않는다.
-모델·추론 두 질문을 한 번의 호출에 함께 묻는다.${gated ? " 진행 방식 질문과 같은 호출에 넣지 않으며, 진행 방식이 일반개발이면 모델·추론을 묻지 않는다. 일반개발로 진행하다가 연합개발로 바뀐 경우에도 연합개발로 정해진 직후에 묻는다." : ""}
-실행 모델 선택지는 다음 목록이며 그 외는 직접 입력한다:
-${choices}
-추론 선택지는 다음 id를 쓴다: ${thinking.join(", ") || "없음"}. 그 외는 직접 입력한다.
+${BUNDLED_QUESTION_INSTRUCTION}${gated ? " 진행 방식 질문과 같은 호출에 넣지 않으며, 진행 방식이 일반개발이면 모델·추론을 묻지 않는다. 일반개발로 진행하다가 연합개발로 바뀐 경우에도 연합개발로 정해진 직후에 묻는다." : ""}
+${bundledChoices(choices, thinking)}
 비동기 질문 도구의 호출 반환은 사용자 답변이 아니다. 실제 답변이 도착하기 전에는 조사나 plan 상태로 넘어가지 않는다.
 선택 결과를 기억해 두었다가 처음 plan 상태를 낼 때 상태 블록의 executorModel에 ${provider}/모델ID로 적고 executorThinking에 추론 id 그대로 적는다.
 직접 입력으로 '기본값' 또는 '모델 기본값'이라고 답했거나 고른 추론이 고른 모델의 전체 추론 id에 없으면 executorThinking을 생략한다. 목록에 없는 모델도 추론 항목을 생략한다.

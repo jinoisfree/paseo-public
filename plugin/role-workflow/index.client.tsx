@@ -1,3 +1,5 @@
+import { GeneralAgentCard } from "./client/general-agent-card";
+import { generalCardSchema } from "./shared/general-agent";
 import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { registerResumeButtons } from "./client/resume-buttons";
 import { reportControl } from "./client/control-feedback";
@@ -14,6 +16,12 @@ import { registerFolderOpen } from "./client/folder-open";
 
 export default function contribute(client: PluginClientContext) {
   const cleanups = [
+    client.addTimelineRenderer({
+      kind: "general-agent",
+      version: 1,
+      schema: generalCardSchema,
+      Component: GeneralAgentCard,
+    }),
     ...registerFolderOpen(client),
     client.addTimelineTransformer({
       id: "workflow-report",

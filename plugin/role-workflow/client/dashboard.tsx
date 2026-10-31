@@ -1,3 +1,4 @@
+import { generalAgentLabel } from "../shared/general-agent";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { ScrollView, TextInput } from "@getpaseo/plugin/client/react-native";
@@ -271,6 +272,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
             </Text>
             <Text style={s.muted}>
               {saved.mode === "general" ? "일반개발" : "연합개발"}
+              {saved.general ? ` · 담당: ${generalAgentLabel(saved.general)}` : ""}
               {saved.codex
                 ? ` · GPT 실행: ${saved.codex.model} (${saved.codex.thinking || "기본 추론"})`
                 : ""}
@@ -653,6 +655,9 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
           </Text>
           <Text style={s.muted}>{w.cwd}</Text>
           <Text style={s.text}>{w.detail}</Text>
+          {w.mode === "general" && w.generalAgent && (
+            <Text style={s.muted}>{generalAgentLabel(w.generalAgent)}</Text>
+          )}
           {repositoryPanel(w)}
           <ManagedPushPanel workflow={w} refresh={load} styles={s} />
           {w.mode === "federated" && (

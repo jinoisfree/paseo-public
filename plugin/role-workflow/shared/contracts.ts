@@ -1,6 +1,12 @@
+import { generalAgentSchema } from "./general-agent";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { repositoryPathsSchema, pushTargetsSchema, verificationRecordSchema } from "./artifacts";
+import {
+  repositoryPathsSchema,
+  pushTargetsSchema,
+  verificationRecordSchema,
+  verdictViewSchema,
+} from "./artifacts";
 import { managedPushSchema } from "./managed-push";
 import { folderRootsSchema } from "./folders";
 
@@ -59,6 +65,7 @@ export type Settings = z.infer<typeof settingsSchema>;
 const savedExecutorSchema = z.object({ model: z.string().max(120), thinking: z.string().max(40) });
 export const projectDefaultsSchema = z.object({
   mode: z.enum(["general", "federated"]),
+  general: generalAgentSchema.optional(),
   codex: savedExecutorSchema.optional(),
   claude: savedExecutorSchema.optional(),
 });
@@ -121,6 +128,8 @@ export const workflowViewSchema = z.object({
   artifactNotice: z.string().default(""),
   conflict: z.string().default(""),
   waitingFor: z.number().optional(),
+  generalAgent: generalAgentSchema.nullable().default(null),
+  verdict: verdictViewSchema.nullable().default(null),
   generalTransition: z.boolean().default(false),
   deliveryUnconfirmed: z.boolean().default(false),
 });
