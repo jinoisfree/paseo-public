@@ -102,6 +102,8 @@ export function readTurn(
       user?.type === "user_message" &&
       (/^\/compact(?:\s|$)/.test(user.text.trim()) ||
         user.clientMessageId?.startsWith("role-workflow-compact:") === true),
+    ...(user?.type === "user_message" && (user.clientMessageId ?? user.messageId)
+      ? { maintenanceId: user.clientMessageId ?? user.messageId } : {}),
     messageIds,
     key: createHash("sha256")
       // Preserve persisted turn identities across the message-boundary fix.

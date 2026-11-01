@@ -251,11 +251,11 @@ for(const options of [[],[{id:"low",label:"Low"}]])test(`legacy open model pendi
  assert.equal((await f.state()).selection.stage,"ready");assert.equal((await f.state()).selection.thinking,options[0]?.id??"");await f.finish("A","plan");assert.equal(f.created.length,1);
 });
 
-for(const provider of ["claude","codex"])test(`new standalone ${provider} does not enter role-driven automatic compaction`,async t=>{
+for(const provider of ["claude","codex"])test(`new standalone ${provider} uses maintenance without role-driven delivery`,async t=>{
  const f=await fixture(t,{mode:"general",provider});let compactions=0;f.port.compact=async()=>{compactions++;};
- await f.engine.configure({...await f.engine.settings(),threshold:0.7,claudeCompression:{threshold:0.55,oneMillionTokenLimit:500000}});
+ await f.engine.configure({...await f.engine.settings(),threshold:0.7,codexCompression:"native",claudeCompression:{threshold:0.55,oneMillionTokenLimit:500000}});
  f.agents.get("A").contextUsage={contextWindowUsedTokens:900000,contextWindowMaxTokens:1000000};f.agents.get("A").usage=0.9;
  await f.engine.ended("A","high-context","자체 점검 진행 중",null,"goal");await f.engine.tick();
- assert.equal(compactions,0);assert.equal(f.created.length,0);assert.equal(f.sent.length,0);assert.equal((await f.state()).execute,null);
- const view=(await f.engine.list()).workflows[0];assert.match(view.planCompressionReason,/미적용/);
+ assert.equal(compactions,provider==="claude"?1:0);assert.equal(f.created.length,0);assert.equal(f.sent.length,0);assert.equal((await f.state()).execute,null);
+ const view=(await f.engine.list()).workflows[0];assert.match(view.planCompressionReason,provider==="claude"?/Claude 1M/:/자체 압축/);
 });

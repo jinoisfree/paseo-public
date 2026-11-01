@@ -1294,3 +1294,10 @@ test("inspect exposes validated raw context tokens and the ratio from the same s
   agent.lastUsage=usage;const s=await port.inspect("agent");assert.equal(s.contextUsage,null);assert.equal(s.usage,null);
  }
 });
+
+test("maintenance recovery identity belongs to the last exact /compact request",()=>{
+ const older={type:"user_message",text:"/compact",clientMessageId:"role-workflow-compact:old"};
+ const current={type:"user_message",text:"/compact",clientMessageId:"role-workflow-compact:current"};
+ const result=readTurn([older,{type:"compaction",status:"completed"},current,{type:"compaction",status:"completed"}]);
+ assert.equal(result.maintenance,true);assert.equal(result.maintenanceId,"role-workflow-compact:current");assert.equal(result.compacted,true);
+});

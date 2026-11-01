@@ -22,12 +22,14 @@ export function contextRatio(usage?: Partial<ContextUsage> | null): number | nul
 export type CompressionObservation = { usage: number | null; contextUsage?: ContextUsage | null };
 export function compressionDecision(
   provider: string,
-  settings: { threshold: number; claudeCompression: ClaudeCompression },
+  settings: { threshold: number; claudeCompression: ClaudeCompression; codexCompression?: "threshold" | "native" },
   observation: CompressionObservation | null,
 ) {
   const base = provider.split("/")[0];
   const unavailable = (reason: string) => ({ due: false, policy: "unavailable", reason });
   if (base !== "claude" && base !== "codex") return unavailable("지원 제공자를 확인할 수 없어 자동 압축하지 않습니다.");
+  if (base === "codex" && settings.codexCompression === "native")
+    return { due: false, policy: "native", reason: "Codex 자체 압축 사용: 플러그인 사용량 기반 선제 압축은 하지 않습니다." };
   const current = contextUsage(observation?.contextUsage);
   const override = base === "claude" ? settings.claudeCompression : null;
   if (override && !current)

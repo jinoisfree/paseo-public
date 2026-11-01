@@ -204,7 +204,11 @@ export default function contribute(server: PluginServerContext) {
         report(error);
         return null;
       });
-      if (!turn || turn.maintenance) return;
+      if (!turn) return;
+      if (turn.maintenance) {
+        await engine.maintenanceEnded(event.agent.id, turn.key, !!turn.compacted, turn.maintenanceId).catch(report);
+        return;
+      }
       let failure: string | null = null;
       if (event.outcome.kind === "failed") failure = event.outcome.error.message;
       if (event.outcome.kind === "canceled") failure = event.outcome.reason;

@@ -41,6 +41,7 @@ export const settingsSchema = z.object({
   autoResumeTransient: z.boolean().default(true),
   threshold: z.number().min(0.05).max(0.9).default(0.8),
   claudeCompression: claudeCompressionSchema,
+  codexCompression: z.enum(["threshold", "native"]).default("threshold"),
   maxCycles: z.number().int().min(1).max(50).default(5),
   maxTurns: z.number().int().min(2).max(200).default(30),
   executorModel: z
@@ -129,6 +130,7 @@ export const workflowViewSchema = z.object({
   executeCompactions: z.number(),
   planCompressionReason: z.string().default(""),
   executeCompressionReason: z.string().default(""),
+  compactionRecovery: z.boolean().default(false),
   planUsage: z.number().nullable(),
   executeUsage: z.number().nullable(),
   repositories: repositoryPathsSchema.default([]),
@@ -177,7 +179,7 @@ export const control = defineRpc({
   name: "workflow.control",
   input: z.object({
     id: z.string(),
-    action: z.enum(["pause", "resume", "general", "resend"]),
+    action: z.enum(["pause", "resume", "general", "resend", "retry_compaction"]),
     message: z.string().max(30000).default(""),
   }),
   output: z.object({

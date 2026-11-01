@@ -351,9 +351,13 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
               return result;
             }, ""),
         )}
-        <Text style={s.text}>Codex · Claude 기본 압축 기준 (%)</Text>
+        {button(`Codex 압축: ${draft.codexCompression === "native" ? "Codex 자체 압축 사용" : "플러그인 기준 사용 (이전 설정 호환)"}`, () =>
+          setDraft({ ...draft, codexCompression: draft.codexCompression === "native" ? "threshold" : "native" }),
+        )}
+        <Text style={s.muted}>자체 압축 모드는 Codex의 네이티브 상한·자동 압축·명시적 /compact를 보존하고 플러그인 선제 압축만 끕니다.</Text>
+        <Text style={s.text}>기존 공통 압축 기준 (%) · Claude 별도 정책 꺼짐 / 이전 Codex 호환 모드</Text>
         {field(
-          "Codex · Claude 기본 압축 기준",
+          "기존 공통 압축 기준",
           String(Math.round(draft.threshold * 100)),
           (value) => setDraft({ ...draft, threshold: Number(value) / 100 }),
           "workflow-threshold",
@@ -378,9 +382,9 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
         </>}
         <Text style={s.muted}>
           {draft.claudeCompression
-            ? `Claude 실제 용량이 정확히 1,000,000이면 ${draft.claudeCompression.oneMillionTokenLimit.toLocaleString("en-US")}토큰, 그 외 용량은 ${Math.round(draft.claudeCompression.threshold * 100)}%에서 압축합니다. Codex는 ${Math.round(draft.threshold * 100)}%를 유지합니다. 사용 토큰·용량이 없으면 Claude를 자동 압축하지 않습니다.`
+            ? `Claude 실제 용량이 정확히 1,000,000이면 ${draft.claudeCompression.oneMillionTokenLimit.toLocaleString("en-US")}토큰, 그 외 용량은 ${Math.round(draft.claudeCompression.threshold * 100)}%에서 압축합니다. ${draft.codexCompression === "native" ? "Codex는 자체 압축을 사용합니다." : `이전 Codex 역할 분리 작업은 ${Math.round(draft.threshold * 100)}% 기준을 사용합니다.`} 사용 토큰·용량이 없으면 Claude를 자동 압축하지 않습니다.`
             : "Claude도 기본 압축 기준을 사용합니다. 별도 정책은 기본적으로 꺼져 있습니다."}
-          {" "}이 자동 압축은 연합개발과 기존 역할 분리 작업에 적용됩니다. 신규 일반개발 단일 대화에는 적용되지 않습니다.
+          {" "}Claude 자동 압축은 연합개발·역할 분리 작업과 신규 일반개발 단일 대화에 적용됩니다. 유휴 상태의 같은 대화에서만 압축하고 역할 전달·자동 계속 메시지를 만들지 않습니다.
         </Text>
         <Text style={s.text}>최대 계획·실행 반복 / 최대 자동 응답 수</Text>
         <View style={s.row}>
@@ -736,6 +740,15 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
                 : button("재개", () => resume(w.id))}
             </>
           )}
+          {capabilities(w).standalone && w.status !== "completed" && !["done", "pushed", "no_push"].includes(w.progress ?? "active") && <>
+            {w.status === "active" && button("압축 유지보수 일시정지", () => void run(() => act({id:w.id,action:"pause",message:""}), "압축 유지보수를 일시정지했습니다."))}
+            {w.status === "paused" && button("압축 유지보수 재개", () => void run(() => act({id:w.id,action:"resume",message:""}), "압축 유지보수를 재개했습니다."))}
+            {w.status === "error" && !w.compactionRecovery && button("압축 유지보수 다시 확인", () => void run(() => act({id:w.id,action:"resume",message:""}), "압축 유지보수 상태를 확인했습니다."))}
+            {w.status === "error" && w.compactionRecovery && <>
+              {button("압축 복구·재시도", () => void run(() => act({id:w.id,action:"retry_compaction",message:""}), "압축 복구 상태를 확인했습니다."))}
+              <Text style={s.muted}>완료 이력을 먼저 확인합니다. 정확한 요청의 실패가 확인될 때만 새 요청으로 재시도합니다. 확인이 어려우면 대화에서 직접 /compact를 실행한 뒤 복구하세요.</Text>
+            </>}
+          </>}
           {recoveryControls(w)}
           {w.mode === "federated" && !capabilities(w).current && !w.generalTransition && generalButton(w.id)}
         </View>

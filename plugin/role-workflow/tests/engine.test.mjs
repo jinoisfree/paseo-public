@@ -6684,3 +6684,14 @@ test("missing planner snapshot clears stale displayed usage and cannot compact",
  await f.finish("planner","observation","plan");const inspect=f.port.inspect;f.port.inspect=async id=>id==="planner"?null:inspect(id);
  await f.engine.tick();assert.equal((await f.view()).status,"paused");assert.equal((await f.view()).planUsage,null);assert.equal(f.compacted.length,0);assert.match((await f.view()).planCompressionReason,/없거나 잘못/);
 });
+
+for(const used of [700000,900000,1000000])test(`paired Codex native skips plugin compaction at ${used}/1M`,async t=>{
+ const f=await fixture(t,undefined,undefined,undefined,"codex");await f.engine.configure({...await f.engine.settings(),threshold:0.7,codexCompression:"native"});
+ f.agents.get("planner").contextUsage={contextWindowUsedTokens:used,contextWindowMaxTokens:1000000};await f.finish("planner","native-plan","plan");
+ assert.equal(f.compacted.length,0);assert.equal(f.created.length,1);
+});
+test("paired native compaction completion still records the turn context",async t=>{
+ const f=await fixture(t,undefined,undefined,undefined,"codex");await f.engine.configure({...await f.engine.settings(),codexCompression:"native"});
+ await f.engine.ended("planner","native-with-plan",decision("plan"),null,"goal",true);
+ assert.equal(JSON.parse(await readFile(f.file,"utf8")).workflows[0].plan.compactedForTurn,"native-with-plan");assert.equal(f.compacted.length,0);
+});

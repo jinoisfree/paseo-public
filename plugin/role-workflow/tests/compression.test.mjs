@@ -53,3 +53,9 @@ test("configure and reload preserve unrelated settings, including Codex 70% and 
  const wanted={...before,claudeCompression:{threshold:0.55,oneMillionTokenLimit:500000}};assert.deepEqual(await engine.configure(wanted),wanted);
  await engine.close();const restored=new WorkflowEngine(file,{});t.after(()=>restored.close());assert.deepEqual(await restored.settings(),wanted);
 });
+
+for(const ratio of [0.7,0.9,1])test(`Codex native mode does not precompact at ${ratio*100}%`,()=>{
+ const native={...settings,codexCompression:"native"};
+ for(const provider of ["codex","codex/model"]){const d=compressionDecision(provider,native,sample(ratio*1000000,1000000));assert.equal(d.due,false);assert.equal(d.policy,"native");}
+ assert.equal(compressionDecision("claude/model",native,sample(500000,1000000)).due,true);
+});
