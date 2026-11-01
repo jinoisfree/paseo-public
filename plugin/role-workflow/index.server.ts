@@ -1,4 +1,4 @@
-import { sequentialSelectionPrompt } from "./server/executor-selection";
+import { executorSelectionPrompt } from "./server/executor-selection";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import type { PaseoApi, PaseoAgentConfig } from "@getpaseo/client";
 import { randomUUID } from "node:crypto";
@@ -114,7 +114,7 @@ export default function contribute(server: PluginServerContext) {
       if (current && mode !== "general") {
         const catalogs = await Promise.allSettled((["codex", "claude"] as const).map(async base =>
           [base, await port.models!(base, request.config.cwd)] as const));
-        currentSelection = sequentialSelectionPrompt(Object.fromEntries(catalogs.flatMap(result =>
+        currentSelection = executorSelectionPrompt(Object.fromEntries(catalogs.flatMap(result =>
           result.status === "fulfilled" ? [result.value] : [])));
       }
       const systemPrompt = current && mode

@@ -191,11 +191,11 @@ test("old settings gain the Claude start default and an empty value stays empty"
 });
 
 for(const provider of ["claude","codex"])for(const askMode of [true,false])
-test(`${provider} startup uses sequential product/model/thinking questions askMode=${askMode}`,async t=>{
+test(`${provider} startup uses bundled product/model/thinking questions askMode=${askMode}`,async t=>{
  const f=await fixture(t);f.context.paseo.providers.listModels=async()=>({models:[{id:"model",label:"Model",thinkingOptions:[{id:"medium",label:"Medium"}]}]});
  await f.configure({askMode,askExecutorModel:true});const {config}=await f.create({provider});
- assert.match(config.systemPrompt,/각 단계는 단독 호출/);assert.match(config.systemPrompt,/실제 사용자 답변/);
- assert.match(config.systemPrompt,/제품→모델→추론/);assert.match(config.systemPrompt,/codex\/model/);assert.match(config.systemPrompt,/claude\/model/);
+ assert.match(config.systemPrompt,/3질문을 한 번의 질문 도구 호출/);assert.match(config.systemPrompt,/실제 사용자 답변/);
+ assert.match(config.systemPrompt,/3질문을 한 호출/);assert.match(config.systemPrompt,/codex\/model/);assert.match(config.systemPrompt,/claude\/model/);
  assert.doesNotMatch(config.systemPrompt,/모델·추론 두 질문을 한 번의 호출/);
  if(askMode)assert.match(config.systemPrompt,/진행 방식을 단독 질문/);else assert.match(config.systemPrompt,/진행 방식은 연합개발이다/);
 });
@@ -205,8 +205,8 @@ test("an unavailable model catalog waits without a saved executor fallback",asyn
  assert.match(config.systemPrompt,/카탈로그 실패는 사용자에게 알리고 대기/);
  assert.doesNotMatch(config.systemPrompt,/저장된 설정을 사용하며 다시 묻지 않는다/);
 });
-test("the legacy model-question switch cannot skip contract4 sequential selection",async t=>{
+test("the legacy model-question switch cannot skip contract4 bundled selection",async t=>{
  const f=await fixture(t);await f.configure({askMode:true,askExecutorModel:false});const {config}=await f.create();
- assert.match(config.systemPrompt,/진행 방식을 단독 질문/);assert.match(config.systemPrompt,/각 단계는 단독 호출/);
+ assert.match(config.systemPrompt,/진행 방식을 단독 질문/);assert.match(config.systemPrompt,/3질문을 한 번의 질문 도구 호출/);
  assert.doesNotMatch(config.systemPrompt,/실행 모델·추론은 저장된 설정을 사용/);
 });

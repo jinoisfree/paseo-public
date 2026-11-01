@@ -295,7 +295,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
     if (!draft || !settingsOpen) return null;
     return (
       <View style={s.card}>
-        <Text style={s.muted}>새 일반개발은 최초 설정으로 직접 작업합니다. 새 연합개발은 제품→모델→추론을 순서대로 선택합니다. 실행 모델 질문 스위치는 기존 작업에만 적용됩니다. 자동 왕복 한도는 연합개발과 기존 역할 분리 작업에 적용됩니다.</Text>
+        <Text style={s.muted}>새 일반개발은 최초 설정으로 직접 작업합니다. 새 연합개발은 제품·모델·추론 3질문을 한 호출에 함께 표시하고 조합을 확인합니다. 실행 모델 질문 스위치는 기존 작업에만 적용됩니다. 자동 왕복 한도는 연합개발과 기존 역할 분리 작업에 적용됩니다.</Text>
         {button(
           `새 대화 자동 연결: ${draft.autoStart ? "켜짐" : "꺼짐"}`,
           () => setDraft({ ...draft, autoStart: !draft.autoStart }),
@@ -659,7 +659,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
           <Text style={s.muted}>{w.cwd}</Text>
           <Text style={s.text}>{w.detail}</Text>
           {capabilities(w).standalone && <Text style={s.muted}>최초 대화에서 직접 구현 · 자체 점검</Text>}
-          {w.selection && capabilities(w).sequentialSelection && (
+          {w.selection && capabilities(w).executorSelection && (
             <Text style={s.muted}>구현 선택: {selectionStageLabel[w.selection.stage ?? "provider"]} {w.selection.error}</Text>
           )}
           {w.planConflict && w.planConflict.stage !== "resolved" && (

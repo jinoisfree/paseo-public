@@ -7,6 +7,6 @@ export function capabilities(w: { contract?: number; mode: string }) {
     splitGeneral,
     automatic: w.mode === "federated" || splitGeneral,
     standalone: current && w.mode === "general",
-    sequentialSelection: current && w.mode === "federated",
+    executorSelection: current && w.mode === "federated",
   };
 }

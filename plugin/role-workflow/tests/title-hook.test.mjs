@@ -301,7 +301,7 @@ test("the start setting decides the question, the enrolled mode and which blocks
   try {
     const asked = await start("asked", {});
     assert.match(asked.prompt,/진행 방식을 단독 질문/);
-    assert.match(asked.prompt,/각 단계는 단독 호출/);
+    assert.match(asked.prompt,/3질문을 한 번의 질문 도구 호출/);
     assert.equal(conditional(asked.prompt),2);
     assert.ok(asked.prompt.indexOf("<paseo-work-mode-v4>")<asked.prompt.indexOf("<paseo-role-workflow-v1>"));
     assert.equal(asked.label, undefined);
@@ -318,7 +318,7 @@ test("the start setting decides the question, the enrolled mode and which blocks
     assert.equal(conditional(federated.prompt), 2);
     assert.match(
       federated.prompt,
-      /조사·설계 전에 다음 세 단계를 질문 도구로 순서대로/,
+      /3질문을 한 번의 질문 도구 호출/,
     );
     assert.equal(federated.label, undefined);
 
