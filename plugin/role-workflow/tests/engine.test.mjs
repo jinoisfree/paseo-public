@@ -6642,3 +6642,45 @@ for (const limit of ["cycles", "turns"]) {
     assert.equal(f.sent.length, 2);
   });
 }
+
+// AC-C1~4: the existing serialized handoff/compaction path consumes raw context policy.
+for(const [provider,max,before,at] of [["claude",1000000,499999,500000],["claude",200000,109999,110000],["codex",300000,209999,210000]])
+test(`provider compression ${provider}/${max} boundary, duplicate event and restart`,async t=>{
+ const f=await fixture(t,undefined,undefined,undefined,provider);
+ await f.engine.configure({...await f.engine.settings(),threshold:0.7,claudeCompression:{threshold:0.55,oneMillionTokenLimit:500000}});
+ const a=f.agents.get("planner");a.contextUsage={contextWindowUsedTokens:before,contextWindowMaxTokens:max};a.usage=0.99;
+ await f.finish("planner","boundary","plan");assert.equal(f.compacted.length,0);assert.equal((await f.view()).planUsage,before/max);
+ a.contextUsage.contextWindowUsedTokens=at;await f.engine.tick();await new Promise(r=>setImmediate(r));await f.engine.tick();
+ assert.deepEqual(f.compacted,["planner"]);const stored=JSON.parse(await readFile(f.file,"utf8"));assert.equal(stored.workflows[0].plan.compactedForTurn,"boundary");
+ a.contextUsage.contextWindowUsedTokens=at+1;await f.finish("planner","boundary","plan");await f.engine.tick();assert.equal(f.compacted.length,1);
+ await f.engine.close();const restarted=new WorkflowEngine(f.file,f.port);t.after(()=>restarted.close());await restarted.tick();assert.equal(f.compacted.length,1);
+});
+for(const blocked of ["running","permission","missing","invalid"])
+test(`Claude override never compacts with ${blocked} context/agent state`,async t=>{
+ const f=await fixture(t);await f.engine.configure({...await f.engine.settings(),threshold:0.7,claudeCompression:{threshold:0.55,oneMillionTokenLimit:500000}});
+ const a=f.agents.get("planner");a.usage=0.99;a.contextUsage={contextWindowUsedTokens:500000,contextWindowMaxTokens:1000000};
+ if(blocked==="permission")a.permission=true;
+ if(blocked==="missing")a.contextUsage=null;
+ if(blocked==="invalid")a.contextUsage.contextWindowMaxTokens=0;
+ if(blocked==="running"){
+  a.contextUsage.contextWindowUsedTokens=499999;
+  await f.finish("planner","safe","plan");assert.equal(f.compacted.length,0);
+  a.status="running";a.contextUsage.contextWindowUsedTokens=500000;await f.engine.tick();assert.equal(f.compacted.length,0);
+  a.status="idle";await f.engine.tick();await new Promise(r=>setImmediate(r));assert.equal(f.compacted.length,1);return;
+ }
+ await f.finish("planner","safe","plan");assert.equal(f.compacted.length,0);
+ if(blocked==="missing"||blocked==="invalid"){
+  assert.equal((await f.view()).planUsage,null);assert.match((await f.view()).planCompressionReason,/없거나 잘못/);
+ }
+});
+test("compression policy uses the actual snapshot provider rather than a model-name capacity guess",async t=>{
+ const f=await fixture(t);await f.engine.configure({...await f.engine.settings(),threshold:0.7,claudeCompression:{threshold:0.55,oneMillionTokenLimit:500000}});
+ const a=f.agents.get("planner");a.config={provider:"codex/model[1m]"};a.contextUsage={contextWindowUsedTokens:500000,contextWindowMaxTokens:1000000};
+ await f.finish("planner","provider","plan");assert.equal(f.compacted.length,0);assert.match((await f.view()).planCompressionReason,/Codex/);
+});
+
+test("missing planner snapshot clears stale displayed usage and cannot compact",async t=>{
+ const f=await fixture(t);await f.engine.configure({...await f.engine.settings(),threshold:0.7,claudeCompression:{threshold:0.55,oneMillionTokenLimit:500000}});
+ await f.finish("planner","observation","plan");const inspect=f.port.inspect;f.port.inspect=async id=>id==="planner"?null:inspect(id);
+ await f.engine.tick();assert.equal((await f.view()).status,"paused");assert.equal((await f.view()).planUsage,null);assert.equal(f.compacted.length,0);assert.match((await f.view()).planCompressionReason,/없거나 잘못/);
+});

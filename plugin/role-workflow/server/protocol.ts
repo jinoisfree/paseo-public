@@ -3,21 +3,7 @@ import type { WorkflowProvider } from "../shared/assignment";
 import { stripFences } from "../shared/fences";
 export { decisionSchema, parseDecision, DecisionError, type Decision } from "../shared/decision";
 
-export function contextRatio(usage?: {
-  contextWindowUsedTokens?: number;
-  contextWindowMaxTokens?: number;
-}): number | null {
-  const used = usage?.contextWindowUsedTokens;
-  const max = usage?.contextWindowMaxTokens;
-  return typeof used === "number" &&
-    Number.isFinite(used) &&
-    used >= 0 &&
-    typeof max === "number" &&
-    Number.isFinite(max) &&
-    max > 0
-    ? used / max
-    : null;
-}
+export { contextRatio } from "../shared/compression";
 
 /** Opens every block that a general-mode conversation must not follow. */
 export const FEDERATED_ONLY =

@@ -12,6 +12,8 @@ import {
 import { managedPushSchema } from "./managed-push";
 import { folderRootsSchema } from "./folders";
 
+import { claudeCompressionSchema } from "./compression";
+
 export const settingsSchema = z.object({
   folderRoots: folderRootsSchema,
   autoPinStarted: z.boolean().default(true),
@@ -38,6 +40,7 @@ export const settingsSchema = z.object({
   autoResumeQuota: z.boolean().default(true),
   autoResumeTransient: z.boolean().default(true),
   threshold: z.number().min(0.05).max(0.9).default(0.8),
+  claudeCompression: claudeCompressionSchema,
   maxCycles: z.number().int().min(1).max(50).default(5),
   maxTurns: z.number().int().min(2).max(200).default(30),
   executorModel: z
@@ -124,6 +127,8 @@ export const workflowViewSchema = z.object({
   executeGeneration: z.number(),
   planCompactions: z.number(),
   executeCompactions: z.number(),
+  planCompressionReason: z.string().default(""),
+  executeCompressionReason: z.string().default(""),
   planUsage: z.number().nullable(),
   executeUsage: z.number().nullable(),
   repositories: repositoryPathsSchema.default([]),

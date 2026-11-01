@@ -1,3 +1,4 @@
+import { compressionDecision, contextRatio, type ContextUsage } from "../shared/compression";
 import { EXECUTOR_QUESTIONS, executorSelectionSchema, selectionStageLabel, type SelectionStage } from "../shared/executor-selection";
 import { applyLegacySelection, applySelectionBatch, validateSelection, selectionQuestions, selectionAnswers, pendingFields, timelineSelections, timelineMode, explicitSelection } from "./executor-selection";
 import type { ExecutorModel } from "./protocol";
@@ -322,6 +323,7 @@ export interface Snapshot {
   permission: boolean;
   questions?: { id: string; input: unknown }[];
   usage: number | null;
+  contextUsage?: ContextUsage | null;
   config?: PaseoAgentConfig;
 }
 export interface History {
@@ -520,6 +522,8 @@ export class WorkflowEngine {
   private pushTitlesChecked = false;
   private readonly pendingTitles = new Set<string>();
   private archiveCheckedAt = -Infinity;
+  // Display-only observations; compaction identity and deduplication remain durable.
+  private readonly compressionReasons = new Map<string, string>();
   private readonly compacting = new Map<string, Promise<void>>();
   private readonly permissions = new Set<string>();
   // Flows showing a permission wait this tick; a second status line must not fight it.
@@ -1228,6 +1232,8 @@ export class WorkflowEngine {
         executeGeneration: w.execute?.generation ?? 0,
         planCompactions: w.plan?.compactions ?? 0,
         executeCompactions: w.execute?.compactions ?? 0,
+        planCompressionReason: automates(w) ? this.compressionReasons.get(w.plan?.id ?? "") ?? "" : "역할 왕복 자동 압축 미적용: 단일 대화 유지보수 경로가 필요합니다.",
+        executeCompressionReason: this.compressionReasons.get(w.execute?.id ?? "") ?? "",
         planUsage: w.plan?.usage ?? null,
         executeUsage: w.execute?.usage ?? null,
       })),
@@ -3757,6 +3763,8 @@ export class WorkflowEngine {
       // It must neither resume nor produce a stopped notification because of that archive.
       if (snapshot?.archived && isFinished(w)) return false;
       if (!snapshot || snapshot.archived) {
+        member.usage = null;
+        this.compressionReasons.set(member.id, compressionDecision(member.config.provider, await this.settings(), null).reason);
         w.status = "paused";
         this.touch(w, "연결된 대화가 보관되었거나 없어 자동 진행을 멈췄습니다.");
         return;
@@ -3930,7 +3938,11 @@ export class WorkflowEngine {
     const member = w[role];
     if (!member) return;
     const snapshot = member.workspaceId ? await this.port.inspect(member.id) : null;
-    if (snapshot?.usage !== null && snapshot?.usage !== undefined) member.usage = snapshot.usage;
+    // Use the same fresh raw sample for display and policy; never retain stale usage.
+    const ratio = snapshot ? (snapshot.contextUsage === undefined ? snapshot.usage : contextRatio(snapshot.contextUsage)) : null;
+    member.usage = typeof ratio === "number" && Number.isFinite(ratio) && ratio >= 0 ? ratio : null;
+    const compression = compressionDecision(snapshot?.config?.provider ?? member.config.provider, await this.settings(), snapshot);
+    this.compressionReasons.set(member.id, compression.reason);
     if (member.compaction) {
       if (!this.compacting.has(member.id))
         throw new Error(
@@ -3939,8 +3951,7 @@ export class WorkflowEngine {
       return;
     }
     if (
-      member.usage !== null &&
-      member.usage >= (await this.settings()).threshold &&
+      compression.due &&
       member.lastTurnKey &&
       member.compactedForTurn !== member.lastTurnKey &&
       snapshot?.status === "idle" &&

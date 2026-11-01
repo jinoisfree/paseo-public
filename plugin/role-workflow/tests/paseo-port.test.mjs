@@ -1285,3 +1285,12 @@ test("an executor opens as a tab in its planner's workspace instead of a workspa
   );
   assert.equal(calls.at(-1)[2], "Claude 실행");
 });
+
+test("inspect exposes validated raw context tokens and the ratio from the same sample",async()=>{
+ const agent={id:"agent",provider:"claude",model:"sonnet[1m]",workspaceId:"ws",cwd:"/repo",status:"idle",pendingPermissions:[],lastUsage:{contextWindowUsedTokens:500000,contextWindowMaxTokens:1000000}};
+ const port=createPort(()=>({agents:{ref:()=>({refresh:async()=>({agent})})},workspaces:{ref:()=>({refresh:async()=>({projectId:"p",name:"Task"})})}}));
+ const s=await port.inspect("agent");assert.deepEqual(s.contextUsage,agent.lastUsage);assert.equal(s.usage,0.5);assert.equal(s.config.provider,"claude/sonnet[1m]");
+ for(const usage of [undefined,{}, {contextWindowUsedTokens:NaN,contextWindowMaxTokens:1000000},{contextWindowUsedTokens:500000,contextWindowMaxTokens:0}]){
+  agent.lastUsage=usage;const s=await port.inspect("agent");assert.equal(s.contextUsage,null);assert.equal(s.usage,null);
+ }
+});

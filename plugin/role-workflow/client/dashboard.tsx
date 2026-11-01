@@ -351,13 +351,37 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
               return result;
             }, ""),
         )}
-        <Text style={s.text}>자동 압축 기준 (%)</Text>
+        <Text style={s.text}>Codex · Claude 기본 압축 기준 (%)</Text>
         {field(
-          "자동 압축 기준",
+          "Codex · Claude 기본 압축 기준",
           String(Math.round(draft.threshold * 100)),
           (value) => setDraft({ ...draft, threshold: Number(value) / 100 }),
           "workflow-threshold",
         )}
+        {button(`Claude 별도 압축 정책: ${draft.claudeCompression ? "켜짐" : "꺼짐"}`, () =>
+          setDraft({ ...draft, claudeCompression: draft.claudeCompression ? null : {
+            threshold: draft.threshold,
+            oneMillionTokenLimit: Math.round(1_000_000 * draft.threshold),
+          } }),
+        )}
+        {draft.claudeCompression && <>
+          <Text style={s.text}>Claude 1,000,000 컨텍스트의 압축 사용 토큰</Text>
+          {field("Claude 1M 압축 토큰", String(draft.claudeCompression.oneMillionTokenLimit), value =>
+            setDraft({ ...draft, claudeCompression: { ...draft.claudeCompression!, oneMillionTokenLimit: Number(value) } }),
+            "workflow-claude-million-tokens",
+          )}
+          <Text style={s.text}>그 외 Claude 컨텍스트 압축 기준 (%)</Text>
+          {field("Claude 압축 비율", String(Math.round(draft.claudeCompression.threshold * 100)), value =>
+            setDraft({ ...draft, claudeCompression: { ...draft.claudeCompression!, threshold: Number(value) / 100 } }),
+            "workflow-claude-threshold",
+          )}
+        </>}
+        <Text style={s.muted}>
+          {draft.claudeCompression
+            ? `Claude 실제 용량이 정확히 1,000,000이면 ${draft.claudeCompression.oneMillionTokenLimit.toLocaleString("en-US")}토큰, 그 외 용량은 ${Math.round(draft.claudeCompression.threshold * 100)}%에서 압축합니다. Codex는 ${Math.round(draft.threshold * 100)}%를 유지합니다. 사용 토큰·용량이 없으면 Claude를 자동 압축하지 않습니다.`
+            : "Claude도 기본 압축 기준을 사용합니다. 별도 정책은 기본적으로 꺼져 있습니다."}
+          {" "}이 자동 압축은 연합개발과 기존 역할 분리 작업에 적용됩니다. 신규 일반개발 단일 대화에는 적용되지 않습니다.
+        </Text>
         <Text style={s.text}>최대 계획·실행 반복 / 최대 자동 응답 수</Text>
         <View style={s.row}>
           {field("최대 반복 횟수", String(draft.maxCycles), (value) =>
@@ -669,6 +693,8 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
           {w.mode === "general" && w.generalAgent && (
             <Text style={s.muted}>{w.automatic ? "구현 · " : ""}{generalAgentLabel(w.generalAgent)}</Text>
           )}
+          {w.planCompressionReason && <Text style={s.muted}>최근 압축 판정: {w.planCompressionReason}</Text>}
+          {w.executeCompressionReason && <Text style={s.muted}>실행 대화 최근 압축 판정: {w.executeCompressionReason}</Text>}
           {repositoryPanel(w)}
           <ManagedPushPanel workflow={w} refresh={load} styles={s} />
           {(w.automatic || w.mode === "federated") && (

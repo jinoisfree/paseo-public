@@ -1,3 +1,4 @@
+import { contextUsage, contextRatio } from "../shared/compression";
 import { timelineSelections, timelineMode } from "./executor-selection";
 import { asyncGeneralAnswers } from "./general-agent";
 import { lstat, realpath } from "node:fs/promises";
@@ -7,7 +8,7 @@ import { usageAvailable } from "./quota";
 import { createHash } from "node:crypto";
 import type { PaseoApi, PaseoAgentConfig, PaseoAgent } from "@getpaseo/client";
 import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
-import { contextRatio, decorateTitle } from "./protocol";
+import { decorateTitle } from "./protocol";
 import type { WorkflowPort, History } from "./engine";
 import type { ArchiveInspection, ArchiveConversation } from "./archive";
 import type { PushReviewPort } from "./push-review";
@@ -507,6 +508,7 @@ export function createPort(
       const agent = snapshot.agent;
       const workspace = await api.workspaces.ref(agent.workspaceId!).refresh();
       if (!workspace && !agent.archivedAt) return null;
+      const currentContext = contextUsage(agent.lastUsage);
       return {
         id: agent.id,
         workspaceId: agent.workspaceId!,
@@ -518,7 +520,8 @@ export function createPort(
         archivedAt: agent.archivedAt ?? null,
         permission: agent.pendingPermissions.length > 0,
         questions: agent.pendingPermissions.filter(q => q.kind === "question").map(q => ({ id: q.id, input: q.input })),
-        usage: contextRatio(agent.lastUsage),
+        contextUsage: currentContext,
+        usage: contextRatio(currentContext),
         config: {
           provider: agent.model ? `${agent.provider}/${agent.model}` : agent.provider,
           thinkingOptionId: agent.thinkingOptionId ?? undefined,
