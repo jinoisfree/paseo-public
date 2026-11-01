@@ -180,15 +180,12 @@ test("both initial providers plan, managed executors keep their role, and model 
       };
       const initial = await hooks.get("agent.create")({ request }, context);
       assert.match(initial.config.systemPrompt, /기획설계·검증 역할/);
-      assert.match(initial.config.systemPrompt, /<paseo-mode-select-v1>/);
+      assert.match(initial.config.systemPrompt, /<paseo-work-mode-v4>/);
       if (provider === "codex")
-        assert.match(initial.config.systemPrompt, /request_user_input_async/);
-      assert.match(
-        initial.config.systemPrompt,
-        provider === "claude" ? /실제 답변이 도착하기 전에는/ : /실제 모델 답변이 도착하기 전에는/,
-      );
+        assert.match(initial.config.systemPrompt, /비동기 도구/);
+      assert.match(initial.config.systemPrompt,/실제 사용자 답변/);
       assert.ok(initial.config.systemPrompt.includes(`${other}/m`));
-      assert.equal(calls.at(-1), other);
+      assert.deepEqual(calls.slice(-2),["codex","claude"]);
       assert.deepEqual(Object.keys(initial).sort(), ["config", "env"]);
       const managed = await hooks.get("agent.create")(
         {
@@ -303,32 +300,25 @@ test("the start setting decides the question, the enrolled mode and which blocks
   const conditional = (prompt) => (prompt.match(/\[연합개발 전용\]/g) || []).length;
   try {
     const asked = await start("asked", {});
-    assert.match(asked.prompt, /첫 응답을 쓰기 전에 한 번만 질문 도구로 진행 방식을 묻는다/);
-    assert.match(asked.prompt, /진행 방식 질문은 모델·추론 질문과 묶지 않는다/);
-    assert.doesNotMatch(asked.prompt, /세 질문/);
-    assert.equal(conditional(asked.prompt), 1);
-    assert.ok(
-      asked.prompt.indexOf("<paseo-mode-select-v1>") <
-        asked.prompt.indexOf("<paseo-role-workflow-v1>"),
-    );
+    assert.match(asked.prompt,/진행 방식을 단독 질문/);
+    assert.match(asked.prompt,/각 단계는 단독 호출/);
+    assert.equal(conditional(asked.prompt),2);
+    assert.ok(asked.prompt.indexOf("<paseo-work-mode-v4>")<asked.prompt.indexOf("<paseo-role-workflow-v1>"));
     assert.equal(asked.label, undefined);
 
     const general = await start("general", { askMode: false, defaultMode: "general" });
-    assert.match(general.prompt, /저장된 진행 방식은 일반개발이다\. 진행 방식을 묻지 않는다/);
-    assert.doesNotMatch(general.prompt, /질문 도구로 진행 방식을 묻는다/);
-    assert.equal(conditional(general.prompt), 0);
-    assert.match(general.prompt, /<paseo-role-workflow-v1>/);
-    assert.match(general.prompt, /<paseo-automation-v1>/);
-    assert.match(general.prompt, /최초 대화는 기획·설계·검증을 유지/);
-    assert.doesNotMatch(general.prompt, /<paseo-general-v1>|<paseo-executor-model-v1>/);
+    assert.match(general.prompt,/진행 방식은 일반개발이다/);
+    assert.equal(conditional(general.prompt),0);
+    assert.doesNotMatch(general.prompt,/<paseo-role-workflow-v1>|<paseo-automation-v1>|<paseo-executor-selection-v4>/);
+    assert.match(general.prompt,/직접 조사·구현·자체 검증/);
     assert.equal(general.label, undefined);
 
     const federated = await start("federated", { askMode: false });
-    assert.match(federated.prompt, /저장된 진행 방식은 연합개발이다/);
-    assert.equal(conditional(federated.prompt), 1);
+    assert.match(federated.prompt, /진행 방식은 연합개발이다/);
+    assert.equal(conditional(federated.prompt), 2);
     assert.match(
       federated.prompt,
-      /연합개발로 정해진 직후, 조사를 시작하기 전에 질문 도구를 한 번만/,
+      /조사·설계 전에 다음 세 단계를 질문 도구로 순서대로/,
     );
     assert.equal(federated.label, undefined);
 

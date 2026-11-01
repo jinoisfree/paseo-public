@@ -1,3 +1,4 @@
+import { timelineSelections, timelineMode } from "./executor-selection";
 import { asyncGeneralAnswers } from "./general-agent";
 import { lstat, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -91,6 +92,8 @@ export function readTurn(
   return {
     text,
     generalAnswers: asyncGeneralAnswers(items),
+    ...(timelineSelections(items).length ? { selectionAnswers: timelineSelections(items) } : {}),
+    ...(timelineMode(items) ? { modeAnswer: timelineMode(items)! } : {}),
     // Keep persisted text/key/request semantics; only the tool evidence spans an async answer.
     evidence: turnEvidence(items.slice(evidenceBoundary(items, turnIds) + 1), cwd),
     compacted: turn.some((item) => item.type === "compaction" && item.status === "completed"),
@@ -486,6 +489,17 @@ export function createPort(
     async rename(workspaceId, title) {
       await getApi().workspaces.ref(workspaceId).setTitle(title);
     },
+    async models(provider, cwd) {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const result = await Promise.race([
+          getApi().providers.listModels(provider, { cwd }),
+          new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error("모델 카탈로그 조회 시간 초과")), 5000); }),
+        ]);
+        if (result.error) throw new Error(result.error);
+        return result.models ?? [];
+      } finally { clearTimeout(timeout); }
+    },
     async inspect(id) {
       const api = getApi();
       const snapshot = await api.agents.ref(id).refresh();
@@ -503,6 +517,7 @@ export function createPort(
         archived: !!agent.archivedAt,
         archivedAt: agent.archivedAt ?? null,
         permission: agent.pendingPermissions.length > 0,
+        questions: agent.pendingPermissions.filter(q => q.kind === "question").map(q => ({ id: q.id, input: q.input })),
         usage: contextRatio(agent.lastUsage),
         config: {
           provider: agent.model ? `${agent.provider}/${agent.model}` : agent.provider,

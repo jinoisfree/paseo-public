@@ -50,6 +50,8 @@ status 규칙:
 /** Removes every block this plugin owns except the role block, which roles.ts replaces. */
 export function stripManagedBlocks(existing: string): string {
   return existing
+    .replace(/\n?<paseo-work-mode-v4>[^]*?<\/paseo-work-mode-v4>/g, "")
+    .replace(/\n?<paseo-executor-selection-v4>[^]*?<\/paseo-executor-selection-v4>/g, "")
     .replace(/\n?<paseo-general-agent-v1>[^]*?<\/paseo-general-agent-v1>/g, "")
     .replace(/\n?<paseo-agent-rules-v1>[^]*?<\/paseo-agent-rules-v1>/g, "")
     .replace(/\n?<paseo-title-v1>[^]*?<\/paseo-title-v1>/g, "")
@@ -70,7 +72,7 @@ export function automationPrompt(existing: string, gated = false): string {
   return stripManagedBlocks(existing) + "\n" + automationBlock(gated);
 }
 
-interface ExecutorModel {
+export interface ExecutorModel {
   id: string;
   label: string;
   isDefault?: boolean;

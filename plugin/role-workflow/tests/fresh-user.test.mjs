@@ -212,51 +212,16 @@ async function assertRules(prompt, home) {
   }
 }
 
-for (const provider of ["claude", "codex"]) {
-  for (const catalog of [false, true]) {
-    test(`fresh ${provider} defaults with ${catalog ? "a model catalog" : "no provider context"}`, async (t) => {
-      const f = await freshUser(t, { catalog });
-      const prompt = await f.prompt(provider);
-      await assertRules(prompt, f.home);
-      const general = block(prompt, "general-agent");
-      assert.match(general, /일반개발 전용/);
-      assert.match(general, /연합개발에서는 이 블록을 무시/);
-      const tags = ["agent-rules", "mode-select", "role-workflow", "automation"];
-      for (const tag of tags) block(prompt, tag);
-      const positions = tags.map((tag) => prompt.indexOf(`<paseo-${tag}-v1>`));
-      assert.deepEqual(
-        positions,
-        positions.toSorted((a, b) => a - b),
-      );
-      assert.match(
-        block(prompt, "mode-select"),
-        /첫 응답을 쓰기 전에 한 번만 질문 도구로 진행 방식을 묻는다/,
-      );
-      assert.doesNotMatch(block(prompt, "mode-select"), /저장된 진행 방식은/);
-      assert.doesNotMatch(block(prompt, "role-workflow"), /연합개발 전용/);
-      assert.match(block(prompt, "role-workflow"), /기획설계·검증 역할/);
-      assert.doesNotMatch(block(prompt, "automation"), /연합개발 전용/);
-      const model = block(prompt, "executor-model");
-      if (catalog) {
-        const other = provider === "claude" ? "codex" : "claude";
-        assert.ok(model.includes(`${other}/sample-model`));
-        assert.match(model, /질문 도구/);
-        assert.deepEqual(f.calls, [
-          ["claude", { cwd: f.home }],
-          ["codex", { cwd: f.home }],
-          [other, { cwd: f.home }],
-          ["claude", { cwd: f.home }],
-          ["codex", { cwd: f.home }],
-          [other, { cwd: f.home }],
-        ]);
-      } else {
-        assert.match(model, /실행 모델·추론은 저장된 설정을 사용하며 다시 묻지 않는다/);
-        assert.deepEqual(f.calls, []);
-      }
-      assert.equal(f.errors.mock.callCount(), 0);
-    });
-  }
-}
+for (const provider of ["claude", "codex"]) for (const catalog of [false,true])
+test(`fresh ${provider} contract4 gates roles to federation with catalog=${catalog}`,async t=>{
+ const f=await freshUser(t,{catalog});const prompt=await f.prompt(provider);await assertRules(prompt,f.home);
+ assert.match(prompt,/<paseo-work-mode-v4>/);assert.match(prompt,/실제 답변 전/);
+ assert.match(block(prompt,"role-workflow"),/연합개발 전용/);assert.match(block(prompt,"automation"),/연합개발 전용/);
+ assert.match(prompt,/<paseo-executor-selection-v4>/);assert.doesNotMatch(prompt,/<paseo-general-agent-v1>|<paseo-executor-model-v1>/);
+ if(catalog){assert.match(prompt,/codex\/sample-model/);assert.match(prompt,/claude\/sample-model/);assert.deepEqual(f.calls,[["codex",{cwd:f.home}],["claude",{cwd:f.home}],["codex",{cwd:f.home}],["claude",{cwd:f.home}]]);}
+ else assert.match(prompt,/카탈로그를 읽지 못/);
+ assert.equal(f.errors.mock.callCount(),0);
+});
 
 test("fresh managed executor receives rules and the execution role without mode questions", async (t) => {
   const f = await freshUser(t);
@@ -271,45 +236,25 @@ test("fresh managed executor receives rules and the execution role without mode 
   assert.equal(f.errors.mock.callCount(), 0);
 });
 
-test("fresh general mode receives the common planner and automatic handoff contract", async (t) => {
-  const f = await freshUser(t, { general: true });
-  const prompt = await f.prompt("claude");
-  await assertRules(prompt, f.home);
-  block(prompt, "mode-select");
-  assert.match(block(prompt, "role-workflow"), /기획설계·검증 역할/);
-  block(prompt, "automation");
-  assert.doesNotMatch(prompt, /<paseo-general-v1>|현재 대화에서 직접 조사·구현·검증/);
-  assert.equal(f.errors.mock.callCount(), 0);
+test("fresh general mode implements in the initial conversation without role or selection blocks",async t=>{
+ const f=await freshUser(t,{general:true});const prompt=await f.prompt("claude");await assertRules(prompt,f.home);
+ assert.match(prompt,/직접 조사·구현·자체 검증/);assert.doesNotMatch(prompt,/<paseo-role-workflow-v1>|<paseo-automation-v1>|<paseo-executor-selection-v4>/);
+ assert.equal(f.errors.mock.callCount(),0);
 });
 
 test("fresh unwritable home still creates a conversation and omits only the rules block", async (t) => {
   const f = await freshUser(t, { blocked: true });
   const prompt = await f.prompt("claude");
   assert.doesNotMatch(prompt, /<paseo-agent-rules-v1>/);
-  for (const tag of ["mode-select", "role-workflow", "automation", "executor-model"])
+  for (const tag of ["role-workflow", "automation"])
     block(prompt, tag);
   assert.equal(f.errors.mock.callCount(), 1);
   assert.match(f.errors.mock.calls[0].arguments[0], /규칙 문서 비치 실패/);
 });
 
-test("fresh saved general mode receives the agent block without a federation gate", async (t) => {
-  const f = await freshUser(t, { general: true, catalog: true });
-  const prompt = await f.prompt("claude");
-  const selection = block(prompt, "general-agent");
-  assert.doesNotMatch(selection, /일반개발 전용/);
-  assert.match(selection, /담당 에이전트/);
-  assert.match(selection, /모델·추론 두 질문을 한 번의 호출/);
-  assert.match(block(prompt, "role-workflow"), /기획설계·검증 역할/);
-  assert.match(block(prompt, "automation"), /호스트 플러그인/);
-});
-
-test("fresh general mode with askExecutorModel disabled has no agent questions", async (t) => {
-  const f = await freshUser(t, { general: true, catalog: true, ask: false });
-  const prompt = await f.prompt("claude");
-  block(prompt, "mode-select");
-  assert.match(prompt, /구현 담당의 저장된 선택이 없다/);
-  assert.doesNotMatch(block(prompt, "general-agent"), /질문 도구|선택하세요/);
-  assert.deepEqual(f.calls, []);
+for(const ask of [true,false])test(`fresh saved general askExecutorModel=${ask} never asks or queries implementation choices`,async t=>{
+ const f=await freshUser(t,{general:true,catalog:true,ask});const prompt=await f.prompt("claude");
+ assert.match(prompt,/최초 대화/);assert.match(prompt,/자체 점검/);assert.doesNotMatch(prompt,/<paseo-general-agent-v1>|<paseo-executor-selection-v4>/);assert.deepEqual(f.calls,[]);
 });
 
 test("the selected replacement conversation receives general rules without asking again", async (t) => {
@@ -325,10 +270,10 @@ test("the selected replacement conversation receives general rules without askin
 });
 
 for (const provider of ["claude", "codex"])
-  test(`fresh ${provider} federation enrollment uses contract 3 and exactly one verdict instruction`, async (t) => {
+  test(`fresh ${provider} federation enrollment uses contract 4 and exactly one verdict instruction`, async (t) => {
     const f = await freshUser(t);
     const result = await f.enroll(provider);
-    assert.equal(result.state.contract, 3);
+    assert.equal(result.state.contract, 4);
     assert.equal(result.state.mode, "federated");
     assert.equal(result.state.completeRepairs, 0);
     assert.equal(
@@ -337,17 +282,12 @@ for (const provider of ["claude", "codex"])
     );
   });
 
-test("fresh saved general enrollment uses contract 3 with automatic roles and a verdict gate", async (t) => {
-  const f = await freshUser(t, { general: true });
-  const result = await f.enroll("claude");
-  assert.equal(result.state.contract, 3);
-  assert.match(block(result.prompt, "automation"), /계획 담당이 complete를 낼 때 verdict/);
+test("fresh saved general enrollment uses contract4 standalone behavior",async t=>{
+ const f=await freshUser(t,{general:true});const result=await f.enroll("claude");
+ assert.equal(result.state.contract,4);assert.equal(result.state.mode,"general");assert.equal(result.state.execute,null);
+ assert.doesNotMatch(result.prompt,/<paseo-automation-v1>/);
 });
-
-test("fresh ask-mode general choice retains contract 3 for role separation", async (t) => {
-  const f = await freshUser(t);
-  const result = await f.enroll("codex", "일반개발");
-  assert.equal(result.state.mode, "general");
-  assert.equal(result.state.contract, 3);
-  assert.equal(result.state.completeRepairs, 0);
+test("fresh ask-mode general choice retains contract4 without role separation",async t=>{
+ const f=await freshUser(t);const result=await f.enroll("codex","일반개발");
+ assert.equal(result.state.mode,"general");assert.equal(result.state.contract,4);assert.equal(result.state.execute,null);
 });

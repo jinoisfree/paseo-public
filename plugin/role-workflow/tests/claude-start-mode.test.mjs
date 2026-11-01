@@ -138,20 +138,11 @@ for (const provider of ["claude", "codex"])
         await f.configure({ askMode, askExecutorModel: true });
         const result = await f.create({ provider });
         if (askMode) {
-          assert.match(result.config.systemPrompt, /한 번만 질문 도구로 진행 방식을 묻는다/);
-          assert.match(result.config.systemPrompt, /'일반개발', '연합개발'/);
-          assert.doesNotMatch(result.config.systemPrompt, /<paseo-general-v1>/);
-          // A saved executor is offered first instead of silently skipping the model question.
-          assert.doesNotMatch(result.config.systemPrompt, /저장된 설정을 사용하며 다시 묻지 않는다/);
-          assert.match(
-            result.config.systemPrompt,
-            new RegExp(`목록이며 그 외는 직접 입력한다:\\nSaved \\(${executor}/saved\\)`),
-          );
-          if (provider === "codex")
-            assert.match(result.config.systemPrompt, /request_user_input_async/);
-        } else {
-          assert.doesNotMatch(result.config.systemPrompt, /한 번만 질문 도구로 진행 방식을 묻는다/);
-        }
+          assert.match(result.config.systemPrompt,/진행 방식을 단독 질문/);
+          assert.match(result.config.systemPrompt,/일반개발, 연합개발/);
+          assert.doesNotMatch(result.config.systemPrompt,/저장된 설정을 사용하며 다시 묻지 않는다/);
+          assert.match(result.config.systemPrompt,new RegExp(`${executor}/saved`));
+        } else assert.doesNotMatch(result.config.systemPrompt,/첫 응답 전에 질문 도구로 진행 방식/);
         const saved = await f.enroll(result);
         assert.equal(saved.workflows[0].mode, askMode ? "undecided" : mode);
         assert.equal(saved.settings.askMode, askMode);
@@ -199,53 +190,23 @@ test("old settings gain the Claude start default and an empty value stays empty"
   assert.equal(settingsSchema.parse({ claudeStartMode: "  " }).claudeStartMode, "");
 });
 
-for (const provider of ["claude", "codex"]) {
-  for (const askMode of [true, false]) {
-    test(`${provider} startup keeps the mode question apart from model questions (askMode=${askMode})`, async (t) => {
-      const f = await fixture(t);
-      f.context.paseo.providers.listModels = async () => ({
-        models: [
-          { id: "model", label: "Model", thinkingOptions: [{ id: "medium", label: "Medium" }] },
-        ],
-      });
-      await f.configure({ askMode, askExecutorModel: true });
-      const { config } = await f.create({ provider });
-      if (provider === "claude") {
-        assert.match(config.systemPrompt, /질문 도구를 한 번만 호출/);
-        assert.match(config.systemPrompt, /모델·추론 두 질문을 한 번의 호출/);
-        assert.doesNotMatch(config.systemPrompt, /세 질문/);
-        if (askMode) {
-          assert.match(config.systemPrompt, /진행 방식 질문은 모델·추론 질문과 묶지 않는다/);
-          assert.match(config.systemPrompt, /진행 방식이 일반개발이면 모델·추론을 묻지 않는다/);
-        } else {
-          assert.match(config.systemPrompt, /저장된 진행 방식은 연합개발이다/);
-          assert.match(config.systemPrompt, /명시적으로 선택한 방식을 우선/);
-          assert.doesNotMatch(config.systemPrompt, /한 번만 질문 도구로 진행 방식을 묻는다/);
-        }
-      } else {
-        assert.match(
-          config.systemPrompt,
-          /실행 모델 질문은 다른 질문과 한 번의 질문 도구 호출에 묶지 않는다/,
-        );
-        assert.doesNotMatch(config.systemPrompt, /세 질문/);
-      }
-    });
-  }
-}
-test("an unavailable model catalog falls back to the saved executor", async (t) => {
-  const f = await fixture(t, { mode: "federated", codex: { model: "codex/saved", thinking: "high" } });
-  await f.configure({ askMode: true, askExecutorModel: true });
-  const { config } = await f.create();
-  assert.match(config.systemPrompt, /저장된 설정을 사용하며 다시 묻지 않는다: codex\/saved · high/);
+for(const provider of ["claude","codex"])for(const askMode of [true,false])
+test(`${provider} startup uses sequential product/model/thinking questions askMode=${askMode}`,async t=>{
+ const f=await fixture(t);f.context.paseo.providers.listModels=async()=>({models:[{id:"model",label:"Model",thinkingOptions:[{id:"medium",label:"Medium"}]}]});
+ await f.configure({askMode,askExecutorModel:true});const {config}=await f.create({provider});
+ assert.match(config.systemPrompt,/각 단계는 단독 호출/);assert.match(config.systemPrompt,/실제 사용자 답변/);
+ assert.match(config.systemPrompt,/제품→모델→추론/);assert.match(config.systemPrompt,/codex\/model/);assert.match(config.systemPrompt,/claude\/model/);
+ assert.doesNotMatch(config.systemPrompt,/모델·추론 두 질문을 한 번의 호출/);
+ if(askMode)assert.match(config.systemPrompt,/진행 방식을 단독 질문/);else assert.match(config.systemPrompt,/진행 방식은 연합개발이다/);
 });
-test("disabled model questions leave the original Claude mode question intact", async (t) => {
-  const f = await fixture(t);
-  await f.configure({ askMode: true, askExecutorModel: false });
-  const { config } = await f.create();
-  assert.match(config.systemPrompt, /진행 방식 질문은 모델·추론 질문과 묶지 않는다/);
-  assert.match(config.systemPrompt, /실행 모델·추론은 저장된 설정을 사용하며 다시 묻지 않는다/);
-  assert.doesNotMatch(
-    config.systemPrompt,
-    /한 번만 질문 도구로 실행 모델을 묻는다|모델·추론 두 질문/,
-  );
+test("an unavailable model catalog waits without a saved executor fallback",async t=>{
+ const f=await fixture(t,{mode:"federated",codex:{model:"codex/saved",thinking:"high"}});
+ await f.configure({askMode:true,askExecutorModel:true});const {config}=await f.create();
+ assert.match(config.systemPrompt,/카탈로그 실패는 사용자에게 알리고 대기/);
+ assert.doesNotMatch(config.systemPrompt,/저장된 설정을 사용하며 다시 묻지 않는다/);
+});
+test("the legacy model-question switch cannot skip contract4 sequential selection",async t=>{
+ const f=await fixture(t);await f.configure({askMode:true,askExecutorModel:false});const {config}=await f.create();
+ assert.match(config.systemPrompt,/진행 방식을 단독 질문/);assert.match(config.systemPrompt,/각 단계는 단독 호출/);
+ assert.doesNotMatch(config.systemPrompt,/실행 모델·추론은 저장된 설정을 사용/);
 });

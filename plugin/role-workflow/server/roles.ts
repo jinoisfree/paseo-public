@@ -111,3 +111,26 @@ export function composePrompt(
   })!;
   return (parts.automated ? role + "\n" + automationBlock(gated) : role) + (parts.trailing ?? "");
 }
+
+/** Contract 4 keeps the initial configuration; only federation activates role instructions. */
+export function composeCurrentPrompt(
+  provider: string, existing: string | undefined, mode: "general" | "federated" | "undecided",
+  rulesReadme: string | null, selection: string, trailing: string,
+) {
+  const original = stripManagedBlocks((existing ?? "").replace(BLOCK, ""));
+  const choice = mode === "undecided"
+    ? "첫 응답 전에 질문 도구로 진행 방식을 단독 질문한다. 질문/header: 진행 방식을 선택하세요/방식. 선택지는 정확히 일반개발, 연합개발이다. 실제 답변 전에는 조사·모델 질문·구현하지 않는다. 비동기 도구 반환은 답변이 아니다. 첫 사용자 요청에 방식을 명시한 경우만 이미 답한 것으로 인정한다. 도구가 없으면 채팅으로 묻고 기다린다."
+    : `진행 방식은 ${mode === "general" ? "일반개발" : "연합개발"}이다. 진행 방식을 다시 묻지 않는다.`;
+  const modeBlock = `<paseo-work-mode-v4>
+${choice}
+일반개발: 최초 대화와 처음 설정한 모델·추론을 유지하여 직접 조사·구현·자체 검증한다. 추가 구현 담당·모델·추론 선택, 별도 실행 대화, 자동 역할 왕복을 하지 않는다. 아래 연합개발 전용 역할·자동화·구현 선택 지침은 적용하지 않는다. plan/result 왕복이나 impl-report/verdict 및 상태 블록을 강제하지 않는다. 검증은 자체 점검으로 표시한다.
+연합개발: 최초 대화는 기획·설계·검증 담당이며 별도 실행 담당을 제품→모델→추론 순서로 고른다. 최초 담당의 모델·추론을 바꾸지 않는다. 같은 제품·같은 모델도 선택 가능하다. 연합개발에서만 아래 역할·자동화·구현 선택 지침을 적용한다.
+이미 정한 진행 방식은 이 작업 도중 바꾸지 않는다. 다른 방식이 필요하면 새 작업으로 시작하도록 안내한다. 현재 담당을 재배정하지 않는다. 압축 뒤에도 방식과 최초 설정을 보존한다. 완료와 승인된 푸시는 구분하며 사용자 푸시 승인을 유지한다.
+</paseo-work-mode-v4>`;
+  if (mode === "general")
+    return [original, agentRulesBlock(rulesReadme), modeBlock, trailing].filter(Boolean).join("\n\n");
+  return composePrompt(provider, original, {
+    role: "plan", automated: true, mode: modeBlock, rulesReadme,
+    trailing: selection + trailing,
+  })!;
+}

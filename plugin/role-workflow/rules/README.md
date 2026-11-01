@@ -10,7 +10,7 @@ role-workflow가 제공하는 AI 에이전트(Claude Code, Codex 등) 공통 규
 | 기획설계 역할(plan 대화) | `10-planning.md`, `30-verification.md`, `40-paseo-role-workflow.md` |
 | 구현 역할(execute 대화)  | `20-implementation.md`, `40-paseo-role-workflow.md`                 |
 | 검증 역할                         | `30-verification.md`, `20-implementation.md`                        |
-| 일반개발(계약 3부터 역할 분리)   | `00-common.md` 3.4절, 위 표의 plan / execute 역할별 문서                  |
+| 일반개발(계약4 단일 대화, 계약3 역할 분리)   | `00-common.md` 3.4절, 계약4는 작업 단계에 맞는 문서, 계약3은 위 표의 plan / execute 문서                  |
 
 역할이 지정되지 않았으면 `00-common.md` 3절로 운영 모드와 역할을 정하고 시작한다.
 

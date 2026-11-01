@@ -1,4 +1,6 @@
+import { selectionStageLabel } from "../shared/executor-selection";
 import { generalAgentLabel } from "../shared/general-agent";
+import { capabilities } from "../shared/capabilities";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { ScrollView, TextInput } from "@getpaseo/plugin/client/react-native";
@@ -293,6 +295,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
     if (!draft || !settingsOpen) return null;
     return (
       <View style={s.card}>
+        <Text style={s.muted}>새 일반개발은 최초 설정으로 직접 작업합니다. 새 연합개발은 제품→모델→추론을 순서대로 선택합니다. 실행 모델 질문 스위치는 기존 작업에만 적용됩니다. 자동 왕복 한도는 연합개발과 기존 역할 분리 작업에 적용됩니다.</Text>
         {button(
           `새 대화 자동 연결: ${draft.autoStart ? "켜짐" : "꺼짐"}`,
           () => setDraft({ ...draft, autoStart: !draft.autoStart }),
@@ -308,7 +311,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
             ["koreanTitle", "한글 제목"],
             ["titleMarker", "제목 상태 색 표식"],
             ["askMode", "모드 질문"],
-            ["askExecutorModel", "실행 모델 질문"],
+            ["askExecutorModel", "이전 작업의 실행 모델 질문"],
             ["rememberProjectChoices", "프로젝트별 선택 재사용"],
             ["autoArchivePushed", "🔵 푸시 작업 자동 보관"],
             ["autoPinStarted", "📌 새 작업 시작 시 상단 고정"],
@@ -655,6 +658,13 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
           </Text>
           <Text style={s.muted}>{w.cwd}</Text>
           <Text style={s.text}>{w.detail}</Text>
+          {capabilities(w).standalone && <Text style={s.muted}>최초 대화에서 직접 구현 · 자체 점검</Text>}
+          {w.selection && capabilities(w).sequentialSelection && (
+            <Text style={s.muted}>구현 선택: {selectionStageLabel[w.selection.stage ?? "provider"]} {w.selection.error}</Text>
+          )}
+          {w.planConflict && w.planConflict.stage !== "resolved" && (
+            <Text style={s.text}>적용 보류 계획: {w.planConflict.next}{"\n"}{w.planConflict.reason}{w.planConflict.rejected ? `\n${w.planConflict.rejected.reason}` : ""}</Text>
+          )}
           {w.plannerAgent && <Text style={s.muted}>기획·설계·검증 · {generalAgentLabel(w.plannerAgent)}</Text>}
           {w.mode === "general" && w.generalAgent && (
             <Text style={s.muted}>{w.automatic ? "구현 · " : ""}{generalAgentLabel(w.generalAgent)}</Text>
@@ -701,7 +711,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
             </>
           )}
           {recoveryControls(w)}
-          {w.mode === "federated" && !w.generalTransition && generalButton(w.id)}
+          {w.mode === "federated" && !capabilities(w).current && !w.generalTransition && generalButton(w.id)}
         </View>
       ))}
       {button(

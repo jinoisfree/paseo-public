@@ -1,3 +1,5 @@
+import { executorSelectionSchema } from "./executor-selection";
+import { planConflictSchema } from "./plan-disposition";
 import { generalAgentSchema } from "./general-agent";
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
@@ -100,6 +102,10 @@ export const archiveFinished = defineRpc({
   }),
 });
 export const workflowViewSchema = z.object({
+  contract: z.number().int().default(1),
+  selection: executorSelectionSchema.nullable().default(null),
+  planConflict: planConflictSchema.nullable().default(null),
+  planIssue: z.object({ key: z.string(), reason: z.string() }).nullable().default(null),
   id: z.string(),
   number: z.number(),
   title: z.string(),
