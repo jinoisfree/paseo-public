@@ -1401,6 +1401,17 @@ export class WorkflowEngine {
         resumed: false,
         answers: true,
       };
+      // An informational turn with no outstanding work must not consume the initial
+      // selection or trigger recovery/continuation. Live deliveries keep their existing
+      // receipt and side-turn rules, including rejection of note as an instruction answer.
+      const note = failed === null ? this.sideDecision(w, w.plan?.id === agentId ? "plan" : "execute", text) : null;
+      if (capabilities(w).current && !capabilities(w).standalone && !w.pending && !w.inbox && note?.status === "note") {
+        this.seen(w, key);
+        this.remember(w, note.remember);
+        await this.renameFromResponse(w, agentId, text, false, request, evidence?.report ?? text, key);
+        await this.save();
+        return;
+      }
       if (capabilities(w).current && w.mode === "undecided") {
         const requested = requestedMode(userText(request || goal));
         if (requested) w.mode = requested;
@@ -1647,6 +1658,10 @@ export class WorkflowEngine {
       await this.save();
     }
     if (capabilities(w).standalone) {
+      if (failed === null) await this.renameFromResponse(w, agentId, text, false, request, report, key);
+      return false;
+    }
+    if (capabilities(w).current && w.mode === "undecided") {
       if (failed === null) await this.renameFromResponse(w, agentId, text, false, request, report, key);
       return false;
     }
@@ -3946,7 +3961,7 @@ export class WorkflowEngine {
         ? `왕복: ${w.cycles}/${settings.maxCycles} · 응답: ${w.turns}/${settings.maxTurns}\n`
         : "") +
       (full
-        ? "규칙 00-common 8절에 따라 규칙 문서와 작업 문서를 실제로 다시 읽고, 마지막 상태 블록과 작업 문서 상태를 대조한 뒤 이어가세요. 이미 실행한 변경·푸시는 반복하지 마세요.\n"
+        ? "규칙 00-common 8절에 따라 핵심 제약·현재 인계·실제 변경본을 확인하고, 마지막 상태 블록과 작업 문서 상태를 대조한 뒤 이어가세요. 관련 규칙·계약 변경이나 누락·충돌 때 해당 상세를 다시 읽고 무변경 상세 전체 재독은 강제하지 않습니다. 이미 실행한 변경·푸시는 반복하지 마세요.\n"
         : "") +
       (full
         ? `원래 목표:\n${w.goal}\n현재 작업 폴더: ${w.cwd}\n직전 인계:\n${member.handoff}\n`

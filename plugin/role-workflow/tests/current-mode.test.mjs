@@ -259,3 +259,36 @@ for(const provider of ["claude","codex"])test(`new standalone ${provider} uses m
  assert.equal(compactions,provider==="claude"?1:0);assert.equal(f.created.length,0);assert.equal(f.sent.length,0);assert.equal((await f.state()).execute,null);
  const view=(await f.engine.list()).workflows[0];assert.match(view.planCompressionReason,provider==="claude"?/Claude 1M/:/자체 압축/);
 });
+
+// AC-1: informational replies do not consume selection or start automatic work.
+for (const mode of ['undecided', 'federated']) test(`question note in ${mode} stays idle through tick and restart`, async t => {
+ const f=await fixture(t,{mode});const before=await f.state();
+ for (const [i,question] of ['지침이 너무 무거운가?', '이 함수는 뭐 해?'].entries()) {
+  await f.engine.ended('A',`question-${i}`,block('note',{next:'',handoff:question}),null,question,false,question);
+  await f.engine.tick();await f.restart();await f.engine.tick();
+  const after=await f.state();
+  for (const field of ['mode','phase','plan','execute','selection','pending','inbox']) assert.deepEqual(after[field],before[field],field);
+  assert.equal(f.created.length,0);assert.equal(f.sent.length,0);
+ }
+ // AC-2: a later change request still needs the original selection gates.
+ await f.engine.ended('A','change',block('plan'),null,'설명한 부분을 고쳐줘',false,'설명한 부분을 고쳐줘');
+ assert.equal(f.created.length,0);
+ if (mode==='undecided') {
+  assert.equal((await f.state()).mode,'undecided');
+  const detail='진행 방식을 선택하세요\n연합개발';
+  await f.engine.generalTimeline('A',[{type:'tool_call',name:'request_user_input_async',callId:'mode-after-question',status:'completed',error:null,detail:{type:'plain_text',text:detail}},{type:'user_message',text:'Answers to your questions:\n\n'+detail}]);
+ }
+ await f.bundle({provider:'Codex',model:'codex/builder',thinking:'high'});await f.finish('A','plan');
+ assert.equal(f.created.length,1);assert.deepEqual((await f.state()).plan.config,f.original);
+});
+
+// AC-3: a question beside a live delivery cannot replace the instruction or its unread result.
+for (const unread of [false,true]) test(`side question preserves live federation (unread=${unread})`,async t=>{
+ const f=await fixture(t);await f.bundle({provider:'Codex',model:'builder',thinking:'high'});await f.finish('A','plan');
+ if (unread) {await f.engine.control(f.id,'pause');await f.finish((await f.state()).execute.id,'result');}
+ const before=await f.state(), sends=f.sent.length;
+ await f.engine.ended('A','side-question',block('note'),null,'',false,'이 함수는 뭐 해?',false,[]);
+ const after=await f.state();
+ for(const field of ['pending','inbox','phase','plan','execute','selection','lastInstruction','lastPlan','lastResult','verdict','status']) assert.deepEqual(after[field],before[field],field);
+ await f.restart();await f.engine.tick();assert.equal(f.sent.length,sends);
+});

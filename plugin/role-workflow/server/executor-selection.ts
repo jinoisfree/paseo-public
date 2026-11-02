@@ -178,7 +178,8 @@ export function executorSelectionPrompt(catalogs: Record<string, readonly Execut
     .filter(x => x.isSelectable !== false)
     .map(x => `${provider}/${x.id}: 추론 ${(x.thinkingOptions ?? []).map(o => o.id).join(", ") || "추론 없음"}; 기본값 ${x.defaultThinkingOptionId ?? x.thinkingOptions?.find(o => o.isDefault)?.id ?? "확인 불가"}`).join("\n")).join("\n");
   return `\n<paseo-executor-selection-v4>
-연합개발에서만 적용한다. 진행 방식은 단독 질문으로 실제 사용자 답변을 받은 뒤, 조사·설계 전에 제품·모델·추론 3질문을 한 번의 질문 도구 호출에 함께 제시한다. 일반개발에서는 질문하지 않는다.
+연합개발의 실제 변경 요청에만 적용한다. 질문·설명·읽기 전용 조사는 선택 없이 먼저 답하고 note로 흐름을 유지한다. 실제 변경의 조사·설계 착수 시 진행 방식은 단독 질문으로 실제 사용자 답변을 받은 뒤, 제품·모델·추론 3질문을 한 번의 질문 도구 호출에 함께 제시한다. 일반개발에서는 질문하지 않는다. 이미 유효한 선택은 재질문하지 않는다.
+question 또는 title은 아래 정해진 질문 제목과 정확히 같아야 한다. 설명·모델 목록·추론 범위·예시·접미사는 제목 밖의 안내나 선택지 설명에 둔다.
 세 항목은 같은 턴의 questions 배열에 넣는다. 앞 질문의 답변을 기다리며 호출을 나누지 않는다. 비동기 호출 반환은 답변이 아니다.
 1. 질문/header: ${EXECUTOR_QUESTIONS.provider.question}/${EXECUTOR_QUESTIONS.provider.header}. 선택지 Codex, Claude Code. 최초와 같은 제품도 허용한다.
 2. 질문/header: ${EXECUTOR_QUESTIONS.model.question}/${EXECUTOR_QUESTIONS.model.header}. 양쪽 제품의 provider/모델ID를 구별하여 제시한다. 선택지 수 제한이 있으면 직접 입력을 안내한다. 접미사를 붙이지 않는다.

@@ -75,10 +75,11 @@ export function materializeRules(dataDir: string): Promise<string | null> {
 export function agentRulesBlock(readme?: string | null): string {
   if (!readme) return "";
   return `<paseo-agent-rules-v1>
-규칙 원본: ${JSON.stringify(readme)}. 작업 시작·압축 복구·모델 교대 때 README의 표에 따라 맡은 역할 문서를 직접 읽는다.
-plan: 00-common.md, 10-planning.md, 30-verification.md, 40-paseo-role-workflow.md.
-execute: 00-common.md, 20-implementation.md, 40-paseo-role-workflow.md.
-일반개발: 00-common.md 3.4절을 읽고 현재 대화의 plan·execute 역할에 해당하는 문서를 읽는다.
+규칙 원본: ${JSON.stringify(readme)}. 질문·설명·읽기 전용 조사는 답변에 필요한 규칙·자료만 읽는다.
+실제 변경 시작: README.md와 00-common.md 핵심(1·3·4·5·8절), 프로젝트 지침, 현재 단계 상세를 읽는다. 나머지 공통 상세는 관련 판단 때 참조한다.
+기획·설계: 10-planning.md. 구현: 20-implementation.md. 최종 검토: 30-verification.md와 관련 구현 기준. 역할 분리 인계·상태 처리: 40-paseo-role-workflow.md 관련 절.
+일반개발: 00-common.md 3.4절과 현재 단계만 읽고 세 역할 문서 전체를 일괄 읽지 않는다.
+압축 복구·모델 교대: 핵심 제약, 현재 인계·마지막 상태, 실제 변경본을 확인한다. 무변경 상세 문서 전체 재독은 강제하지 않으며 관련 규칙·계약 변경, 누락·충돌 때 해당 상세를 다시 읽는다.
 프로젝트 작업 폴더의 AGENTS.md·CLAUDE.md가 있으면 그것도 따르며, 충돌 시 00-common 1절 우선순위를 따른다.
 </paseo-agent-rules-v1>`;
 }

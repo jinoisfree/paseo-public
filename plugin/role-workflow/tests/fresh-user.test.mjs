@@ -202,7 +202,7 @@ function block(prompt, tag) {
 async function assertRules(prompt, home) {
   const guide = block(prompt, "agent-rules");
   assert.doesNotMatch(guide, /연합개발 전용/);
-  const readme = JSON.parse(/규칙 원본: ("[^\n]+")\. 작업 시작/.exec(guide)[1]);
+  const readme = JSON.parse(/규칙 원본: ("[^\n]+")\./.exec(guide)[1]);
   const directory = path.join(home, "role-workflow", "rules", RULES_VERSION);
   assert.equal(readme, path.join(directory, "README.md"));
   assert.equal(Object.keys(RULES).length, 7);

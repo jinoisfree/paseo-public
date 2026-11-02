@@ -116,3 +116,34 @@ test("general prompts receive and replace the same ungated rules block", async (
     /連合|\[연합개발 전용\]|<paseo-role-workflow-v1>|<paseo-automation-v1>/,
   );
 });
+
+// AC-4/5: composed instructions use the same stage policy as the materialized rules.
+test('lightweight reading and record policy remains consistent in injected prompts', async t => {
+ const readme=await materializeRules(await directory(t));
+ const {composeCurrentPrompt}=await import('../server/roles.ts');
+ const {executorSelectionPrompt}=await import('../server/executor-selection.ts');
+ const prompt=composeCurrentPrompt('codex','','undecided',readme,executorSelectionPrompt({}), '');
+ assert.match(prompt,/질문·설명·읽기 전용 조사는.*선택.*답/);
+ assert.match(prompt,/현재 단계 상세/);assert.match(prompt,/무변경 상세 문서 전체 재독은 강제하지/);
+ assert.doesNotMatch(prompt,/첫 응답 전에 질문 도구로 진행 방식|plan: 00-common.md, 10-planning.md, 30-verification.md/);
+ assert.match(RULES['README.md'],/기획·설계.*10-planning.md/);
+ assert.match(RULES['README.md'],/최종 검토.*30-verification.md/);
+ assert.match(RULES['00-common.md'],/별도 spec\/design\/tasks\/ADR 파일을 강제하지/);
+ assert.match(RULES['10-planning.md'],/일반 변경의 사전 별도 검토는 일률 의무가 아니다/);
+ assert.match(RULES['30-verification.md'],/고위험 변경.*다른 모델이 검증하기 전까지 완료로 판정하지/);
+ assert.match(RULES['40-paseo-role-workflow.md'],/푸시는 사용자가 명시적으로 승인한 뒤에만/);
+});
+
+test('selection prompts preserve exact question titles and put descriptions outside them', async () => {
+ const {EXECUTOR_QUESTIONS}=await import('../shared/executor-selection.ts');
+ const {executorSelectionPrompt,selectionQuestions}=await import('../server/executor-selection.ts');
+ const prompt=executorSelectionPrompt({});
+ assert.match(prompt,/question 또는 title은 아래 정해진 질문 제목과 정확히 같아야/);
+ assert.match(prompt,/예시·접미사는 제목 밖/);
+ for (const q of Object.values(EXECUTOR_QUESTIONS)) {
+  assert.ok(prompt.includes(`질문/header: ${q.question}/${q.header}`));
+  assert.ok(RULES['40-paseo-role-workflow.md'].includes('`'+q.question+'`'));
+  assert.equal(selectionQuestions({questions:[{title:q.question}]}).length,1);
+  assert.deepEqual(selectionQuestions({questions:[{title:q.question+' (설명)'}]}),[]);
+ }
+});
