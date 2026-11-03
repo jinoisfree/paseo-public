@@ -191,28 +191,30 @@ class AutoUpdateTests(unittest.TestCase):
         for field in ('sending','plan','execute'):
             with self.subTest(field=field):
                 w={'pending':{'stage':'sending'}} if field=='sending' else {field:{'compaction':'busy'}}
+                w.update(status='active',number=17)
+                (auto.auto_update_data(self.config)/'state.json').unlink(missing_ok=True)
                 self.workflow.write_text(json.dumps({'workflows':[w]}));self.workflow_before=self.workflow.read_bytes()
-                with mock.patch.object(auto.time,'sleep') as sleep:
+                with mock.patch.object(auto,'sleep') as sleep:
                     result,state=self.execute()
                 self.assertEqual((result,state['reason']),(0,'busy'))
                 self.assertEqual(sleep.call_args_list,[mock.call(600)]*3)
                 self.assertEqual(self.calls(),[]);self.assertEqual(self.notifications,[])
 
     def test_AC10_work_that_finishes_during_wait_is_updated(self):
-        self.workflow.write_text(json.dumps({'workflows':[{'pending':{'stage':'sending'}}]}))
+        self.workflow.write_text(json.dumps({'workflows':[{'status':'active','number':17,'pending':{'stage':'sending'}}]}))
         def finish(_):
             self.workflow.write_bytes(self.workflow_before)  # Simulated daemon, not the updater.
-        with mock.patch.object(auto.time,'sleep',side_effect=finish) as sleep:
+        with mock.patch.object(auto,'sleep',side_effect=finish) as sleep:
             result,state=self.execute()
         self.assertEqual((result,state['result']),(0,'updated'))
         sleep.assert_called_once_with(600)
 
     def test_AC10_checkout_change_during_wait_is_not_overwritten(self):
-        self.workflow.write_text(json.dumps({'workflows':[{'plan':{'compaction':'busy'}}]}))
+        self.workflow.write_text(json.dumps({'workflows':[{'status':'active','number':17,'plan':{'compaction':'busy'}}]}))
         def changed(_):
             self.workflow.write_bytes(self.workflow_before)
             (self.root/'version.txt').write_text('user edit')
-        with mock.patch.object(auto.time,'sleep',side_effect=changed):
+        with mock.patch.object(auto,'sleep',side_effect=changed):
             result,state=self.execute()
         self.assertEqual((result,state['reason']),(0,'dirty'))
         self.assertEqual((self.root/'version.txt').read_text(),'user edit')
@@ -224,6 +226,72 @@ class AutoUpdateTests(unittest.TestCase):
         self.assertEqual((result,state['result']),(1,'failed'))
         self.assertEqual(self.git(self.root,'rev-parse','HEAD'),self.previous)
         self.assertEqual(self.calls(),[]);self.assertEqual(len(self.notifications),1)
+
+    def test_V3_1_inactive_markers_do_not_block_update(self):
+        for status in ('paused','error','needs_input','completed'):
+            for marker in ('sending','plan','execute'):
+                with self.subTest(status=status,marker=marker):
+                    self.git(self.root,'reset','--keep',self.previous)
+                    self.events.unlink(missing_ok=True);self.notifications.clear()
+                    w={'status':status,'number':17}
+                    if marker=='sending': w['pending']={'stage':'sending'}
+                    else: w[marker]={'compaction':'orphaned'}
+                    self.workflow.write_text(json.dumps({'workflows':[w,{'status':'active','number':42}]}))
+                    self.workflow_before=self.workflow.read_bytes()
+                    with mock.patch.object(auto,'sleep') as sleep:
+                        result,state=self.execute()
+                    self.assertEqual((result,state['result']),(0,'updated'))
+                    self.assertEqual(self.git(self.root,'rev-parse','HEAD'),self.target)
+                    self.assertEqual([row['command'] for row in self.calls()],['setup','reload','ls'])
+                    sleep.assert_not_called()
+                    self.assert_workflow_preserved()
+
+    def test_V3_1_third_busy_skip_notifies_once_with_all_workflow_numbers(self):
+        self.workflow.write_text(json.dumps({'workflows':[
+            {'status':'active','number':17,'pending':{'stage':'sending'}},
+            {'status':'active','number':42,'plan':{'compaction':'busy'}},
+            {'status':'active','number':55,'execute':{'compaction':'busy'}},
+            {'status':'paused','number':99,'pending':{'stage':'sending'}},
+        ]}));self.workflow_before=self.workflow.read_bytes()
+        with mock.patch.object(auto,'sleep'):
+            for count in range(1,5):
+                result,state=self.execute()  # A fresh process object must reload the saved streak.
+                self.assertEqual((result,state['reason']),(0,'busy'))
+                self.assertEqual(state.get('busyStreak'),count)
+                self.assertEqual(state.get('busyWorkflows'),[17,42,55])
+                self.assertEqual(len(self.notifications),1 if count>=3 else 0)
+        for number in (17,42,55): self.assertIn(f'#{number}',self.notifications[0])
+        self.assertNotIn('#99',self.notifications[0])
+        self.assertEqual(self.calls(),[])
+
+    def test_V3_1_non_busy_skip_resets_the_streak_and_allows_a_fresh_warning(self):
+        self.workflow.write_text(json.dumps({'workflows':[{'status':'active','number':17,'pending':{'stage':'sending'}}]}))
+        self.workflow_before=self.workflow.read_bytes()
+        with mock.patch.object(auto,'sleep'):
+            for _ in range(2): self.execute()
+            self.git(self.root,'remote','set-url','origin',self.base/'offline.git')
+            result,state=self.execute()
+            self.assertEqual((result,state['reason']),(0,'fetch-failed'))
+            self.assertEqual(state.get('busyStreak'),0)
+            self.assertEqual(self.notifications,[])
+            self.git(self.root,'remote','set-url','origin',self.origin)
+            for count in range(1,4):
+                _,state=self.execute()
+                self.assertEqual(state.get('busyStreak'),count)
+                self.assertEqual(len(self.notifications),1 if count==3 else 0)
+
+    def test_V3_1_success_and_failure_reset_the_streak(self):
+        for outcome in ('updated','failed'):
+            with self.subTest(outcome=outcome):
+                self.git(self.root,'reset','--keep',self.previous)
+                folder=auto.auto_update_data(self.config);folder.mkdir(parents=True,exist_ok=True)
+                (folder/'state.json').write_text(json.dumps({'result':'skipped','reason':'busy','busyStreak':2}))
+                self.workflow.write_text('{broken' if outcome=='failed' else json.dumps({'workflows':[]}))
+                self.workflow_before=self.workflow.read_bytes()
+                result,state=self.execute()
+                self.assertEqual(state['result'],outcome)
+                self.assertEqual(state.get('busyStreak'),0)
+                self.assertEqual(result,1 if outcome=='failed' else 0)
 
     def test_AC12_install_reload_or_verification_failure_rolls_back(self):
         for failure in ('install-once','reload-once','bad-status-once','disabled-once','error-once','foreign-once','invalid-shape-once'):

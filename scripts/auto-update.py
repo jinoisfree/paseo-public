@@ -11,7 +11,7 @@ import re
 import subprocess
 import sys
 import tempfile
-import time
+from time import sleep
 
 # A read-only --check must not create repository __pycache__ files either.
 sys.dont_write_bytecode = True
@@ -21,6 +21,7 @@ from setup import cli_path, read_paseo, same_plugin
 
 BUSY_INTERVAL = 600
 BUSY_RECHECKS = 3
+BUSY_NOTIFY_STREAK = 3
 
 
 def stamp():
@@ -51,7 +52,7 @@ class Updater:
         self.state_file = self.state_dir/'state.json'
         self.log = None
         self.sequence = 0
-        self.state = {'startedAt': stamp(), 'previousCommit': None, 'targetCommit': None, 'afterCommit': None}
+        self.state = {'startedAt': stamp(), 'previousCommit': None, 'targetCommit': None, 'afterCommit': None, 'busyStreak': 0}
 
     def command(self, command, *, check=True, timeout=120):
         command = list(map(str, command))
@@ -96,14 +97,21 @@ class Updater:
                 output.write(json.dumps(value, ensure_ascii=False)+'\n')
 
     def finish(self, result, reason, *, notify=False, **values):
+        busy = result == 'skipped' and reason == 'busy'
+        self.state['busyStreak'] = self.state['busyStreak'] + 1 if busy else 0
         self.state.update(result=result, reason=reason, finishedAt=stamp(), logDirectory=str(self.log), **values)
         temporary = self.state_file.with_suffix('.tmp')
         temporary.write_text(json.dumps(self.state, ensure_ascii=False, indent=2)+'\n')
         temporary.replace(self.state_file)
         self.event(**self.state)
         print(json.dumps(self.state, ensure_ascii=False))
+        message = reason
+        if busy and self.state['busyStreak'] == BUSY_NOTIFY_STREAK:
+            notify = True
+            workflows = ', '.join(f'#{number}' for number in self.state['busyWorkflows'])
+            message = f'자동 업데이트를 바쁨으로 {BUSY_NOTIFY_STREAK}회 연속 건너뛰었습니다. 작업: {workflows}'
         if notify:
-            self.notify(reason+f'\n로그: {self.log}')
+            self.notify(message+f'\n로그: {self.log}')
         return 1 if result == 'failed' else 0
 
     def daemon_running(self):
@@ -138,21 +146,23 @@ class Updater:
     def busy(self):
         file = self.home/'.paseo/role-workflow/state.json'
         if not file.exists():
-            return False
+            return []
         data = json.loads(file.read_text())
         workflows = data['workflows']
         if not isinstance(workflows, list):
             raise ValueError('Invalid workflow state; update refused')
+        blocked = []
         for w in workflows:
             if not isinstance(w, dict):
                 raise ValueError('Invalid workflow; update refused')
+            if w.get('status') != 'active':
+                continue
             if any(w.get(key) is not None and not isinstance(w[key], dict) for key in ('pending', 'plan', 'execute')):
                 raise ValueError('Invalid workflow member; update refused')
-            if (w.get('pending') or {}).get('stage') == 'sending':
-                return True
-            if any((w.get(role) or {}).get('compaction') for role in ('plan', 'execute')):
-                return True
-        return False
+            if ((w.get('pending') or {}).get('stage') == 'sending' or
+                    any((w.get(role) or {}).get('compaction') for role in ('plan', 'execute'))):
+                blocked.append(w.get('number', w.get('id', '번호 미확인')))
+        return blocked
 
     def install_reload(self):
         self.command([sys.executable, self.root/'scripts/setup.py', 'install'], timeout=3600)
@@ -196,6 +206,14 @@ class Updater:
                 print(json.dumps({'result': 'skipped', 'reason': 'locked', 'logDirectory': str(self.log)}))
                 return 0
             try:
+                if self.state_file.exists():
+                    saved = json.loads(self.state_file.read_text())
+                    if not isinstance(saved, dict):
+                        raise ValueError('Invalid updater state; update refused')
+                    streak = saved.get('busyStreak', 0)
+                    if type(streak) is not int or streak < 0:
+                        raise ValueError('Invalid busy streak; update refused')
+                    self.state['busyStreak'] = streak
                 return self.update()
             except (OSError, ValueError, KeyError, TypeError, RuntimeError) as error:
                 return self.finish('failed', str(error), notify=True)
@@ -222,12 +240,13 @@ class Updater:
         if ancestor.returncode:
             raise RuntimeError('Could not determine origin/main ancestry')
         for attempt in range(BUSY_RECHECKS + 1):
-            if not self.busy():
+            workflows = self.busy()
+            if not workflows:
                 break
-            self.event(busyCheck=attempt, retryAfterSeconds=BUSY_INTERVAL if attempt < BUSY_RECHECKS else None)
+            self.event(busyCheck=attempt, busyWorkflows=workflows, retryAfterSeconds=BUSY_INTERVAL if attempt < BUSY_RECHECKS else None)
             if attempt == BUSY_RECHECKS:
-                return self.finish('skipped', 'busy')
-            time.sleep(BUSY_INTERVAL)
+                return self.finish('skipped', 'busy', busyWorkflows=workflows)
+            sleep(BUSY_INTERVAL)
         reason = self.safety()
         if reason:
             return self.finish('skipped', reason, notify=reason == 'foreign-plugin')
