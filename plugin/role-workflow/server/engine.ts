@@ -1440,7 +1440,7 @@ export class WorkflowEngine {
       );
       if (!w) return;
       if (w.processed.includes(key) || w.inbox?.key === key || w.planIssue?.response.key === key) return;
-      if (failed === null || canceled) w.transientPause = null;
+      if (canceled) w.transientPause = null;
       this.invalidatePushAudit(w);
       await this.recordTurnEvidence(w, text, failed, evidence, agentId, key);
       await this.refreshConflicts();
@@ -3696,25 +3696,25 @@ export class WorkflowEngine {
       this.touch(w, detail);
     }
   }
-  private async transientBlocked(w: Workflow) {
+  private async transientBlock(w: Workflow): Promise<"permanent" | "temporary" | null> {
     const settings = await this.settings();
-    return !!(
+    if (
       !automates(w) ||
       w.generalTransition ||
       w.asker ||
       w.held ||
       w.quotaPause ||
-      w.pending?.stage === "sending" ||
-      w.plan?.compaction ||
-      w.execute?.compaction ||
       w.cycles >= settings.maxCycles ||
       w.turns >= settings.maxTurns
-    );
+    ) return "permanent";
+    if (w.pending?.stage === "sending" || w.plan?.compaction || w.execute?.compaction)
+      return "temporary";
+    return null;
   }
   private async recordTransient(w: Workflow, role: Role, failure: string, kind: "turn" | "error") {
     const previous = w.transientPause;
     w.transientPause = null;
-    if (w.status !== "active" || (await this.transientBlocked(w))) return;
+    if (w.status !== "active" || (await this.transientBlock(w))) return;
     if (!transientFailure(failure)) {
       if (kind === "error") w.transientPause = previous;
       return;
@@ -3753,34 +3753,40 @@ export class WorkflowEngine {
     }
     if (w.detail !== detail) this.touch(w, detail);
   }
+  private stopTransient(w: Workflow, detail = `응답 중단: ${w.transientPause!.failure}. 대화와 사용자 응답 대기를 확인하고 재개하세요.`) {
+    w.transientPause = null;
+    this.touch(w, detail);
+  }
   private async retryTransient(w: Workflow) {
     const record = w.transientPause;
-    if (!record || !automates(w) || !["paused", "error"].includes(w.status)) return;
+    if (!record || !["paused", "error"].includes(w.status)) return;
     const settings = await this.settings();
-    if (!settings.autoResumeTransient) return;
-    if (await this.transientBlocked(w)) {
-      w.transientPause = null;
+    const block = await this.transientBlock(w);
+    if (block === "permanent") {
+      this.stopTransient(w);
       return;
     }
+    if (!settings.autoResumeTransient) return;
     if (this.now() < record.nextCheckAt) return;
+    if (block === "temporary") {
+      record.nextCheckAt = this.now() + transientDelay(0);
+      this.describeTransient(w);
+      return;
+    }
     const status = w.status;
     const detail = w.detail;
     record.attempts++;
     record.nextCheckAt = this.now() + transientDelay(record.attempts);
     try {
       if (!(await this.transientConversationsReady(w))) {
-        w.transientPause = null;
-        this.touch(
-          w,
-          `응답 중단: ${record.failure}. 대화와 사용자 응답 대기를 확인하고 재개하세요.`,
-        );
+        this.stopTransient(w);
         return;
       }
       const resumed = await this.resume(w, "", true);
       if (resumed === "active") return;
       // A newly discovered question or an uncertain delivery keeps its own stop intact.
-      if (resumed === "needs_input" || (await this.transientBlocked(w))) {
-        w.transientPause = null;
+      if (resumed === "needs_input" || (await this.transientBlock(w))) {
+        this.stopTransient(w, w.detail);
         return;
       }
       if (!w.transientPause && record.attempts >= 5) {

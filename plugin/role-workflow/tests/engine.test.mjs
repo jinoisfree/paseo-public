@@ -3717,6 +3717,91 @@ for (const [failure, canceled] of [
   });
 }
 const capacityError = "Selected model is at capacity. Please try a different model.";
+for (const text of [note(), "계획 담당의 관련 없는 정상 답변"]) {
+  test(`AC-01 unrelated planner turn preserves a transient retry: ${text}`, async (t) => {
+    const f = await quotaFixture(t);
+    await f.fail("capacity", capacityError);
+    const before = await stored(f);
+    await userTurn(f, "planner", "unrelated", text);
+    const after = await stored(f);
+    assert.equal(after.status, "paused");
+    assert.deepEqual(after.transientPause, before.transientPause);
+    assert.deepEqual(after.pending, before.pending);
+    f.advance(60_000);
+    await f.engine.tick();
+    assert.equal((await stored(f)).status, "active");
+    assert.equal(f.sent.length, 2);
+    assert.equal(f.sent.at(-1).messageId, before.pending.id);
+    await f.engine.tick();
+    assert.equal(f.sent.length, 2);
+  });
+}
+
+for (const blocked of ["plan-compaction", "execute-compaction", "sending"]) {
+  test(`AC-02 transient retry waits without spending attempts during ${blocked}`, async (t) => {
+    const f = await quotaFixture(t);
+    await f.fail("capacity", capacityError);
+    const before = await stored(f);
+    const w = f.engine.database.workflows[0];
+    if (blocked === "sending") w.pending.stage = "sending";
+    else w[blocked === "plan-compaction" ? "plan" : "execute"].compaction = "compacting";
+    f.advance(60_000);
+    for (let check = 0; check < 2; check++) {
+      await f.engine.tick();
+      const waiting = await stored(f);
+      assert.equal(waiting.status, "paused");
+      assert.equal(waiting.transientPause.attempts, 0);
+      assert.equal(waiting.transientPause.firstAt, before.transientPause.firstAt);
+      assert.equal(waiting.pending.id, before.pending.id);
+      assert.ok(waiting.transientPause.nextCheckAt > f.now());
+      assert.match(waiting.detail, /자동 재개 1\/5 · 다음 시도/);
+      assert.equal(f.sent.length, 1);
+      f.advance(60_000);
+    }
+    if (blocked === "sending") w.pending.stage = "queued";
+    else w[blocked === "plan-compaction" ? "plan" : "execute"].compaction = null;
+    await f.engine.tick();
+    const resumed = await stored(f);
+    assert.equal(resumed.status, "active");
+    assert.equal(resumed.transientPause.attempts, 1);
+    assert.equal(f.sent.length, 2);
+    assert.equal(f.sent.at(-1).messageId, before.pending.id);
+    await f.engine.tick();
+    assert.equal(f.sent.length, 2);
+  });
+}
+
+for (const blocked of ["asker", "held", "quota", "not-automatic", "cycle-limit", "turn-limit", "asker-and-compaction"]) {
+  test(`AC-03 permanent ${blocked} block replaces the transient schedule with manual guidance`, async (t) => {
+    const f = await quotaFixture(t);
+    await f.fail("capacity", capacityError);
+    const w = f.engine.database.workflows[0];
+    if (blocked.startsWith("asker")) w.asker = "plan";
+    if (blocked === "asker-and-compaction") w.plan.compaction = "compacting";
+    if (blocked === "held") w.held = { ...w.pending };
+    if (blocked === "quota") w.quotaPause = {
+      role: "execute", provider: "codex", stoppedAt: f.now(), retryAt: null,
+      account: "account-a", attempts: 0, accountRetry: false,
+      nextCheckAt: f.now() + 24 * 60 * 60_000, lastCheckedAt: null,
+      prompt: "next task", phase: "execute",
+    };
+    if (blocked === "not-automatic") w.mode = "undecided";
+    if (blocked === "cycle-limit") w.cycles = (await f.engine.settings()).maxCycles;
+    if (blocked === "turn-limit") w.turns = (await f.engine.settings()).maxTurns;
+    f.advance(60_000);
+    await f.engine.tick();
+    const stopped = await stored(f);
+    assert.equal(stopped.status, "paused");
+    assert.equal(stopped.transientPause, null);
+    assert.doesNotMatch(stopped.detail, /다음 시도/);
+    assert.match(stopped.detail, /대화.*확인.*재개/);
+    assert.equal(f.sent.length, 1);
+    f.advance(120 * 60_000);
+    await f.engine.tick();
+    assert.equal(f.sent.length, 1);
+  });
+}
+
 test("a transient turn prepares one retry ID and resumes exactly once after one minute", async (t) => {
   const f = await quotaFixture(t);
   const delivered = f.sent[0].messageId;
