@@ -3737,14 +3737,15 @@ for (const text of [note(), "계획 담당의 관련 없는 정상 답변"]) {
   });
 }
 
-for (const blocked of ["plan-compaction", "execute-compaction", "sending"]) {
+for (const blocked of ["plan", "execute"]) {
   test(`AC-02 transient retry waits without spending attempts during ${blocked}`, async (t) => {
     const f = await quotaFixture(t);
     await f.fail("capacity", capacityError);
     const before = await stored(f);
     const w = f.engine.database.workflows[0];
-    if (blocked === "sending") w.pending.stage = "sending";
-    else w[blocked === "plan-compaction" ? "plan" : "execute"].compaction = "compacting";
+    const member = w[blocked];
+    member.compaction = "compacting";
+    f.engine.compacting.set(member.id, Promise.resolve());
     f.advance(60_000);
     for (let check = 0; check < 2; check++) {
       await f.engine.tick();
@@ -3758,8 +3759,8 @@ for (const blocked of ["plan-compaction", "execute-compaction", "sending"]) {
       assert.equal(f.sent.length, 1);
       f.advance(60_000);
     }
-    if (blocked === "sending") w.pending.stage = "queued";
-    else w[blocked === "plan-compaction" ? "plan" : "execute"].compaction = null;
+    member.compaction = null;
+    f.engine.compacting.delete(member.id);
     await f.engine.tick();
     const resumed = await stored(f);
     assert.equal(resumed.status, "active");
@@ -3770,6 +3771,116 @@ for (const blocked of ["plan-compaction", "execute-compaction", "sending"]) {
     assert.equal(f.sent.length, 2);
   });
 }
+
+for (const role of ["plan", "execute"]) {
+  test(`AC-05 an orphaned ${role} compaction resumes once after reload`, async (t) => {
+    const f = await quotaFixture(t);
+    await f.fail("capacity", capacityError);
+    const before = await stored(f);
+    f.engine.database.workflows[0][role].compaction = "orphaned-compaction";
+    await f.engine.tick();
+    await f.engine.close();
+    const restored = new WorkflowEngine(f.file, f.port, undefined, null, f.now);
+    t.after(() => restored.close());
+    f.advance(60_000);
+    await restored.tick();
+    const resumed = await stored(f);
+    assert.equal(resumed.status, "active");
+    assert.equal(resumed[role].compaction, null);
+    assert.equal(resumed.transientPause.attempts, 1);
+    assert.equal(f.sent.length, 2);
+    assert.equal(f.sent.at(-1).messageId, before.pending.id);
+    await restored.tick();
+    assert.equal(f.sent.length, 2);
+  });
+}
+
+test("AC-06 an uncertain sending retry stops with manual guidance and is never resent", async (t) => {
+  const f = await quotaFixture(t);
+  await f.fail("capacity", capacityError);
+  f.engine.database.workflows[0].pending.stage = "sending";
+  const pendingId = (await stored(f)).pending.id;
+  f.advance(60_000);
+  await f.engine.tick();
+  const stopped = await stored(f);
+  assert.equal(stopped.status, "paused");
+  assert.equal(stopped.transientPause, null);
+  assert.equal(stopped.pending.id, pendingId);
+  assert.equal(stopped.pending.stage, "sending");
+  assert.doesNotMatch(stopped.detail, /자동 재개|다음 시도/);
+  assert.match(stopped.detail, /확인.*재개/);
+  f.advance(120 * 60_000);
+  await f.engine.tick();
+  assert.equal(f.sent.length, 1);
+  assert.equal((await stored(f)).pending.stage, "sending");
+});
+
+for (const source of ["answered", "driven", "error"]) {
+  test(`AC-07 disabled transient recovery creates no schedule for ${source} failures`, async (t) => {
+    const f = source === "answered" ? await quotaFixture(t) : await fixture(t);
+    await f.engine.configure({ ...(await f.engine.settings()), autoResumeTransient: false });
+    const create = f.port.create;
+    if (source === "answered") await f.fail("capacity", capacityError);
+    if (source === "driven") await f.engine.ended("planner", "capacity", "", capacityError);
+    if (source === "error") {
+      f.port.create = async () => { throw new Error("ECONNREFUSED"); };
+      await f.finish("planner", "plan", "plan");
+    }
+    const stopped = await stored(f);
+    assert.equal(stopped.status, source === "error" ? "error" : "paused");
+    assert.equal(stopped.transientPause, null);
+    assert.doesNotMatch(stopped.detail, /자동 재개|다음 시도/);
+    assert.match(stopped.detail, /확인.*재개/);
+    if (source !== "error") {
+      assert.equal(stopped.pending, null, "a failed turn does not queue an automatic resend");
+    } else assert.equal(stopped.pending.stage, "queued", "the unsent original instruction is preserved");
+    const sent = f.sent.length;
+    if (f.advance) f.advance(24 * 60 * 60_000);
+    await f.engine.tick();
+    assert.equal(f.sent.length, sent);
+    f.port.create = create;
+    await f.engine.control(f.id, "resume");
+    assert.equal((await stored(f)).status, "active");
+    assert.equal(f.sent.length, sent + 1, "manual resume still moves the work forward");
+  });
+}
+
+test("AC-07 disabling an existing schedule removes the next-attempt display immediately", async (t) => {
+  const f = await quotaFixture(t);
+  await f.fail("capacity", capacityError);
+  const before = await stored(f);
+  await f.engine.configure({ ...(await f.engine.settings()), autoResumeTransient: false });
+  const stopped = await stored(f);
+  assert.equal(stopped.transientPause, null);
+  assert.deepEqual(stopped.pending, before.pending);
+  assert.doesNotMatch(stopped.detail, /자동 재개|다음 시도/);
+  assert.match(stopped.detail, /확인.*재개/);
+  await f.engine.configure({ ...(await f.engine.settings()), autoResumeTransient: true });
+  f.advance(24 * 60 * 60_000);
+  await f.engine.tick();
+  assert.equal(f.sent.length, 1, "reenabling does not invent a new reservation");
+  await f.engine.control(f.id, "resume");
+  assert.equal(f.sent.length, 2);
+  assert.equal(f.sent.at(-1).messageId, before.pending.id);
+});
+
+test("AC-07 a disabled saved schedule clears on reload without sending", async (t) => {
+  const f = await quotaFixture(t);
+  await f.fail("capacity", capacityError);
+  await f.engine.close();
+  const db = JSON.parse(await readFile(f.file, "utf8"));
+  db.settings.autoResumeTransient = false;
+  await writeFile(f.file, JSON.stringify(db));
+  const restored = new WorkflowEngine(f.file, f.port, undefined, null, f.now);
+  t.after(() => restored.close());
+  f.advance(60_000);
+  await restored.tick();
+  const stopped = await stored(f);
+  assert.equal(stopped.transientPause, null);
+  assert.doesNotMatch(stopped.detail, /자동 재개|다음 시도/);
+  assert.match(stopped.detail, /확인.*재개/);
+  assert.equal(f.sent.length, 1);
+});
 
 for (const blocked of ["asker", "held", "quota", "not-automatic", "cycle-limit", "turn-limit", "asker-and-compaction"]) {
   test(`AC-03 permanent ${blocked} block replaces the transient schedule with manual guidance`, async (t) => {

@@ -778,7 +778,13 @@ export class WorkflowEngine {
   }
   configure(settings: Settings) {
     return this.serial(async () => {
-      (await this.db()).settings = settingsSchema.parse(settings);
+      const db = await this.db();
+      db.settings = settingsSchema.parse(settings);
+      if (!db.settings.autoResumeTransient) {
+        for (const w of db.workflows)
+          if (w.transientPause && ["paused", "error"].includes(w.status))
+            this.stopTransient(w, w.transientPause.failure);
+      }
       await this.save();
       return settings;
     });
@@ -3699,15 +3705,17 @@ export class WorkflowEngine {
   private async transientBlock(w: Workflow): Promise<"permanent" | "temporary" | null> {
     const settings = await this.settings();
     if (
+      !settings.autoResumeTransient ||
       !automates(w) ||
       w.generalTransition ||
       w.asker ||
       w.held ||
       w.quotaPause ||
+      w.pending?.stage === "sending" ||
       w.cycles >= settings.maxCycles ||
       w.turns >= settings.maxTurns
     ) return "permanent";
-    if (w.pending?.stage === "sending" || w.plan?.compaction || w.execute?.compaction)
+    if ([w.plan, w.execute].some(member => member?.compaction && this.compacting.has(member.id)))
       return "temporary";
     return null;
   }
@@ -3736,9 +3744,12 @@ export class WorkflowEngine {
       nextCheckAt: this.now() + transientDelay(attempts),
     };
   }
-  private describeTransient(w: Workflow) {
+  private describeTransient(w: Workflow, failure = "") {
     const record = w.transientPause;
-    if (!record) return;
+    if (!record) {
+      if (transientFailure(failure)) this.stopTransient(w, failure);
+      return;
+    }
     let detail: string;
     if (record.attempts >= 5) {
       w.transientPause = null;
@@ -3753,20 +3764,18 @@ export class WorkflowEngine {
     }
     if (w.detail !== detail) this.touch(w, detail);
   }
-  private stopTransient(w: Workflow, detail = `응답 중단: ${w.transientPause!.failure}. 대화와 사용자 응답 대기를 확인하고 재개하세요.`) {
+  private stopTransient(w: Workflow, failure: string, detail = `응답 중단: ${failure}. 대화와 사용자 응답 대기를 확인하고 재개하세요.`) {
     w.transientPause = null;
     this.touch(w, detail);
   }
   private async retryTransient(w: Workflow) {
     const record = w.transientPause;
     if (!record || !["paused", "error"].includes(w.status)) return;
-    const settings = await this.settings();
     const block = await this.transientBlock(w);
     if (block === "permanent") {
-      this.stopTransient(w);
+      this.stopTransient(w, record.failure);
       return;
     }
-    if (!settings.autoResumeTransient) return;
     if (this.now() < record.nextCheckAt) return;
     if (block === "temporary") {
       record.nextCheckAt = this.now() + transientDelay(0);
@@ -3779,14 +3788,14 @@ export class WorkflowEngine {
     record.nextCheckAt = this.now() + transientDelay(record.attempts);
     try {
       if (!(await this.transientConversationsReady(w))) {
-        this.stopTransient(w);
+        this.stopTransient(w, record.failure);
         return;
       }
       const resumed = await this.resume(w, "", true);
       if (resumed === "active") return;
       // A newly discovered question or an uncertain delivery keeps its own stop intact.
       if (resumed === "needs_input" || (await this.transientBlock(w))) {
-        this.stopTransient(w, w.detail);
+        this.stopTransient(w, record.failure, w.detail);
         return;
       }
       if (!w.transientPause && record.attempts >= 5) {
@@ -3894,7 +3903,7 @@ export class WorkflowEngine {
       await this.recordTransient(w, w.pending?.role ?? this.floor(w), String(error), "error");
       w.status = "error";
       this.touch(w, String(error));
-      this.describeTransient(w);
+      this.describeTransient(w, String(error));
     }
   }
   private async observe(w: Workflow) {
@@ -4074,7 +4083,7 @@ export class WorkflowEngine {
       await this.recordTransient(w, w.pending?.role ?? this.floor(w), failure, "error");
       w.status = "error";
       this.touch(w, failure);
-      this.describeTransient(w);
+      this.describeTransient(w, failure);
       await this.save();
     }
   }
