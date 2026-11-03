@@ -10,6 +10,8 @@ import { control, status } from "./shared/contracts";
 import { workflowCardSchema } from "./shared/workflow-card";
 import { transformWorkflowReport } from "./client/workflow-report";
 import { WorkflowCard } from "./client/workflow-card";
+import { ExecutorPickerCard } from "./client/executor-picker";
+import { executorPickerCardSchema } from "./shared/executor-picker";
 import { focusManagedPush } from "./client/managed-push-panel";
 import { preparePush } from "./shared/managed-push";
 import { registerFolderOpen } from "./client/folder-open";
@@ -33,6 +35,12 @@ export default function contribute(client: PluginClientContext) {
       version: 1,
       schema: workflowCardSchema,
       Component: WorkflowCard,
+    }),
+    client.addTimelineRenderer({
+      kind: "executor-picker",
+      version: 1,
+      schema: executorPickerCardSchema,
+      Component: ExecutorPickerCard,
     }),
     registerResumeButtons(client),
     client.addSlashCommand({

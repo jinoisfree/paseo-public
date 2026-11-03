@@ -1,3 +1,4 @@
+import { z } from "zod";
 import type { ExecutorModel } from "./contracts";
 import { capabilities } from "./capabilities";
 
@@ -26,3 +27,6 @@ export function picksExecutor(w: {
 }) {
   return capabilities(w).executorSelection && !w.executeAgentId && w.status !== "completed";
 }
+
+/** The in-chat picker card posted when a contract 5 flow becomes federated. */
+export const executorPickerCardSchema = z.object({ workflowId: z.string() });

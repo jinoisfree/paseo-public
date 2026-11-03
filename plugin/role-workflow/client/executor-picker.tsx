@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import { useRpc, type PluginHostProps } from "@getpaseo/plugin/client";
+import { useRpc, type PluginHostProps, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
+import type { z } from "zod";
 import { models, selectExecutor, status, type ExecutorModel } from "../shared/contracts";
-import { picksExecutor, pickerDefaultThinking, pickerThinking } from "../shared/executor-picker";
+import { type executorPickerCardSchema, picksExecutor, pickerDefaultThinking, pickerThinking } from "../shared/executor-picker";
 import type { WorkflowProvider } from "../shared/assignment";
 
 type Workflow = Parameters<typeof picksExecutor>[0] & {
   id: string;
+  planAgentId?: string | null;
   heldPlan?: boolean;
   selection?: { provider?: WorkflowProvider | null; model?: string; thinking?: string | null; error?: string } | null;
 };
@@ -103,16 +105,28 @@ export function ExecutorPicker({
   );
 }
 
-/** Shown under a plan card: finds the planner's open workflow and offers the picker. */
-export function PlanExecutorPicker({ agentId, theme }: { agentId: string; theme: PluginHostProps["theme"] }) {
+/** Loads the live workflow that `find` names and offers the picker while it is open. */
+function LivePicker({ find, theme }: { find: (rows: Workflow[]) => Workflow | undefined; theme: PluginHostProps["theme"] }) {
   const read = useRpc(status);
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const load = useCallback(() => {
     read({})
-      .then(({ workflows }) => setWorkflow(
-        workflows.find((row) => row.planAgentId === agentId && picksExecutor(row)) ?? null))
+      .then(({ workflows }) => setWorkflow(find(workflows.filter(picksExecutor)) ?? null))
       .catch(() => setWorkflow(null));
-  }, [agentId, read]);
+  }, [find, read]);
   useEffect(load, [load]);
   return workflow ? <ExecutorPicker workflow={workflow} theme={theme} onChanged={load} /> : null;
+}
+
+/** Shown under a plan card: finds the planner's open workflow and offers the picker. */
+export function PlanExecutorPicker({ agentId, theme }: { agentId: string; theme: PluginHostProps["theme"] }) {
+  const find = useCallback((rows: Workflow[]) => rows.find((row) => row.planAgentId === agentId), [agentId]);
+  return <LivePicker find={find} theme={theme} />;
+}
+
+/** Posted into the planner conversation as soon as the flow becomes federated. */
+export function ExecutorPickerCard({ item, theme }: PluginTimelineItemProps<z.infer<typeof executorPickerCardSchema>>) {
+  const id = item.data.workflowId;
+  const find = useCallback((rows: Workflow[]) => rows.find((row) => row.id === id), [id]);
+  return <LivePicker find={find} theme={theme} />;
 }

@@ -607,6 +607,17 @@ export function createPort(
           data: { choice, message, ...(planner ? { planner } : {}) },
         });
     },
+    async executorPicker(agentId, workflowId) {
+      await getApi()
+        .agents.ref(agentId)
+        .timeline.append({
+          id: `role-workflow-executor-picker:${workflowId}`,
+          type: "plugin",
+          kind: "executor-picker",
+          version: 1,
+          data: { workflowId },
+        });
+    },
     async compact(id, messageId) {
       const agent = getApi().agents.ref(id);
       let finish!: (error: Error | null) => void;

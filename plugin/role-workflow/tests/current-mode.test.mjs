@@ -13,11 +13,12 @@ async function fixture(t,{mode="federated",provider="codex",ask=false,options=[{
   const dir=await mkdtemp(path.join(tmpdir(),"current-mode-"));const file=path.join(dir,"fixture.json");
   const original={provider:`${provider}/planner`,thinkingOptionId:"medium",modeId:"full-access"};
   const agents=new Map([["A",{id:"A",workspaceId:"ws",projectId:"project",cwd:dir,title:"Task",status:"idle",archived:false,permission:false,usage:0,config:original}]]);
-  const created=[],sent=[],histories=new Map();let models=[{id:"builder",label:"Builder",thinkingOptions:options},{id:"planner",label:"Planner",thinkingOptions:[{id:"medium",label:"Medium"}]}],catalogFailure=false,modelCalls=0;
+  const created=[],sent=[],pickers=[],histories=new Map();let models=[{id:"builder",label:"Builder",thinkingOptions:options},{id:"planner",label:"Planner",thinkingOptions:[{id:"medium",label:"Medium"}]}],catalogFailure=false,modelCalls=0;
   const port={inspect:async id=>agents.get(id)??null,history:async id=>histories.get(id)??{text:"",key:"",failed:null,messageIds:[]},
     models:async()=>{modelCalls++;if(catalogFailure)throw Error("catalog offline");return models;},
     projectName:async()=>"Project",workspaceName:async()=>"Task",rename:async()=>{},quotaAccount:async()=>null,quotaAvailable:async()=>null,
     create:async(w,role,m)=>{created.push({...m.config,id:m.id});agents.set(m.id,{...agents.get("A"),id:m.id,config:m.config});return "ws";},
+    executorPicker:async(agentId,workflowId)=>{pickers.push([agentId,workflowId]);},
     send:async(id,prompt,messageId)=>{sent.push({id,prompt,messageId});agents.get(id).status="running";}};
   let engine=new WorkflowEngine(file,port);
   await engine.configure({...await engine.settings(),askExecutorModel:ask,autoPinStarted:false,autoArchivePushed:false,titleMarker:false,autoResumeQuota:false,autoResumeTransient:false});
@@ -35,7 +36,7 @@ async function fixture(t,{mode="federated",provider="codex",ask=false,options=[{
     return requestId;
   };
   const resolve = async(id,answers)=>engine.permissionResolved("A",id,{behavior:"allow",updatedInput:{answers}});
-  return {bundle,resolve,dir,id,original,agents,created,sent,port,state,finish,answer,askQuestion,get engine(){return engine;},get modelCalls(){return modelCalls;},setModels:v=>{models=v;},failCatalog:v=>{catalogFailure=v;},restart:async()=>{await engine.close();engine=new WorkflowEngine(file,port);}};
+  return {bundle,resolve,dir,id,original,agents,created,sent,pickers,port,state,finish,answer,askQuestion,get engine(){return engine;},get modelCalls(){return modelCalls;},setModels:v=>{models=v;},failCatalog:v=>{catalogFailure=v;},restart:async()=>{await engine.close();engine=new WorkflowEngine(file,port);}};
 }
 
 for(const provider of ["codex","claude"])for(const ask of [false,true])
@@ -343,6 +344,25 @@ test("contract4 keeps its question path but may also pick on the screen, retirin
  await f.finish("A","plan");assert.equal(f.created.length,1);
  // Contract 4 never holds a plan; that behavior stays unchanged.
  const g=await fixture(t);await g.finish("A","plan");assert.equal((await g.state()).selectionPlan,"");
+});
+const MODE={question:"진행 방식을 선택하세요",header:"방식",options:[{label:"일반개발"},{label:"연합개발"}]};
+const chooseMode=async(f,label,id)=>{await f.engine.permission("A",{id,kind:"question",input:{questions:[MODE]}});await f.engine.permissionResolved("A",id,{behavior:"allow",updatedInput:{answers:{[MODE.question]:label}}});await new Promise(r=>setImmediate(r));};
+test("contract5 posts the in-chat picker once as soon as federation is chosen, before any plan",async t=>{
+ const f=await fixture(t,{contract:5,mode:"undecided",options:ALL});
+ await new Promise(r=>setImmediate(r));assert.deepEqual(f.pickers,[]);
+ await chooseMode(f,"연합개발","mode-1");
+ assert.deepEqual(f.pickers,[["A",f.id]]);assert.equal(f.sent.length,0);assert.equal((await f.state()).pickerPosted,true);
+ await f.finish("A","plan");await f.restart();await f.engine.tick();await new Promise(r=>setImmediate(r));
+ assert.equal(f.pickers.length,1);
+ assert.equal((await f.engine.selectExecutor(f.id,{provider:"codex",model:"builder",thinking:"high"})).ok,true);assert.equal(f.created.length,1);
+});
+test("the in-chat picker skips general work and contract4; a federated start posts it on enrollment",async t=>{
+ const g=await fixture(t,{contract:5,mode:"undecided"});await chooseMode(g,"일반개발","mode-g");await g.finish("A","note");
+ assert.deepEqual(g.pickers,[]);
+ const four=await fixture(t,{contract:4,options:ALL});await four.finish("A","plan");await new Promise(r=>setImmediate(r));
+ assert.deepEqual(four.pickers,[]);
+ const direct=await fixture(t,{contract:5,options:ALL});await new Promise(r=>setImmediate(r));
+ assert.deepEqual(direct.pickers,[["A",direct.id]]);
 });
 test("picker offers every thinking option and none only for models without options",async()=>{
  const {pickerThinking,pickerDefaultThinking,picksExecutor}=await import("../shared/executor-picker.ts");

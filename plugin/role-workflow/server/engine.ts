@@ -216,6 +216,8 @@ const workflowSchema = z.object({
   limitPlan: z.string().default(""),
   // The plan held until the executor is picked on the plugin screen (contract 5).
   selectionPlan: z.string().default(""),
+  // The in-chat executor picker was posted once the flow became federated (contract 5).
+  pickerPosted: z.boolean().default(false),
   resumeNote: z.string().default(""),
   generalHandoff: z.string().default(""),
   generalDelivery: z
@@ -376,6 +378,8 @@ export interface WorkflowPort {
     noticeId: string,
     planner?: GeneralAgent,
   ): Promise<void>;
+  /** Posts the executor picker card into the planner conversation. */
+  executorPicker?(agentId: string, workflowId: string): Promise<void>;
   send(id: string, prompt: string, messageId: string): Promise<void>;
   /** Reads the latest turn. `through` is a message id the search must reach back to. */
   history(id: string, through?: string): Promise<History>;
@@ -636,6 +640,12 @@ export class WorkflowEngine {
           workspaceId: member.workspaceId ?? "",
         });
     }
+    // Contract 5 offers the picker as soon as the flow is federated, not after the plan.
+    const pickers = db.workflows.filter(
+      (w) => capabilities(w).screenSelection && !w.pickerPosted && w.plan && !w.execute &&
+        w.status !== "completed" && !this.selectedExecutor(w),
+    );
+    for (const w of pickers) w.pickerPosted = true;
     const serialized = JSON.stringify(db);
     if (serialized !== this.savedDatabase) {
       try {
@@ -643,6 +653,7 @@ export class WorkflowEngine {
       } catch (error) {
         // Unsent notifications stay pending for the next successful save.
         for (const [w, previous] of marked) w.notifiedStatus = previous;
+        for (const w of pickers) w.pickerPosted = false;
         markedWaits.forEach(([w, previous]) => {
           w.notifiedWriterWait = previous;
         });
@@ -651,6 +662,8 @@ export class WorkflowEngine {
       this.savedDatabase = serialized;
     }
     for (const event of events) this.dispatch(event);
+    // A failed post leaves the plan card and dashboard pickers as the fallback.
+    for (const w of pickers) void this.port.executorPicker?.(w.plan!.id, w.id).catch(() => {});
     for (const w of db.workflows) await this.saveHandoff(w);
   }
   private async saveHandoff(w: Workflow) {
@@ -1373,6 +1386,7 @@ export class WorkflowEngine {
         transitionTurns: [],
         limitPlan: "",
         selectionPlan: "",
+        pickerPosted: false,
         resumeNote: "",
         generalHandoff: "",
         generalDelivery: null,
@@ -2683,7 +2697,7 @@ export class WorkflowEngine {
     w.status = "needs_input";
     w.asker = "plan";
     this.touch(w, capabilities(w).screenSelection
-      ? `${state.error ? state.error + " " : ""}계획 카드 또는 자동 작업 화면에서 구현 제품·모델·추론을 선택하세요. 선택하면 보관한 계획을 바로 전달합니다.`
+      ? `${state.error ? state.error + " " : ""}대화의 구현 담당 선택 카드나 자동 작업 화면에서 구현 제품·모델·추론을 선택하세요. 선택하면 보관한 계획을 바로 전달합니다.`
       : state.error || `구현 담당 ${selectionStageLabel[state.stage]} 선택을 실제 답변으로 확정해야 합니다. 질문 도구로 선택하거나 실행 가능한 모델/추론을 직접 입력하세요.`);
     await this.save();
     return false;
