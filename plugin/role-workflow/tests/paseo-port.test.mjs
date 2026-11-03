@@ -327,9 +327,10 @@ test("an exact completed async answer retains same-turn push evidence without ch
   const { items, answer, report, push } = asyncPushTurn();
   for (const metadata of [undefined, items.map(() => "turn-1")]) {
     const result = readTurn(items, "/repo", metadata);
-    const legacy = readTurn([answer, report], "/repo");
+    const { messageTurns: _, ...legacy } = readTurn([answer, report], "/repo");
+    const { messageTurns, turnId, ...identity } = result;
     assert.deepEqual(
-      { ...result, evidence: undefined },
+      { ...identity, evidence: undefined },
       {
         ...legacy,
         goal: items[0].text,
@@ -337,6 +338,8 @@ test("an exact completed async answer retains same-turn push evidence without ch
         evidence: undefined,
       },
     );
+    assert.equal(turnId, metadata ? "turn-1" : undefined);
+    assert.equal(Object.keys(messageTurns).length, metadata ? 2 : 0);
     assert.equal(result.evidence.pushes[0].callId, push.callId);
     assert.equal(result.evidence.pushes[0].commit, "a".repeat(40));
   }
@@ -1300,4 +1303,22 @@ test("maintenance recovery identity belongs to the last exact /compact request",
  const current={type:"user_message",text:"/compact",clientMessageId:"role-workflow-compact:current"};
  const result=readTurn([older,{type:"compaction",status:"completed"},current,{type:"compaction",status:"completed"}]);
  assert.equal(result.maintenance,true);assert.equal(result.maintenanceId,"role-workflow-compact:current");assert.equal(result.compacted,true);
+});
+
+test("a turn records which provider turn each user message belongs to", () => {
+  const turn = readTurn(
+    [
+      { type: "user_message", text: "작업 ID: w", messageId: "delivery" },
+      { type: "assistant_message", text: "working" },
+      { type: "user_message", text: "카드 크기를 통일해줘", messageId: "steer" },
+      { type: "assistant_message", text: "done" },
+    ],
+    undefined,
+    ["turn-1", "turn-1", "turn-1", "turn-1"],
+  );
+  assert.deepEqual(turn.messageTurns, { delivery: "turn-1", steer: "turn-1" });
+  assert.equal(turn.turnId, "turn-1");
+  const bare = readTurn([{ type: "user_message", text: "hi", messageId: "m" }]);
+  assert.deepEqual(bare.messageTurns, {});
+  assert.equal(bare.turnId, undefined);
 });

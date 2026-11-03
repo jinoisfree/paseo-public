@@ -87,6 +87,15 @@ export function readTurn(
       ? [item.clientMessageId, item.messageId].filter((id): id is string => !!id)
       : [],
   );
+  // Which provider turn each message opened or steered, so a delivery can be tied to the turn
+  // that ended even after the user's own messages were folded into it.
+  const messageTurns: Record<string, string> = {};
+  items.forEach((item, index) => {
+    const turnId = turnIds?.[index];
+    if (item.type !== "user_message" || !turnId) return;
+    for (const id of [item.clientMessageId, item.messageId]) if (id) messageTurns[id] = turnId;
+  });
+  const turnId = turnIds?.at(-1);
   const identity =
     user?.type === "user_message" ? (user.clientMessageId ?? user.messageId ?? user.text) : "";
   const first = items.find((item) => item.type === "user_message");
@@ -105,6 +114,8 @@ export function readTurn(
     ...(user?.type === "user_message" && (user.clientMessageId ?? user.messageId)
       ? { maintenanceId: user.clientMessageId ?? user.messageId } : {}),
     messageIds,
+    messageTurns,
+    ...(turnId ? { turnId } : {}),
     key: createHash("sha256")
       // Preserve persisted turn identities across the message-boundary fix.
       .update(identity + "\n" + messages.join(""))

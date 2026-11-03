@@ -346,6 +346,10 @@ export interface History {
   text: string;
   key: string;
   messageIds: string[];
+  /** Provider turn of each user message, by message ID, when the timeline records turns. */
+  messageTurns?: Record<string, string>;
+  /** Provider turn of the newest timeline entry. */
+  turnId?: string;
   failed: string | null;
 }
 export interface WorkflowPort {
@@ -1555,12 +1559,12 @@ export class WorkflowEngine {
       w.pending.stage !== "queued" &&
       w.pending.role === role &&
       this.carries(w, w.pending, request, messageIds);
-    // A partial lifecycle event may omit the delivered message. Only this exact completed
-    // response, read from the same member's bounded history, can establish receipt.
-    if (!mine && role === "plan" && w.pending?.role === "plan" &&
-        w.pending.stage === "sent" && failed === null &&
-        this.sideDecision(w, role, text)?.status === "plan")
-      mine = await this.receivedPlan(w, turn, w.pending.id);
+    // A lifecycle event may omit the delivered message, as when the user steered a long turn
+    // or a compaction cut it from view. Only this exact completed response, read from the same
+    // member's history, can establish that it ends the delivered instruction's turn.
+    if (!mine && w.pending?.role === role && w.pending.stage === "sent" && failed === null &&
+        this.sideDecision(w, role, text))
+      mine = await this.received(w, turn, w.pending.id);
     const answers = w.inbox ? this.supersedes(w, role, agentId, text, failed, mine) : mine;
     if (answers === null) {
       // A result nobody has read yet outranks what the user says on the side meanwhile.
@@ -3405,7 +3409,7 @@ export class WorkflowEngine {
     if (w.planIssue) {
       const issue = w.planIssue;
       if (w.pending?.id === issue.pendingId &&
-          await this.receivedPlan(w, issue.response, issue.pendingId)) {
+          await this.received(w, issue.response, issue.pendingId)) {
         w.inbox = { ...issue.response, answers: true };
         w.planIssue = null;
       } else {
@@ -3415,11 +3419,17 @@ export class WorkflowEngine {
     }
     await this.clearSettled(w);
   }
-  private async receivedPlan(w: Workflow, response: Inbox, pendingId: string): Promise<boolean> {
-    if (!w.plan || response.agentId !== w.plan.id) return false;
-    const history = await this.port.history(w.plan.id, pendingId).catch(() => null);
-    return !!history && history.failed === null && history.key === response.key &&
-      history.text === response.text && history.messageIds.includes(pendingId);
+  private async received(w: Workflow, response: Inbox, pendingId: string): Promise<boolean> {
+    const member = [w.plan, w.execute].find((m) => m?.id === response.agentId);
+    if (!member) return false;
+    const history = await this.port.history(member.id, pendingId).catch(() => null);
+    if (!history || history.failed !== null || history.key !== response.key ||
+        history.text !== response.text || !history.messageIds.includes(pendingId)) return false;
+    // A later turn also lists the delivery, so only the turn the delivery opened answers it.
+    // Histories without turns keep the planner's earlier exact-response rule.
+    return history.turnId
+      ? history.messageTurns?.[pendingId] === history.turnId
+      : member === w.plan;
   }
   private async checkResume(w: Workflow, message: string) {
     for (const member of [w.plan, w.execute]) {
@@ -4675,6 +4685,12 @@ export class WorkflowEngine {
   private async act(w: Workflow, role: Role, d: Decision, report: string, inbox: Inbox) {
     if (role === "plan" && d.status === "plan" && w.planConflict &&
         w.planConflict.stage !== "resolved") {
+      // The instruction the conflict waited on is over without its result reaching review,
+      // so nothing else would deliver one. Send the review now instead of waiting for good.
+      if (w.planConflict.stage === "executing" && w.pending?.role !== "execute") {
+        await this.reviewConflict(w);
+        return;
+      }
       if (w.planConflict.stage !== "review" || !inbox.answers) {
         w.status = "needs_input";
         this.touch(w, "기존 실행 결과와 보존된 충돌 계획을 먼저 검토해야 새 계획을 실행할 수 있습니다.");
@@ -4698,15 +4714,17 @@ export class WorkflowEngine {
     else if (held && proceeds) w.pending = held;
     else if (d.status === "continue") this.queue(w, role, d.next, w.phase);
     else if (d.status === "plan") await this.plan(w, d, report, inbox, !!held?.instruction);
-    else if (w.plan) {
-      let conflict = "";
-      if (w.planConflict && w.planConflict.stage !== "resolved") {
-        w.planConflict.stage = "review";
-        conflict = `\n\n적용하지 않은 새 계획(응답 ${w.planConflict.key}):\n${w.planConflict.next}\n${w.planConflict.reason}\n기존 결과와 함께 검토하고 실행할 지시를 plan으로 재확정하세요.`;
-      }
-      this.queue(w, "plan", REVIEW + (await this.evidence(w)) + conflict, "review");
-    }
+    else if (w.plan) await this.reviewConflict(w);
     else w.status = "completed";
+  }
+  /** Queues the planner's review, carrying any plan held back while the result was pending. */
+  private async reviewConflict(w: Workflow) {
+    let conflict = "";
+    if (w.planConflict && w.planConflict.stage !== "resolved") {
+      w.planConflict.stage = "review";
+      conflict = `\n\n적용하지 않은 새 계획(응답 ${w.planConflict.key}):\n${w.planConflict.next}\n${w.planConflict.reason}\n기존 결과와 함께 검토하고 실행할 지시를 plan으로 재확정하세요.`;
+    }
+    this.queue(w, "plan", REVIEW + (await this.evidence(w)) + conflict, "review");
   }
   private async complete(w: Workflow, d: Decision, role: Role) {
     if (automates(w) && w.contract >= 2 && role === "plan") {

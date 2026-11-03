@@ -2544,6 +2544,75 @@ test("a delivered turn the user steered still answers its instruction", async (t
   assert.equal((await stored(f)).pending.stage, "sent");
 });
 
+test("a steered turn whose event lost the delivery answers it when the delivery opened that turn", async (t) => {
+  const f = await fixture(t);
+  await f.finish("planner", "p1", "plan");
+  const executor = f.created[0].id;
+  const delivery = (await stored(f)).pending.id;
+  f.agents.get(executor).status = "idle";
+  // The user steered the running turn and a compaction cut the delivery from the event.
+  const text = decision("result");
+  f.histories.set(executor, {
+    text,
+    key: "steered",
+    messageIds: [delivery, "steer"],
+    messageTurns: { [delivery]: "turn-1", steer: "turn-1" },
+    turnId: "turn-1",
+    failed: null,
+  });
+  await f.engine.ended(executor, "steered", text, null, "", false, "카드 크기를 통일해줘", false, ["steer"]);
+  assert.equal(f.sent.at(-1).id, "planner");
+  assert.equal((await f.view()).phase, "review");
+
+  // A later turn of the user's own also lists the delivery, but it did not open that turn.
+  const g = await fixture(t);
+  await g.finish("planner", "p1", "plan");
+  const other = g.created[0].id;
+  const sent = (await stored(g)).pending.id;
+  g.agents.get(other).status = "idle";
+  g.histories.set(other, {
+    text,
+    key: "later",
+    messageIds: [sent, "own"],
+    messageTurns: { [sent]: "turn-1", own: "turn-2" },
+    turnId: "turn-2",
+    failed: null,
+  });
+  await g.engine.ended(other, "later", text, null, "", false, "다른 요청", false, ["own"]);
+  assert.equal(g.sent.length, 1, "no review is sent for a turn the delivery did not open");
+  assert.equal((await stored(g)).pending.id, sent);
+});
+
+test("a plan held back while executing is reviewed once the instruction ended unreviewed", async (t) => {
+  const f = await fixture(t);
+  await f.finish("planner", "p1", "plan");
+  const executor = f.created[0].id;
+  await userTurn(f, "planner", "side-plan", decision("plan", "v7 plan"));
+  assert.equal((await stored(f)).planConflict.stage, "executing");
+  // As in an older history without turns: the steered result is kept only as a side turn,
+  // and the recovery then stops the flow with no review on the way.
+  f.agents.get(executor).status = "idle";
+  const result = decision("result");
+  await f.engine.ended(executor, "steered", result, null, "", false, "사용자 지시", false, ["steer"]);
+  f.histories.set(executor, { text: result, key: "steered", messageIds: [f.sent[0].messageId], failed: null });
+  await f.engine.tick();
+  let w = await stored(f);
+  assert.equal(w.pending, null);
+  assert.equal(w.status, "needs_input");
+  // The planner's next plan sends the review with the held plan instead of blocking again.
+  f.agents.get("planner").status = "idle";
+  await userTurn(f, "planner", "next-plan", decision("plan", "v8 plan"));
+  assert.equal(f.sent.at(-1).id, "planner");
+  assert.match(f.sent.at(-1).prompt, /적용하지 않은 새 계획/);
+  assert.match(f.sent.at(-1).prompt, /v7 plan/);
+  w = await stored(f);
+  assert.equal(w.planConflict.stage, "review");
+  assert.equal(w.status, "active");
+  await f.finish("planner", "review-plan", "plan");
+  assert.equal(f.sent.at(-1).id, executor);
+  assert.equal((await stored(f)).planConflict.stage, "resolved");
+});
+
 test("a turn that ended before the delivery, or never received it, is not the answer", async (t) => {
   // The review is delivered a moment after the planner's own turn ended; that turn's record
   // of messages does not contain the delivery.
