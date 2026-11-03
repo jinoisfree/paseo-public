@@ -183,9 +183,8 @@ test("both initial providers plan, managed executors keep their role, and model 
       assert.match(initial.config.systemPrompt, /<paseo-work-mode-v4>/);
       if (provider === "codex")
         assert.match(initial.config.systemPrompt, /비동기 도구/);
-      assert.match(initial.config.systemPrompt,/실제 사용자 답변/);
-      assert.ok(initial.config.systemPrompt.includes(`${other}/m`));
-      assert.deepEqual(calls.slice(-2),["codex","claude"]);
+      assert.match(initial.config.systemPrompt,/플러그인 화면에서 고른다/);
+      assert.ok(!initial.config.systemPrompt.includes(`${other}/m`));
       assert.deepEqual(Object.keys(initial).sort(), ["config", "env"]);
       const managed = await hooks.get("agent.create")(
         {
@@ -301,7 +300,7 @@ test("the start setting decides the question, the enrolled mode and which blocks
   try {
     const asked = await start("asked", {});
     assert.match(asked.prompt,/진행 방식을 단독 질문/);
-    assert.match(asked.prompt,/3질문을 한 번의 질문 도구 호출/);
+    assert.match(asked.prompt,/<paseo-executor-selection-v5>/);
     assert.equal(conditional(asked.prompt),2);
     assert.ok(asked.prompt.indexOf("<paseo-work-mode-v4>")<asked.prompt.indexOf("<paseo-role-workflow-v1>"));
     assert.equal(asked.label, undefined);
@@ -309,7 +308,7 @@ test("the start setting decides the question, the enrolled mode and which blocks
     const general = await start("general", { askMode: false, defaultMode: "general" });
     assert.match(general.prompt,/진행 방식은 일반개발이다/);
     assert.equal(conditional(general.prompt),0);
-    assert.doesNotMatch(general.prompt,/<paseo-role-workflow-v1>|<paseo-automation-v1>|<paseo-executor-selection-v4>/);
+    assert.doesNotMatch(general.prompt,/<paseo-role-workflow-v1>|<paseo-automation-v1>|<paseo-executor-selection-v[45]>/);
     assert.match(general.prompt,/직접 조사·구현·자체 검증/);
     assert.equal(general.label, undefined);
 
@@ -318,7 +317,7 @@ test("the start setting decides the question, the enrolled mode and which blocks
     assert.equal(conditional(federated.prompt), 2);
     assert.match(
       federated.prompt,
-      /3질문을 한 번의 질문 도구 호출/,
+      /<paseo-executor-selection-v5>/,
     );
     assert.equal(federated.label, undefined);
 

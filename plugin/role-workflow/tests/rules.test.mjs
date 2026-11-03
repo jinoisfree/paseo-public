@@ -121,11 +121,15 @@ test("general prompts receive and replace the same ungated rules block", async (
 test('lightweight reading and record policy remains consistent in injected prompts', async t => {
  const readme=await materializeRules(await directory(t));
  const {composeCurrentPrompt}=await import('../server/roles.ts');
- const {executorSelectionPrompt}=await import('../server/executor-selection.ts');
- const prompt=composeCurrentPrompt('codex','','undecided',readme,executorSelectionPrompt({}), '');
- assert.match(prompt,/질문·설명·읽기 전용 조사는.*선택.*답/);
+ const {SCREEN_SELECTION_PROMPT}=await import('../server/executor-selection.ts');
+ const prompt=composeCurrentPrompt('codex','','undecided',readme,SCREEN_SELECTION_PROMPT, '');
+ assert.match(prompt,/질문·설명 요청에는 note로 답/);
+ // The mode question is never skipped while undecided, even for questions.
+ assert.match(prompt,/첫 응답 전에 질문 도구로 진행 방식을 단독 질문한다\. 질문·설명·읽기 전용 조사 요청이어도 생략하지 않는다/);
+ assert.match(RULES['README.md'],/요청 종류와 관계없이 첫 응답 전에 진행 방식을 묻는다/);
+ assert.match(RULES['00-common.md'],/요청 종류와 관계없이 첫 응답 전에/);
  assert.match(prompt,/현재 단계 상세/);assert.match(prompt,/무변경 상세 문서 전체 재독은 강제하지/);
- assert.doesNotMatch(prompt,/첫 응답 전에 질문 도구로 진행 방식|plan: 00-common.md, 10-planning.md, 30-verification.md/);
+ assert.doesNotMatch(prompt,/진행 방식·구현 담당 선택 없이|plan: 00-common.md, 10-planning.md, 30-verification.md/);
  assert.match(RULES['README.md'],/기획·설계.*10-planning.md/);
  assert.match(RULES['README.md'],/최종 검토.*30-verification.md/);
  assert.match(RULES['00-common.md'],/별도 spec\/design\/tasks\/ADR 파일을 강제하지/);
@@ -134,14 +138,14 @@ test('lightweight reading and record policy remains consistent in injected promp
  assert.match(RULES['40-paseo-role-workflow.md'],/푸시는 사용자가 명시적으로 승인한 뒤에만/);
 });
 
-test('selection prompts preserve exact question titles and put descriptions outside them', async () => {
+test('screen selection prompt carries no questions while contract4 titles stay exact', async () => {
  const {EXECUTOR_QUESTIONS}=await import('../shared/executor-selection.ts');
- const {executorSelectionPrompt,selectionQuestions}=await import('../server/executor-selection.ts');
- const prompt=executorSelectionPrompt({});
- assert.match(prompt,/question 또는 title은 아래 정해진 질문 제목과 정확히 같아야/);
- assert.match(prompt,/예시·접미사는 제목 밖/);
+ const {SCREEN_SELECTION_PROMPT,selectionQuestions}=await import('../server/executor-selection.ts');
+ assert.match(SCREEN_SELECTION_PROMPT,/플러그인 화면에서 고른다/);
+ assert.ok(SCREEN_SELECTION_PROMPT.length<400);
  for (const q of Object.values(EXECUTOR_QUESTIONS)) {
-  assert.ok(prompt.includes(`질문/header: ${q.question}/${q.header}`));
+  assert.ok(!SCREEN_SELECTION_PROMPT.includes(q.question));
+  // Contract4 conversations keep answering through their original exact titles.
   assert.ok(RULES['40-paseo-role-workflow.md'].includes('`'+q.question+'`'));
   assert.equal(selectionQuestions({questions:[{title:q.question}]}).length,1);
   assert.deepEqual(selectionQuestions({questions:[{title:q.question+' (설명)'}]}),[]);

@@ -4,6 +4,7 @@ import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import type { z } from "zod";
 import type { workflowCardSchema } from "../shared/workflow-card";
 import { ReportMarkdown } from "./report-markdown";
+import { PlanExecutorPicker } from "./executor-picker";
 
 const labels = {
   plan: "실행 계획",
@@ -16,6 +17,7 @@ const labels = {
 export function WorkflowCard({
   item,
   theme,
+  agentId,
 }: PluginTimelineItemProps<z.infer<typeof workflowCardSchema>>) {
   const [details, setDetails] = useState(false);
   const [raw, setRaw] = useState(false);
@@ -64,6 +66,7 @@ export function WorkflowCard({
             style={styles.muted}
           >{`검증 ${d.checks.length}건\n${d.checks.slice(0, 3).join("\n")}${d.checks.length > 3 ? "\n나머지 검증은 상세에서 확인" : ""}`}</Text>
         )}
+        {d.status === "plan" && <PlanExecutorPicker agentId={agentId} theme={theme} />}
         {d.status === "input" && !!d.next && (
           <Text selectable style={styles.text}>
             {d.next}

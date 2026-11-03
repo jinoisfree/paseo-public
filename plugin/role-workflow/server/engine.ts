@@ -214,6 +214,8 @@ const workflowSchema = z.object({
   transitionTurns: z.array(inboxSchema).default([]),
   // The plan held at the cycle limit, and a resume note that goes out with it.
   limitPlan: z.string().default(""),
+  // The plan held until the executor is picked on the plugin screen (contract 5).
+  selectionPlan: z.string().default(""),
   resumeNote: z.string().default(""),
   generalHandoff: z.string().default(""),
   generalDelivery: z
@@ -775,6 +777,35 @@ export class WorkflowEngine {
       return { repositories: w.repositories };
     });
   }
+  /** The executor chosen on the plugin screen; a held plan goes out once it is valid. */
+  selectExecutor(id: string, choice: { provider: "codex" | "claude"; model: string; thinking: string }) {
+    return this.serial(async () => {
+      const w = (await this.db()).workflows.find((entry) => entry.id === id);
+      if (!w) throw new Error("작업을 찾을 수 없습니다.");
+      if (!capabilities(w).executorSelection) throw new Error("연합개발 작업에서만 구현 담당을 선택할 수 있습니다.");
+      if (w.execute) throw new Error("구현 담당이 이미 생성되어 바꿀 수 없습니다.");
+      const state = w.selection!;
+      // A still-open chat question is retired; its late answer cannot override this choice.
+      if (state.pending) { state.answered.push(state.pending.id); state.pending = null; }
+      try {
+        await applySelectionBatch(state, { provider: choice.provider, model: choice.model,
+          thinking: choice.thinking || "추론 없음" }, provider => this.catalog(w, provider));
+      } catch (error) { state.error = error instanceof Error ? error.message : String(error); }
+      const selected = this.selectedExecutor(w);
+      if (!selected) {
+        this.touch(w, state.error);
+        await this.save();
+        return { ok: false, detail: state.error };
+      }
+      w.asker = null;
+      this.touch(w, `구현 담당 선택 확인: ${selected.provider}/${selected.model} · 추론 ${selected.thinking || "없음"}. 최초 담당 설정은 유지합니다.`);
+      const held = !!w.selectionPlan && w.inbox?.key === w.selectionPlan;
+      if (held && w.status === "needs_input") w.status = "active";
+      await this.save();
+      if (held) await this.advance(w);
+      return { ok: true, detail: held ? "보관한 계획을 구현 담당에게 전달합니다." : "구현 담당을 확정했습니다. 계획이 나오면 바로 전달합니다." };
+    });
+  }
   private assignRepositories(w: Workflow, roots: string[], preservePush = false) {
     if (JSON.stringify(roots) === JSON.stringify(w.repositories)) return;
     w.repositories = roots;
@@ -1203,6 +1234,7 @@ export class WorkflowEngine {
         id: w.id,
         contract: w.contract,
         selection: w.selection,
+        heldPlan: !!w.selectionPlan && w.inbox?.key === w.selectionPlan,
         planConflict: w.planConflict,
         planIssue: w.planIssue ? { key: w.planIssue.response.key, reason: w.planIssue.reason } : null,
         number: w.number,
@@ -1340,6 +1372,7 @@ export class WorkflowEngine {
         generalTransition: false,
         transitionTurns: [],
         limitPlan: "",
+        selectionPlan: "",
         resumeNote: "",
         generalHandoff: "",
         generalDelivery: null,
@@ -2649,7 +2682,9 @@ export class WorkflowEngine {
     } catch (error) { state.error = error instanceof Error ? error.message : String(error); }
     w.status = "needs_input";
     w.asker = "plan";
-    this.touch(w, state.error || `구현 담당 ${selectionStageLabel[state.stage]} 선택을 실제 답변으로 확정해야 합니다. 질문 도구로 선택하거나 실행 가능한 모델/추론을 직접 입력하세요.`);
+    this.touch(w, capabilities(w).screenSelection
+      ? `${state.error ? state.error + " " : ""}계획 카드 또는 자동 작업 화면에서 구현 제품·모델·추론을 선택하세요. 선택하면 보관한 계획을 바로 전달합니다.`
+      : state.error || `구현 담당 ${selectionStageLabel[state.stage]} 선택을 실제 답변으로 확정해야 합니다. 질문 도구로 선택하거나 실행 가능한 모델/추론을 직접 입력하세요.`);
     await this.save();
     return false;
   }
@@ -3079,6 +3114,7 @@ export class WorkflowEngine {
     w.repairs = 0;
     w.asker = null;
     w.limitPlan = "";
+    w.selectionPlan = "";
     w.resumeNote = "";
   }
   control(id: string, action: "pause" | "resume" | "general" | "resend" | "retry_compaction", message = "") {
@@ -3405,7 +3441,7 @@ export class WorkflowEngine {
       return;
     }
     // The plan held at the cycle limit is still dispatched; the note travels with it.
-    if (w.inbox && w.limitPlan && w.inbox.key === w.limitPlan) {
+    if (w.inbox && [w.limitPlan, w.selectionPlan].includes(w.inbox.key)) {
       w.resumeNote = w.resumeNote ? `${w.resumeNote}\n\n${note}` : note;
       return;
     }
@@ -4745,7 +4781,16 @@ export class WorkflowEngine {
     replaces: boolean,
   ) {
     const settings = await this.startSettings(w.cwd, w.plan?.config.provider ?? "claude");
-    if (capabilities(w).executorSelection && !(await this.selectionReady(w))) return;
+    if (capabilities(w).executorSelection && !(await this.selectionReady(w))) {
+      if (capabilities(w).screenSelection) {
+        // Like the cycle limit, keep the plan unread so the screen choice dispatches it once.
+        if (w.processed.at(-1) === inbox.key) w.processed.pop();
+        w.inbox = inbox;
+        w.selectionPlan = inbox.key;
+        await this.save();
+      }
+      return;
+    }
     if (splitGeneral(w) && (!w.generalState.settled || !w.generalState.selected)) {
       w.status = "needs_input";
       w.asker = "plan";
@@ -4807,6 +4852,7 @@ export class WorkflowEngine {
       }
       const note = w.resumeNote;
       w.limitPlan = "";
+      w.selectionPlan = "";
       w.resumeNote = "";
       this.queue(w, "execute", note ? `${d.next}\n\n${note}` : d.next, "execute", true);
     }

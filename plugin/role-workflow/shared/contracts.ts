@@ -108,6 +108,7 @@ export const archiveFinished = defineRpc({
 export const workflowViewSchema = z.object({
   contract: z.number().int().default(1),
   selection: executorSelectionSchema.nullable().default(null),
+  heldPlan: z.boolean().default(false),
   planConflict: planConflictSchema.nullable().default(null),
   planIssue: z.object({ key: z.string(), reason: z.string() }).nullable().default(null),
   id: z.string(),
@@ -174,6 +175,17 @@ export const setRepositories = defineRpc({
   name: "workflow.repositories",
   input: z.object({ id: z.string(), paths: repositoryPathsSchema }),
   output: z.object({ repositories: repositoryPathsSchema }),
+});
+export const selectExecutor = defineRpc({
+  name: "workflow.select-executor",
+  input: z.object({
+    id: z.string(),
+    provider: z.enum(["codex", "claude"]),
+    model: z.string().trim().min(1).max(120),
+    // An empty value is only valid for a model without thinking options.
+    thinking: z.string().trim().max(40).default(""),
+  }),
+  output: z.object({ ok: z.boolean(), detail: z.string() }),
 });
 export const control = defineRpc({
   name: "workflow.control",

@@ -173,19 +173,8 @@ export async function applySelectionBatch(state: ExecutorSelection, values: Part
   state.thinking = id; state.stage = "ready";
 }
 
-export function executorSelectionPrompt(catalogs: Record<string, readonly ExecutorModel[]>) {
-  const rows = Object.entries(catalogs).map(([provider, models]) => `${provider}:\n` + models
-    .filter(x => x.isSelectable !== false)
-    .map(x => `${provider}/${x.id}: 추론 ${(x.thinkingOptions ?? []).map(o => o.id).join(", ") || "추론 없음"}; 기본값 ${x.defaultThinkingOptionId ?? x.thinkingOptions?.find(o => o.isDefault)?.id ?? "확인 불가"}`).join("\n")).join("\n");
-  return `\n<paseo-executor-selection-v4>
-연합개발의 실제 변경 요청에만 적용한다. 질문·설명·읽기 전용 조사는 선택 없이 먼저 답하고 note로 흐름을 유지한다. 실제 변경의 조사·설계 착수 시 진행 방식은 단독 질문으로 실제 사용자 답변을 받은 뒤, 제품·모델·추론 3질문을 한 번의 질문 도구 호출에 함께 제시한다. 일반개발에서는 질문하지 않는다. 이미 유효한 선택은 재질문하지 않는다.
-question 또는 title은 아래 정해진 질문 제목과 정확히 같아야 한다. 설명·모델 목록·추론 범위·예시·접미사는 제목 밖의 안내나 선택지 설명에 둔다.
-세 항목은 같은 턴의 questions 배열에 넣는다. 앞 질문의 답변을 기다리며 호출을 나누지 않는다. 비동기 호출 반환은 답변이 아니다.
-1. 질문/header: ${EXECUTOR_QUESTIONS.provider.question}/${EXECUTOR_QUESTIONS.provider.header}. 선택지 Codex, Claude Code. 최초와 같은 제품도 허용한다.
-2. 질문/header: ${EXECUTOR_QUESTIONS.model.question}/${EXECUTOR_QUESTIONS.model.header}. 양쪽 제품의 provider/모델ID를 구별하여 제시한다. 선택지 수 제한이 있으면 직접 입력을 안내한다. 접미사를 붙이지 않는다.
-3. 질문/header: ${EXECUTOR_QUESTIONS.thinking.question}/${EXECUTOR_QUESTIONS.thinking.header}. 아래 모델별 지원 ID를 설명하고 ID, 추론 없음, 모델 기본값을 답변할 수 있게 한다. 추론 없음은 지원 옵션0개인 모델에만 유효하다. 모델 기본값은 카탈로그에 기본값이 확인되는 경우만 유효하며 확인 불가면 재질문한다. 옵션1개여도 명시적 답변이 필요하다.
-호스트가 제품·모델·추론 조합을 검증한다. 잘못되거나 누락된 항목만 후속 질문하고 유효한 답은 유지한다. 이미 확인한 최초 요청의 명시적 항목은 생략한다. 최초 기획 담당 설정은 유지하고 검증 완료 전에 실행 담당을 생성하지 않는다.
-저장 선호와 확인되지 않은 기본값으로 답변을 대체하지 않는다. 질문 도구/카탈로그 실패는 사용자에게 알리고 대기한다.
-${rows || "카탈로그를 읽지 못했습니다. 사용자에게 문제를 알리고 재조회 후 선택하세요."}
-</paseo-executor-selection-v4>`;
-}
+/** Contract 5: the executor is picked on the plugin screen, so no catalog or questions here. */
+export const SCREEN_SELECTION_PROMPT = `\n<paseo-executor-selection-v5>
+연합개발의 구현 담당(제품·모델·추론)은 사용자가 플러그인 화면에서 고른다. 질문 도구로 묻지 않고 모델 목록도 안내하지 않는다.
+계획이 확정되면 그대로 plan을 낸다. 선택 전이면 호스트가 계획을 보관했다가 선택 직후 한 번 전달한다. 최초 담당의 모델·추론은 바꾸지 않는다.
+</paseo-executor-selection-v5>`;

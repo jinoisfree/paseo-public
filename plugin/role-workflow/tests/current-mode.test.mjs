@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { WorkflowEngine } from "../server/engine.ts";
 import { EXECUTOR_QUESTIONS as Q } from "../shared/executor-selection.ts";
 import { composeCurrentPrompt } from "../server/roles.ts";
-import { executorSelectionPrompt } from "../server/executor-selection.ts";
+import { SCREEN_SELECTION_PROMPT } from "../server/executor-selection.ts";
 
 const block=(status,extra={})=>`<paseo-workflow>${JSON.stringify({status,summary:status,next:"구현 지시",handoff:"인계",checks:[],...extra})}</paseo-workflow>`;
 async function fixture(t,{mode="federated",provider="codex",ask=false,options=[{id:"low",label:"Low"},{id:"high",label:"High"}],contract=4}={}){
@@ -104,10 +104,10 @@ test("explicit first request is validated as answered choices and uses the selec
   const f=await fixture(t);await f.engine.ended("A","explicit",block("plan"),null,"연합개발\ncodex/builder 추론 high\n작업");
   assert.equal(f.created[0].provider,"codex/builder");assert.equal(f.created[0].thinkingOptionId,"high");
 });
-test("contract4 undecided prompts gate roles and sequential selection to federation",()=>{
-  const prompt=composeCurrentPrompt("codex","caller","undecided",null,executorSelectionPrompt({}),"");
+test("undecided prompts gate roles to federation and leave the executor to the screen",()=>{
+  const prompt=composeCurrentPrompt("codex","caller","undecided",null,SCREEN_SELECTION_PROMPT,"");
   assert.match(prompt,/실제 답변 전/);assert.match(prompt,/일반개발.*직접 조사·구현·자체 검증/);assert.match(prompt,/연합개발 전용/);
-  assert.match(prompt,/3질문을 한 호출/);assert.match(prompt,/카탈로그를 읽지 못/);
+  assert.match(prompt,/플러그인 화면에서 고른다/);assert.doesNotMatch(prompt,/3질문|카탈로그/);
 });
 
 test("native mode answer establishes standalone behavior without a permission event",async t=>{
@@ -291,4 +291,74 @@ for (const unread of [false,true]) test(`side question preserves live federation
  const after=await f.state();
  for(const field of ['pending','inbox','phase','plan','execute','selection','lastInstruction','lastPlan','lastResult','verdict','status']) assert.deepEqual(after[field],before[field],field);
  await f.restart();await f.engine.tick();assert.equal(f.sent.length,sends);
+});
+
+// Contract 5: the executor is picked on the plugin screen; an early plan waits for it.
+const ALL=[{id:"low",label:"Low"},{id:"medium",label:"Medium",isDefault:true},{id:"high",label:"High"},{id:"xhigh",label:"XHigh"},{id:"max",label:"Max"},{id:"ultra",label:"Ultra"}];
+test("contract5 plan before selection is held across restart and dispatched once after screen selection",async t=>{
+ const f=await fixture(t,{contract:5,options:ALL});
+ await f.finish("A","plan",{next:"보관 계획"});
+ let w=await f.state();assert.equal(f.created.length,0);assert.equal(w.status,"needs_input");assert.equal(w.selectionPlan,w.inbox.key);
+ assert.match(w.detail,/화면에서 구현 제품·모델·추론을 선택/);
+ assert.equal((await f.engine.list()).workflows[0].heldPlan,true);
+ await f.restart();await f.engine.tick();assert.equal(f.created.length,0);
+ const r=await f.engine.selectExecutor(f.id,{provider:"codex",model:"builder",thinking:"ultra"});
+ assert.equal(r.ok,true);w=await f.state();
+ assert.equal(f.created.length,1);assert.equal(w.execute.config.provider,"codex/builder");assert.equal(w.execute.config.thinkingOptionId,"ultra");
+ assert.deepEqual(w.plan.config,f.original);assert.equal(w.selectionPlan,"");assert.equal(w.inbox,null);
+ assert.equal(f.sent.filter(x=>x.id===w.execute.id).length,1);assert.match(f.sent.at(-1).prompt,/보관 계획/);
+ await f.restart();await f.engine.tick();assert.equal(f.created.length,1);assert.equal(f.sent.filter(x=>x.id===w.execute.id).length,1);
+ await assert.rejects(f.engine.selectExecutor(f.id,{provider:"claude",model:"builder",thinking:"high"}),/이미 생성/);
+});
+test("contract5 invalid screen choice keeps the plan held and creates nothing",async t=>{
+ const f=await fixture(t,{contract:5,options:ALL});await f.finish("A","plan");
+ for (const choice of [{provider:"codex",model:"builder",thinking:"bogus"},{provider:"codex",model:"missing",thinking:"high"},{provider:"codex",model:"builder",thinking:""}]) {
+  const r=await f.engine.selectExecutor(f.id,choice);assert.equal(r.ok,false);assert.ok(r.detail);
+  const w=await f.state();assert.equal(f.created.length,0);assert.equal(w.selectionPlan,w.inbox.key);
+ }
+ assert.equal((await f.engine.selectExecutor(f.id,{provider:"codex",model:"builder",thinking:"low"})).ok,true);assert.equal(f.created.length,1);
+});
+test("contract5 choice before any plan waits, and a model without thinking options accepts none",async t=>{
+ const f=await fixture(t,{contract:5,options:[]});
+ const r=await f.engine.selectExecutor(f.id,{provider:"codex",model:"builder",thinking:""});
+ assert.equal(r.ok,true);assert.equal(f.created.length,0);assert.equal((await f.state()).selection.thinking,"");
+ await f.finish("A","plan");const w=await f.state();assert.equal(f.created.length,1);assert.equal(w.execute.config.thinkingOptionId,undefined);
+});
+test("contract5 question notes never hold a plan or ask for selection; a newer plan replaces the held one",async t=>{
+ const f=await fixture(t,{contract:5,options:ALL});
+ await f.engine.ended("A","q",block("note"),null,"이 함수는 뭐 해?",false,"이 함수는 뭐 해?");
+ let w=await f.state();assert.equal(w.selectionPlan,"");assert.equal(w.inbox,null);assert.notEqual(w.status,"needs_input");
+ await f.finish("A","plan",{next:"첫 계획"});await f.finish("A","plan",{next:"새 계획"});
+ w=await f.state();assert.equal(w.selectionPlan,w.inbox.key);
+ await f.engine.selectExecutor(f.id,{provider:"codex",model:"builder",thinking:"high"});
+ w=await f.state();const sentToExecutor=f.sent.filter(x=>x.id===w.execute.id);
+ assert.equal(sentToExecutor.length,1);assert.match(sentToExecutor[0].prompt,/새 계획/);assert.doesNotMatch(sentToExecutor[0].prompt,/첫 계획/);
+});
+test("contract4 keeps its question path but may also pick on the screen, retiring the open question",async t=>{
+ const f=await fixture(t);await f.askQuestion("provider","open-q");
+ assert.equal((await f.engine.selectExecutor(f.id,{provider:"codex",model:"builder",thinking:"high"})).ok,true);
+ let s=(await f.state()).selection;assert.equal(s.pending,null);assert.ok(s.answered.includes("open-q"));
+ await f.engine.permissionResolved("A","open-q",{behavior:"allow",updatedInput:{answers:{[Q.provider.header]:"claude"}}});
+ s=(await f.state()).selection;assert.equal(s.provider,"codex");
+ await f.finish("A","plan");assert.equal(f.created.length,1);
+ // Contract 4 never holds a plan; that behavior stays unchanged.
+ const g=await fixture(t);await g.finish("A","plan");assert.equal((await g.state()).selectionPlan,"");
+});
+test("picker offers every thinking option and none only for models without options",async()=>{
+ const {pickerThinking,pickerDefaultThinking,picksExecutor}=await import("../shared/executor-picker.ts");
+ const model={id:"m",label:"M",isDefault:false,thinkingOptions:ALL.map(o=>({...o,isDefault:!!o.isDefault}))};
+ assert.deepEqual(pickerThinking(model).map(o=>o.id),["low","medium","high","xhigh","max","ultra"]);
+ assert.equal(pickerDefaultThinking(model),"medium");
+ assert.deepEqual(pickerThinking({...model,thinkingOptions:[]}).map(o=>o.id),[""]);
+ assert.equal(picksExecutor({contract:5,mode:"federated",status:"needs_input",executeAgentId:null}),true);
+ assert.equal(picksExecutor({contract:5,mode:"federated",status:"active",executeAgentId:"B"}),false);
+ assert.equal(picksExecutor({contract:5,mode:"general",status:"active",executeAgentId:null}),false);
+});
+test("prompt budget: new conversations stay well under the previous 10.5k characters",async()=>{
+ const {titlePrompt,progressPrompt,pushApprovalPrompt}=await import("../server/protocol.ts");
+ const trailing=titlePrompt()+progressPrompt()+pushApprovalPrompt();
+ const size=mode=>composeCurrentPrompt("claude","",mode,"/x/rules/0123456789ab/README.md",mode==="general"?"":SCREEN_SELECTION_PROMPT,trailing).length;
+ assert.ok(size("undecided")<=7500,String(size("undecided")));
+ assert.ok(size("federated")<=7300,String(size("federated")));
+ assert.ok(size("general")<=4000,String(size("general")));
 });

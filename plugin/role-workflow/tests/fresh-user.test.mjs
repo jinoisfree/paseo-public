@@ -213,13 +213,13 @@ async function assertRules(prompt, home) {
 }
 
 for (const provider of ["claude", "codex"]) for (const catalog of [false,true])
-test(`fresh ${provider} contract4 gates roles to federation with catalog=${catalog}`,async t=>{
+test(`fresh ${provider} contract5 gates roles to federation with catalog=${catalog}`,async t=>{
  const f=await freshUser(t,{catalog});const prompt=await f.prompt(provider);await assertRules(prompt,f.home);
  assert.match(prompt,/<paseo-work-mode-v4>/);assert.match(prompt,/실제 답변 전/);
  assert.match(block(prompt,"role-workflow"),/연합개발 전용/);assert.match(block(prompt,"automation"),/연합개발 전용/);
- assert.match(prompt,/<paseo-executor-selection-v4>/);assert.doesNotMatch(prompt,/<paseo-general-agent-v1>|<paseo-executor-model-v1>/);
- if(catalog){assert.match(prompt,/codex\/sample-model/);assert.match(prompt,/claude\/sample-model/);assert.deepEqual(f.calls,[["codex",{cwd:f.home}],["claude",{cwd:f.home}],["codex",{cwd:f.home}],["claude",{cwd:f.home}]]);}
- else assert.match(prompt,/카탈로그를 읽지 못/);
+ assert.match(prompt,/<paseo-executor-selection-v5>/);assert.doesNotMatch(prompt,/<paseo-general-agent-v1>|<paseo-executor-model-v1>|<paseo-executor-selection-v4>/);
+ // The executor is picked on the plugin screen, so starting never reads or lists the catalog.
+ assert.doesNotMatch(prompt,/sample-model|카탈로그를 읽지 못/);assert.deepEqual(f.calls,[]);
  assert.equal(f.errors.mock.callCount(),0);
 });
 
@@ -238,7 +238,7 @@ test("fresh managed executor receives rules and the execution role without mode 
 
 test("fresh general mode implements in the initial conversation without role or selection blocks",async t=>{
  const f=await freshUser(t,{general:true});const prompt=await f.prompt("claude");await assertRules(prompt,f.home);
- assert.match(prompt,/직접 조사·구현·자체 검증/);assert.doesNotMatch(prompt,/<paseo-role-workflow-v1>|<paseo-automation-v1>|<paseo-executor-selection-v4>/);
+ assert.match(prompt,/직접 조사·구현·자체 검증/);assert.doesNotMatch(prompt,/<paseo-role-workflow-v1>|<paseo-automation-v1>|<paseo-executor-selection-v[45]>/);
  assert.equal(f.errors.mock.callCount(),0);
 });
 
@@ -270,10 +270,10 @@ test("the selected replacement conversation receives general rules without askin
 });
 
 for (const provider of ["claude", "codex"])
-  test(`fresh ${provider} federation enrollment uses contract 4 and exactly one verdict instruction`, async (t) => {
+  test(`fresh ${provider} federation enrollment uses contract 5 and exactly one verdict instruction`, async (t) => {
     const f = await freshUser(t);
     const result = await f.enroll(provider);
-    assert.equal(result.state.contract, 4);
+    assert.equal(result.state.contract, 5);
     assert.equal(result.state.mode, "federated");
     assert.equal(result.state.completeRepairs, 0);
     assert.equal(
@@ -282,12 +282,12 @@ for (const provider of ["claude", "codex"])
     );
   });
 
-test("fresh saved general enrollment uses contract4 standalone behavior",async t=>{
+test("fresh saved general enrollment uses contract5 standalone behavior",async t=>{
  const f=await freshUser(t,{general:true});const result=await f.enroll("claude");
- assert.equal(result.state.contract,4);assert.equal(result.state.mode,"general");assert.equal(result.state.execute,null);
+ assert.equal(result.state.contract,5);assert.equal(result.state.mode,"general");assert.equal(result.state.execute,null);
  assert.doesNotMatch(result.prompt,/<paseo-automation-v1>/);
 });
-test("fresh ask-mode general choice retains contract4 without role separation",async t=>{
+test("fresh ask-mode general choice retains contract5 without role separation",async t=>{
  const f=await freshUser(t);const result=await f.enroll("codex","일반개발");
- assert.equal(result.state.mode,"general");assert.equal(result.state.contract,4);assert.equal(result.state.execute,null);
+ assert.equal(result.state.mode,"general");assert.equal(result.state.contract,5);assert.equal(result.state.execute,null);
 });

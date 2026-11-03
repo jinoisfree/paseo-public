@@ -1,4 +1,6 @@
 import { selectionStageLabel } from "../shared/executor-selection";
+import { picksExecutor } from "../shared/executor-picker";
+import { ExecutorPicker } from "./executor-picker";
 import { generalAgentLabel } from "../shared/general-agent";
 import { capabilities } from "../shared/capabilities";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -690,6 +692,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
           {w.selection && capabilities(w).executorSelection && (
             <Text style={s.muted}>구현 선택: {selectionStageLabel[w.selection.stage ?? "provider"]} {w.selection.error}</Text>
           )}
+          {picksExecutor(w) && <ExecutorPicker workflow={w} theme={theme} onChanged={() => void load()} />}
           {w.planConflict && w.planConflict.stage !== "resolved" && (
             <Text style={s.text}>적용 보류 계획: {w.planConflict.next}{"\n"}{w.planConflict.reason}{w.planConflict.rejected ? `\n${w.planConflict.rejected.reason}` : ""}</Text>
           )}

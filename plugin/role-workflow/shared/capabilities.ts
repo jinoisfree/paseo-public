@@ -8,5 +8,7 @@ export function capabilities(w: { contract?: number; mode: string }) {
     automatic: w.mode === "federated" || splitGeneral,
     standalone: current && w.mode === "general",
     executorSelection: current && w.mode === "federated",
+    // Contract 5 picks the executor on the plugin screen and holds an early plan until then.
+    screenSelection: (w.contract ?? 1) >= 5 && w.mode === "federated",
   };
 }

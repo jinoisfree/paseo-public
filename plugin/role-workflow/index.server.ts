@@ -1,4 +1,4 @@
-import { executorSelectionPrompt } from "./server/executor-selection";
+import { SCREEN_SELECTION_PROMPT } from "./server/executor-selection";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import type { PaseoApi, PaseoAgentConfig } from "@getpaseo/client";
 import { randomUUID } from "node:crypto";
@@ -23,6 +23,7 @@ import {
   configure,
   forgetProject,
   control,
+  selectExecutor,
   testNotification,
   settingsSchema,
   type Settings,
@@ -110,13 +111,7 @@ export default function contribute(server: PluginServerContext) {
       const addsTitle = !!mode && settings.koreanTitle;
       const titles =
         titlePrompts(addsTitle, automated && settings.titleMarker) + pushApprovalPrompt();
-      let currentSelection = "";
-      if (current && mode !== "general") {
-        const catalogs = await Promise.allSettled((["codex", "claude"] as const).map(async base =>
-          [base, await port.models!(base, request.config.cwd)] as const));
-        currentSelection = executorSelectionPrompt(Object.fromEntries(catalogs.flatMap(result =>
-          result.status === "fulfilled" ? [result.value] : [])));
-      }
+      const currentSelection = current && mode !== "general" ? SCREEN_SELECTION_PROMPT : "";
       const systemPrompt = current && mode
         ? composeCurrentPrompt(provider, request.config.systemPrompt, mode, rulesReadme, currentSelection, titles)
         : ready
@@ -190,7 +185,7 @@ export default function contribute(server: PluginServerContext) {
         const snapshot = await port.inspect(agent.id).catch(() => null);
         if (!snapshot) continue;
         await engine
-          .enroll(snapshot, seed.config, seed.env, seed.mode, seed.titled, 4)
+          .enroll(snapshot, seed.config, seed.env, seed.mode, seed.titled, 5)
           .catch(report);
         return;
       }
@@ -351,6 +346,10 @@ export default function contribute(server: PluginServerContext) {
   server.handle(adoptReviewPins, async (input, context) => {
     attach(context.paseo);
     return engine.adoptReviewPins(input.id, input.key, input.pins);
+  });
+  server.handle(selectExecutor, async (input, context) => {
+    attach(context.paseo);
+    return engine.selectExecutor(input.id, input);
   });
   server.handle(control, async (input, context) => {
     attach(context.paseo);

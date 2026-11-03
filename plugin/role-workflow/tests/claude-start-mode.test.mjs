@@ -141,7 +141,9 @@ for (const provider of ["claude", "codex"])
           assert.match(result.config.systemPrompt,/진행 방식을 단독 질문/);
           assert.match(result.config.systemPrompt,/일반개발, 연합개발/);
           assert.doesNotMatch(result.config.systemPrompt,/저장된 설정을 사용하며 다시 묻지 않는다/);
-          assert.match(result.config.systemPrompt,new RegExp(`${executor}/saved`));
+          // Contract 5 leaves the executor to the plugin screen; no catalog enters the prompt.
+          assert.doesNotMatch(result.config.systemPrompt,new RegExp(`${executor}/saved`));
+          assert.match(result.config.systemPrompt,/플러그인 화면에서 고른다/);
         } else assert.doesNotMatch(result.config.systemPrompt,/첫 응답 전에 질문 도구로 진행 방식/);
         const saved = await f.enroll(result);
         assert.equal(saved.workflows[0].mode, askMode ? "undecided" : mode);
@@ -191,22 +193,23 @@ test("old settings gain the Claude start default and an empty value stays empty"
 });
 
 for(const provider of ["claude","codex"])for(const askMode of [true,false])
-test(`${provider} startup uses bundled product/model/thinking questions askMode=${askMode}`,async t=>{
- const f=await fixture(t);f.context.paseo.providers.listModels=async()=>({models:[{id:"model",label:"Model",thinkingOptions:[{id:"medium",label:"Medium"}]}]});
+test(`${provider} startup leaves product/model/thinking to the plugin screen askMode=${askMode}`,async t=>{
+ const f=await fixture(t);let listed=0;f.context.paseo.providers.listModels=async()=>{listed++;return {models:[{id:"model",label:"Model",thinkingOptions:[{id:"medium",label:"Medium"}]}]};};
  await f.configure({askMode,askExecutorModel:true});const {config}=await f.create({provider});
- assert.match(config.systemPrompt,/3질문을 한 번의 질문 도구 호출/);assert.match(config.systemPrompt,/실제 사용자 답변/);
- assert.match(config.systemPrompt,/3질문을 한 호출/);assert.match(config.systemPrompt,/codex\/model/);assert.match(config.systemPrompt,/claude\/model/);
+ assert.match(config.systemPrompt,/<paseo-executor-selection-v5>/);assert.match(config.systemPrompt,/플러그인 화면에서 고른다/);
+ assert.doesNotMatch(config.systemPrompt,/<paseo-executor-selection-v4>|3질문|codex\/model|claude\/model/);assert.equal(listed,0);
  assert.doesNotMatch(config.systemPrompt,/모델·추론 두 질문을 한 번의 호출/);
  if(askMode)assert.match(config.systemPrompt,/진행 방식을 단독 질문/);else assert.match(config.systemPrompt,/진행 방식은 연합개발이다/);
 });
-test("an unavailable model catalog waits without a saved executor fallback",async t=>{
+test("startup never reads the catalog or puts a saved executor in the prompt",async t=>{
  const f=await fixture(t,{mode:"federated",codex:{model:"codex/saved",thinking:"high"}});
+ f.context.paseo.providers.listModels=async()=>{throw Error("catalog offline");};
  await f.configure({askMode:true,askExecutorModel:true});const {config}=await f.create();
- assert.match(config.systemPrompt,/카탈로그 실패는 사용자에게 알리고 대기/);
+ assert.match(config.systemPrompt,/<paseo-executor-selection-v5>/);assert.doesNotMatch(config.systemPrompt,/codex\/saved/);
  assert.doesNotMatch(config.systemPrompt,/저장된 설정을 사용하며 다시 묻지 않는다/);
 });
-test("the legacy model-question switch cannot skip contract4 bundled selection",async t=>{
+test("the legacy model-question switch cannot skip screen selection",async t=>{
  const f=await fixture(t);await f.configure({askMode:true,askExecutorModel:false});const {config}=await f.create();
- assert.match(config.systemPrompt,/진행 방식을 단독 질문/);assert.match(config.systemPrompt,/3질문을 한 번의 질문 도구 호출/);
+ assert.match(config.systemPrompt,/진행 방식을 단독 질문/);assert.match(config.systemPrompt,/<paseo-executor-selection-v5>/);
  assert.doesNotMatch(config.systemPrompt,/실행 모델·추론은 저장된 설정을 사용/);
 });
