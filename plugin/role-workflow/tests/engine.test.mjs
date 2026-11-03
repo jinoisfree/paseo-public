@@ -2583,6 +2583,34 @@ test("a steered turn whose event lost the delivery answers it when the delivery 
   assert.equal((await stored(g)).pending.id, sent);
 });
 
+test("a failed instruction the user carried on in its conversation is answered, not resent", async (t) => {
+  const f = await fixture(t);
+  await f.finish("planner", "p1", "plan");
+  const executor = f.created[0].id;
+  f.agents.get(executor).status = "idle";
+  await f.engine.ended(executor, "fail", "", "Selected model is at capacity.", "", false,
+    f.sent[0].prompt, false, [f.sent[0].messageId]);
+  let w = await stored(f);
+  assert.equal(w.status, "paused");
+  assert.equal(w.pending.retry, true);
+  await f.engine.ended(executor, "own", decision("result"), null, "", false, "이어서진행해", false, ["own"]);
+  assert.deepEqual(f.sent.map((m) => m.id), [executor, "planner"], "the review follows, the instruction is not resent");
+  w = await stored(f);
+  assert.equal(w.phase, "review");
+  assert.equal(w.transientPause, null);
+
+  // Chat that decides nothing leaves the resend waiting.
+  const g = await fixture(t);
+  await g.finish("planner", "p1", "plan");
+  const other = g.created[0].id;
+  g.agents.get(other).status = "idle";
+  await g.engine.ended(other, "fail", "", "Selected model is at capacity.", "", false,
+    g.sent[0].prompt, false, [g.sent[0].messageId]);
+  await g.engine.ended(other, "chat", "블록 없는 잡담", null, "", false, "뭐해?", false, ["chat"]);
+  assert.equal((await stored(g)).pending.stage, "queued");
+  assert.equal(g.sent.length, 1);
+});
+
 test("a plan held back while executing is reviewed once the instruction ended unreviewed", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "p1", "plan");

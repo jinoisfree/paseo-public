@@ -127,6 +127,8 @@ const pendingSchema = z.object({
   stage: z.enum(["queued", "sending", "sent"]),
   // The executor's instruction from a plan, as opposed to a follow-up message.
   instruction: z.boolean().default(false),
+  // A resend after the turn failed; its addressee already has the message.
+  retry: z.boolean().optional(),
 });
 const baselineSchema = z.object({
   head: z.string(),
@@ -1575,6 +1577,10 @@ export class WorkflowEngine {
     if (w.inbox) this.seen(w, w.inbox.key);
     const resumed = !chatBlocked && w.status === "needs_input";
     if (resumed) w.status = "active";
+    // A failure pause ends when the user carries the failed instruction on to a decision.
+    if (w.status === "paused" && w.pending?.retry && w.pending.stage === "queued" &&
+        w.pending.role === role && failed === null && this.sideDecision(w, role, text))
+      w.status = "active";
     if (!w.goal) w.goal = goal.slice(0, 32000);
     w.inbox = { agentId, key, text, failed, compacted, canceled, resumed, answers };
     await this.save();
@@ -4493,7 +4499,7 @@ export class WorkflowEngine {
       this.seen(w, inbox.key);
       w.inbox = null;
       if (!inbox.canceled) await this.recordTransient(w, role, inbox.failed, "turn");
-      if (w.transientPause && w.transientPause.attempts < 5)
+      if (w.transientPause && w.transientPause.attempts < 5) {
         this.queue(
           w,
           role,
@@ -4501,6 +4507,8 @@ export class WorkflowEngine {
           pending?.phase ?? w.phase,
           pending?.instruction,
         );
+        w.pending!.retry = true;
+      }
       // A turn the user stopped is picked up by their next message; a failure waits for a resume.
       w.status = inbox.canceled ? "needs_input" : "paused";
       this.touch(
@@ -4543,6 +4551,15 @@ export class WorkflowEngine {
    */
   private async beside(w: Workflow, role: Role, inbox: Inbox, pending: Pending) {
     const d = inbox.failed === null ? this.sideDecision(w, role, inbox.text) : null;
+    // The user carried a failed instruction on in its own conversation. That turn answers it,
+    // and the queued resend would only repeat the work.
+    if (d && pending.retry && pending.stage === "queued" && pending.role === role) {
+      w.pending = null;
+      w.transientPause = null;
+      w.status = "active";
+      await this.act(w, role, d, this.record(w, role, d, inbox), inbox);
+      return;
+    }
     if (d?.status === "plan" && role === "plan" && pending.role === "plan" &&
         pending.stage !== "queued") {
       const reason = "계획 응답의 전달 연관성을 확인하지 못했습니다. 응답을 보존했습니다. 원 대화의 수신 내역을 확인한 뒤 재개하면 같은 응답의 이력을 다시 조회합니다.";
