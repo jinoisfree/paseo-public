@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import os
+import plistlib
 import pwd
 from pathlib import Path
 import subprocess
@@ -28,6 +29,7 @@ class SetupTests(unittest.TestCase):
         (self.root/'launchd').mkdir()
         (self.root/'launchd/fold-reapply.plist.in').write_bytes((Path(__file__).resolve().parents[1]/'launchd/fold-reapply.plist.in').read_bytes())
         (self.root/'launchd/fold-reapply.daemon.plist.in').write_bytes((Path(__file__).resolve().parents[1]/'launchd/fold-reapply.daemon.plist.in').read_bytes())
+        (self.root/'launchd/auto-update.plist.in').write_bytes((Path(__file__).resolve().parents[1]/'launchd/auto-update.plist.in').read_bytes())
         self.config=self.home/'.config/paseo-public/config.json'
         self.commands=[]
         self.env=mock.patch.dict(os.environ,{'HOME':str(self.home),'PASEO_PUBLIC_CONFIG':str(self.config),'PASEO_PUBLIC_NODE':str(self.node)})
@@ -121,6 +123,70 @@ class SetupTests(unittest.TestCase):
         self.commands.clear();self.assertEqual(self.execute('uninstall'),0)
         self.assertTrue(any('remove' in command for command in self.commands))
         self.assertEqual((data/'state.json').read_text(),'keep');self.assertTrue(self.config.exists())
+
+    def test_auto_update_calendar_and_account_paths(self):
+        config={'logsDir':str(self.home/'logs & data')}
+        spec=setup.launch_plist(config,str(self.node),self.home,auto_update=True)
+        self.assertEqual(spec['Label'],'io.github.jinoisfree.paseo-public.auto-update')
+        self.assertEqual(spec['StartCalendarInterval'],{'Hour':4,'Minute':30})
+        self.assertIs(spec['RunAtLoad'],False)
+        self.assertNotIn('StartInterval',spec)
+        self.assertEqual(spec['ProgramArguments'][1],str(self.root/'scripts/auto-update.py'))
+        self.assertEqual(spec['EnvironmentVariables']['HOME'],str(self.home))
+        self.assertEqual(spec['EnvironmentVariables']['PASEO_HOME'],str(self.home/'.paseo'))
+        self.assertEqual(spec['StandardOutPath'],str(self.home/'logs & data/auto-update/stdout.log'))
+        self.assertNotIn('__',json.dumps(spec))
+
+    def test_auto_update_dry_install_and_uninstall_do_not_write_or_contact_daemon(self):
+        before=sorted(str(path.relative_to(self.home)) for path in self.home.rglob('*'))
+        self.assertEqual(self.execute('install','--with-auto-update','--with-fold-reapply','--dry-run'),0)
+        self.assertEqual(self.execute('uninstall','--with-auto-update','--dry-run'),0)
+        self.assertEqual(sorted(str(path.relative_to(self.home)) for path in self.home.rglob('*')),before)
+        self.assertEqual(self.commands,[])
+
+    def test_auto_update_install_is_opt_in_and_identical_plist_is_not_rewritten(self):
+        self.ready();self.execute('install')
+        plist=self.home/'Library/LaunchAgents'/ (setup.AUTO_UPDATE_LABEL+'.plist')
+        self.assertFalse(plist.exists())
+        self.execute('install','--with-auto-update')
+        before=plist.stat().st_mtime_ns
+        self.assertEqual(plistlib.loads(plist.read_bytes())['StartCalendarInterval'],{'Hour':4,'Minute':30})
+        (self.root/'node_modules/.bin').mkdir(parents=True)
+        (self.root/'node_modules/.bin/tsx').write_text('fixture')
+        self.commands.clear();self.execute('install','--with-auto-update')
+        self.assertEqual(plist.stat().st_mtime_ns,before)
+        self.assertEqual(self.commands,[])
+
+    def test_auto_update_only_uninstall_keeps_plugin_registration_and_data(self):
+        self.ready();self.execute('install','--with-auto-update')
+        account=self.home/'.paseo/config.json';before=account.read_bytes()
+        workflow=self.home/'.paseo/role-workflow/state.json'
+        workflow.parent.mkdir();workflow.write_text('keep')
+        self.commands.clear();self.execute('uninstall','--with-auto-update')
+        self.assertEqual(account.read_bytes(),before)
+        self.assertEqual(workflow.read_text(),'keep')
+        self.assertFalse((self.home/'Library/LaunchAgents'/(setup.AUTO_UPDATE_LABEL+'.plist')).exists())
+        self.assertEqual(len(self.commands),1)
+        self.assertIn('bootout',self.commands[0])
+
+    def test_full_uninstall_also_removes_auto_update_agent(self):
+        self.ready();self.execute('install','--with-auto-update')
+        self.commands.clear();self.execute('uninstall')
+        self.assertFalse((self.home/'Library/LaunchAgents'/(setup.AUTO_UPDATE_LABEL+'.plist')).exists())
+        self.assertTrue(any('remove' in command for command in self.commands))
+        self.assertTrue(any('bootout' in command for command in self.commands))
+
+    def test_foreign_auto_update_agent_is_neither_overwritten_nor_removed(self):
+        self.ready()
+        plist=self.home/'Library/LaunchAgents'/(setup.AUTO_UPDATE_LABEL+'.plist')
+        plist.parent.mkdir(parents=True)
+        content=plistlib.dumps({'ProgramArguments':['python3','/other/scripts/auto-update.py']})
+        plist.write_bytes(content)
+        with self.assertRaisesRegex(RuntimeError,'다른 저장소'):
+            self.execute('install','--with-auto-update')
+        self.execute('uninstall','--with-auto-update')
+        self.assertEqual(plist.read_bytes(),content)
+        self.assertEqual(self.commands,[])
 
 
 if __name__=='__main__':unittest.main()

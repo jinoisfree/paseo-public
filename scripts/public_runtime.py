@@ -6,6 +6,7 @@ import shutil
 
 ROOT = Path(__file__).resolve().parents[1]
 LABEL = 'io.github.jinoisfree.paseo-public.fold-reapply'
+AUTO_UPDATE_LABEL = 'io.github.jinoisfree.paseo-public.auto-update'
 
 
 def config_path():
@@ -33,6 +34,14 @@ def data_root(config=None):
 def logs_root(config=None):
     config = load_config() if config is None else config
     return Path(config.get('logsDir', Path.home()/'Library/Logs/paseo-public')).expanduser()
+
+
+def auto_update_data(config=None):
+    return data_root(config)/'auto-update'
+
+
+def auto_update_logs(config=None):
+    return logs_root(config)/'auto-update'
 
 
 def node_executable(config=None):

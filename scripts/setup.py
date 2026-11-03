@@ -14,7 +14,7 @@ import subprocess
 import sys
 from xml.sax.saxutils import escape
 from fold_daemon_setup import deploy
-from public_runtime import ROOT, LABEL, load_config, config_path, data_root, logs_root, node_executable, app_path
+from public_runtime import ROOT, LABEL, AUTO_UPDATE_LABEL, load_config, config_path, data_root, logs_root, auto_update_logs, node_executable, app_path
 
 
 def run(command, home, *, check=True, capture=False):
@@ -41,22 +41,42 @@ def read_paseo(home):
     return json.loads(file.read_text()) if file.exists() else {}
 
 
-def same_plugin(entry):
-    return entry.get('source') == 'directory' and Path(entry.get('path', '')).resolve() == (ROOT/'plugin/role-workflow').resolve()
+def same_plugin(entry, root=None):
+    root = ROOT if root is None else root
+    return entry.get('source') == 'directory' and Path(entry.get('path', '')).resolve() == (root/'plugin/role-workflow').resolve()
 
 
-def launch_plist(config, node, home, owner=None):
+def launch_plist(config, node, home, owner=None, *, auto_update=False):
     values = {'__PYTHON__':config.get('python') or os.environ.get('PASEO_PUBLIC_PYTHON') or shutil.which('python3') or sys.executable,'__REPOSITORY__':str(ROOT),'__HOME__':str(home),
               '__PATH__':str(Path(node).parent)+os.pathsep+os.environ.get('PATH','/usr/bin:/bin'),
               '__APP__':str(app_path(config)),'__PASEO_HOME__':str(home/'.paseo'),
               '__LOGS__':str(logs_root(config)), '__CONFIG__':str(config_path())}
     if owner is not None:
         values.update(__USER__=owner.pw_name, __GROUP__=grp.getgrgid(owner.pw_gid).gr_name)
-    template = 'fold-reapply.daemon.plist.in' if owner is not None else 'fold-reapply.plist.in'
+    template = 'auto-update.plist.in' if auto_update else ('fold-reapply.daemon.plist.in' if owner is not None else 'fold-reapply.plist.in')
     text = (ROOT/'launchd'/template).read_text()
     for key,value in values.items():
         text = text.replace(key,escape(value))
     return plistlib.loads(text.encode())
+
+
+def remove_agent(label, script, home):
+    plist = home/'Library/LaunchAgents'/(label+'.plist')
+    if plist.exists():
+        current = plistlib.loads(plist.read_bytes())
+        if str(ROOT/'scripts'/script) in current.get('ProgramArguments', []):
+            run(['/bin/launchctl', 'bootout', f'gui/{os.getuid()}/{label}'], home, check=False)
+            plist.unlink()
+
+
+def install_agent(label, generated, home):
+    plist = home/'Library/LaunchAgents'/(label+'.plist')
+    if not plist.exists() or plist.read_bytes() != generated:
+        if plist.exists():
+            run(['/bin/launchctl', 'bootout', f'gui/{os.getuid()}/{label}'], home, check=False)
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        plist.write_bytes(generated)
+        run(['/bin/launchctl', 'bootstrap', f'gui/{os.getuid()}', plist], home)
 
 
 @contextlib.contextmanager
@@ -101,10 +121,13 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['install','uninstall'])
     parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--with-auto-update', action='store_true', help='daily 04:30 updater; with uninstall, remove only this agent')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--with-fold-reapply', action='store_true')
     mode.add_argument('--fold-reapply-system', action='store_true', help='sudo: install only the app-owner system watcher; --dry-run needs no sudo')
     args = parser.parse_args(argv)
+    if args.with_auto_update and args.fold_reapply_system:
+        parser.error('--with-auto-update는 계정별 LaunchAgent 옵션입니다.')
     if sys.version_info < (3,12):
         raise RuntimeError('Python 3.12 이상이 필요합니다.')
     if args.fold_reapply_system:
@@ -120,11 +143,10 @@ def main(argv=None):
     paseo = cli_path(config)
     account = read_paseo(home)
     entry = account.get('plugins',{}).get('role-workflow')
-    plist = home/'Library/LaunchAgents'/(LABEL+'.plist')
     plan = {'action':args.action,'home':str(home),'plugin':str(ROOT/'plugin/role-workflow'),
             'node':node,'python':sys.executable,'paseo':str(paseo),'config':str(config_path()),
             'data':str(data_root(config)),'logs':str(logs_root(config)),
-            'withFoldReapply':args.with_fold_reapply,'dryRun':args.dry_run}
+            'withFoldReapply':args.with_fold_reapply,'withAutoUpdate':args.with_auto_update,'dryRun':args.dry_run}
     if entry and not same_plugin(entry) and args.action == 'install':
         raise RuntimeError('다른 경로의 role-workflow가 이미 등록돼 있습니다. 현재 작업이 끝난 뒤 기존 등록을 확인하세요.')
     print(json.dumps(plan,ensure_ascii=False,indent=2))
@@ -133,13 +155,11 @@ def main(argv=None):
         return 0
     command = lambda *arguments: [paseo,*arguments,'--home',home/'.paseo']
     if args.action == 'uninstall':
-        if entry and same_plugin(entry):
+        if not args.with_auto_update and entry and same_plugin(entry):
             run(command('plugin','remove','role-workflow'),home)
-        if plist.exists():
-            current = plistlib.loads(plist.read_bytes())
-            if str(ROOT/'scripts/auto-reapply-fold.py') in current.get('ProgramArguments',[]):
-                run(['/bin/launchctl','bootout',f'gui/{os.getuid()}/{LABEL}'],home,check=False)
-                plist.unlink()
+        remove_agent(AUTO_UPDATE_LABEL, 'auto-update.py', home)
+        if not args.with_auto_update:
+            remove_agent(LABEL, 'auto-reapply-fold.py', home)
         print('등록 해제 완료. 설정·워크플로·빌드·백업·로그는 삭제하지 않았습니다.')
         return 0
     if not (home/'.paseo/paseo.pid').exists():
@@ -153,6 +173,10 @@ def main(argv=None):
         conflict = run(['/bin/launchctl','print',f'gui/{os.getuid()}/com.jino.paseo-fold-reapply'],home,check=False,capture=True)
         if conflict.returncode == 0:
             raise RuntimeError('기존 접기 감시 에이전트가 있습니다. 중복 등록하지 않습니다.')
+    if args.with_auto_update:
+        updater = home/'Library/LaunchAgents'/(AUTO_UPDATE_LABEL+'.plist')
+        if updater.exists() and str(ROOT/'scripts/auto-update.py') not in plistlib.loads(updater.read_bytes()).get('ProgramArguments', []):
+            raise RuntimeError('다른 저장소의 자동 업데이트가 이미 등록돼 있습니다.')
     lock = hashlib.sha256((ROOT/'package-lock.json').read_bytes()).hexdigest()
     if not (ROOT/'node_modules/.bin/tsx').exists() or config.get('dependenciesLock') != lock:
         npm = Path(node).parent/'npm'
@@ -178,13 +202,10 @@ def main(argv=None):
     if args.with_fold_reapply:
         data_root(config).mkdir(parents=True,exist_ok=True)
         logs_root(config).mkdir(parents=True,exist_ok=True)
-        generated = plistlib.dumps(launch_plist(config,node,home),sort_keys=False)
-        if not plist.exists() or plist.read_bytes() != generated:
-            if plist.exists():
-                run(['/bin/launchctl','bootout',f'gui/{os.getuid()}/{LABEL}'],home,check=False)
-            plist.parent.mkdir(parents=True,exist_ok=True)
-            plist.write_bytes(generated)
-            run(['/bin/launchctl','bootstrap',f'gui/{os.getuid()}',plist],home)
+        install_agent(LABEL, plistlib.dumps(launch_plist(config,node,home),sort_keys=False), home)
+    if args.with_auto_update:
+        auto_update_logs(config).mkdir(parents=True, exist_ok=True)
+        install_agent(AUTO_UPDATE_LABEL, plistlib.dumps(launch_plist(config,node,home,auto_update=True),sort_keys=False), home)
     print('설치 완료. 폴더 열기는 사이드바/커맨드 센터에서 사용할 수 있습니다.')
     return 0
 
