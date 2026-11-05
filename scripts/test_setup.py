@@ -334,5 +334,70 @@ class SetupTests(unittest.TestCase):
         self.launchctl_code=113
         with self.assertRaisesRegex(RuntimeError,'LaunchAgent가 로드돼 있지 않습니다\\(113\\)'):self.execute('install','--with-auto-update')
 
+    def link(self,name,target):
+        place=self.home/name;place.mkdir(parents=True,exist_ok=True)
+        (place/'paseo').symlink_to(target)
+        return place/'paseo'
+
+    def unreadable(self,link):
+        real=os.readlink
+        def readlink(path,*arguments,**keywords):
+            if str(path)==str(link):raise PermissionError(13,'Permission denied')
+            return real(path,*arguments,**keywords)
+        return mock.patch.object(setup.os,'readlink',side_effect=readlink)
+
+    def bundle(self):
+        app=self.home/'Paseo.app';bundled=app/'Contents/Resources/bin/paseo';bundled.parent.mkdir(parents=True,exist_ok=True)
+        bundled.write_text('x');return app,bundled
+
+    def test_detected_cli_is_not_saved_and_user_value_is_kept(self):
+        self.ready();self.assertEqual(self.execute('install'),0)
+        self.assertNotIn('paseo',json.loads(self.config.read_text()))
+        self.config.write_text(json.dumps({'paseo':'/custom/paseo','note':1}))
+        self.assertEqual(self.execute('install'),0)
+        saved=json.loads(self.config.read_text())
+        self.assertEqual((saved['paseo'],saved['note']),('/custom/paseo',1))
+
+    def test_links_to_the_bundle_or_unreadable_links_are_replaced_by_the_bundle(self):
+        app,bundled=self.bundle();other=self.home/'custom';other.write_text('x')
+        to_bundle=self.link('a',bundled);unreadable=self.link('b',other);readable=self.link('c',other)
+        with mock.patch.object(setup.shutil,'which',return_value=None):
+            self.assertEqual(original_cli_path({'app':str(app),'paseo':str(to_bundle)}),bundled)
+            with self.unreadable(unreadable):
+                self.assertEqual(original_cli_path({'app':str(app),'paseo':str(unreadable)}),bundled)
+            self.assertEqual(original_cli_path({'app':str(app),'paseo':str(readable)}),readable)  # a user's own link is respected
+            self.assertEqual(original_cli_path({'app':str(app),'paseo':str(other)}),other)  # so is a plain executable
+        with mock.patch.object(setup.shutil,'which',return_value=str(unreadable)),self.unreadable(unreadable):
+            self.assertEqual(original_cli_path({'app':str(app)}),bundled)
+        with self.unreadable(unreadable):  # without a bundle there is nothing to substitute
+            self.assertEqual(original_cli_path({'app':str(self.home/'none.app'),'paseo':str(unreadable)}),unreadable)
+
+    def test_unreadable_path_link_warns_but_install_continues_and_dry_run_reports_it(self):
+        self.ready();link=self.link('bin',self.paseo)
+        with mock.patch.dict(os.environ,{'PATH':str(link.parent)+os.pathsep+os.environ['PATH']}),self.unreadable(link):
+            errors=io.StringIO()
+            with contextlib.redirect_stderr(errors):self.assertEqual(self.execute('install'),0)
+            text=errors.getvalue();self.assertEqual(len(text.splitlines()),1)
+            owner=pwd.getpwuid(link.lstat().st_uid).pw_name
+            for part in (str(link),owner,'출력 없이 실패할 수 있습니다',f'chmod -h 755 {link}'):self.assertIn(part,text)
+            code,output,error=self.capture('install','--dry-run')
+            self.assertEqual((code,error),(0,None))
+            self.assertIn(str(link),json.loads(output[:output.index('DRY RUN')])['pathCliWarning'])
+        with mock.patch.dict(os.environ,{'PATH':str(link.parent)}):  # readable link: no warning
+            self.assertIsNone(setup.path_cli_warning())
+        with mock.patch.dict(os.environ,{'PATH':str(self.home/'nowhere')}):
+            self.assertIsNone(setup.path_cli_warning())
+
+    def test_summary_reflects_the_actual_auto_update_agent(self):
+        self.ready()
+        agent=self.home/'Library/LaunchAgents'/(setup.AUTO_UPDATE_LABEL+'.plist')
+        def summary(*arguments):
+            code,text,error=self.capture(*arguments);self.assertEqual((code,error),(0,None));return text.splitlines()[-1]
+        self.assertIn('자동 업데이트: 미등록',summary('install'))
+        self.assertIn('자동 업데이트: 등록됨',summary('install','--with-auto-update'))
+        self.assertIn('자동 업데이트: 등록됨',summary('install'))  # still registered although the option was not given
+        agent.write_bytes(plistlib.dumps({'ProgramArguments':['python3','/other/scripts/auto-update.py']}))
+        self.assertIn('자동 업데이트: 다른 저장소에 등록됨',summary('install'))
+
 
 if __name__=='__main__':unittest.main()

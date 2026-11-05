@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import plistlib
 import subprocess
 import sys
 import tempfile
@@ -360,7 +361,7 @@ class AutoUpdateTests(unittest.TestCase):
         plist=self.home/'Library/LaunchAgents'/(auto.AUTO_UPDATE_LABEL+'.plist')
         plist.parent.mkdir(parents=True)
         for scripts,expected in (('/other/scripts/auto-update.py',False),(str(self.root/'scripts/auto-update.py'),True)):
-            plist.write_bytes(auto.plistlib.dumps({'ProgramArguments':['python3',scripts]}))
+            plist.write_bytes(plistlib.dumps({'ProgramArguments':['python3',scripts]}))
             data=self.check_output()
             self.assertEqual((data['registeredPath'],data['registrationMatches'],data['agentInstalled'],data['skipReason']),
                              (str(self.root/'other'),False,expected,'foreign-plugin'))
@@ -395,6 +396,55 @@ class AutoUpdateTests(unittest.TestCase):
         public_runtime.verify_plugin_entries([good],self.root)
         with self.assertRaisesRegex(RuntimeError,'after install'):public_runtime.verify_plugin_entries([],self.root,'install')
         with self.assertRaisesRegex(RuntimeError,'not running cleanly'):public_runtime.verify_plugin_entries([{**good,'error':'x'}],self.root)
+
+    def test_foreign_plugin_is_notified_once_per_distinct_registered_path(self):
+        command='./install.sh --replace-registration --with-auto-update'
+        self.write_account(foreign=True)
+        result,state=self.execute()
+        self.assertEqual((result,state['reason']),(0,'foreign-plugin'))
+        self.assertEqual(len(self.notifications),1)
+        self.assertIn(str(self.root/'other'),self.notifications[0]);self.assertIn(command,self.notifications[0])
+        self.assertEqual(state['notifiedSkip'],{'reason':'foreign-plugin','path':str(self.root/'other')})
+        for _ in range(2):
+            result,state=self.execute();self.assertEqual(state['reason'],'foreign-plugin')
+        self.assertEqual(len(self.notifications),1)
+        (self.home/'.paseo/config.json').write_text(json.dumps({'pluginsEnabled':True,'plugins':{'role-workflow':{
+            'source':'directory','path':str(self.base/'copy/plugin/role-workflow'),'enabled':True}}}))
+        self.execute();self.assertEqual(len(self.notifications),2);self.assertIn('copy/plugin',self.notifications[1])
+        self.write_account()  # a normal result clears the memory, so a later mismatch is reported again
+        result,state=self.execute();self.assertEqual(state['result'],'updated');self.assertIsNone(state['notifiedSkip'])
+        count=len(self.notifications)
+        self.write_account(foreign=True);self.execute()
+        self.assertEqual(len(self.notifications),count+1)
+
+    def test_other_skip_reasons_clear_the_notified_foreign_plugin(self):
+        self.write_account(foreign=True);self.execute();self.assertEqual(len(self.notifications),1)
+        (self.home/'.paseo/paseo.pid').unlink()
+        result,state=self.execute();self.assertEqual(state['reason'],'daemon-stopped');self.assertIsNone(state['notifiedSkip'])
+        (self.home/'.paseo/paseo.pid').write_text(json.dumps({'pid':os.getpid()}))
+        self.execute();self.assertEqual(len(self.notifications),2)
+
+    def test_invalid_notified_skip_state_fails_closed(self):
+        folder=auto.auto_update_data(self.config);folder.mkdir(parents=True)
+        (folder/'state.json').write_text(json.dumps({'notifiedSkip':{'reason':3}}))
+        result,state=self.execute()
+        self.assertEqual((result,state['result']),(1,'failed'));self.assertIn('Invalid notified skip',state['reason'])
+        self.assertEqual(self.calls(),[])
+
+    def test_agent_state_function_is_shared_and_distinguishes_repositories(self):
+        import public_runtime
+        spec=importlib.util.spec_from_file_location('public_setup_agent',Path(__file__).with_name('setup.py'))
+        shared=importlib.util.module_from_spec(spec);spec.loader.exec_module(shared)
+        self.assertIs(auto.auto_update_agent_installed,public_runtime.auto_update_agent_installed)
+        self.assertIs(shared.auto_update_agent_state,public_runtime.auto_update_agent_state)
+        plist=self.home/'Library/LaunchAgents'/(public_runtime.AUTO_UPDATE_LABEL+'.plist');plist.parent.mkdir(parents=True)
+        self.assertEqual(public_runtime.auto_update_agent_state(self.home,self.root),'missing')
+        plist.write_bytes(plistlib.dumps({'ProgramArguments':['python3','/other/scripts/auto-update.py']}))
+        self.assertEqual(public_runtime.auto_update_agent_state(self.home,self.root),'foreign')
+        self.assertIs(public_runtime.auto_update_agent_installed(self.home,self.root),False)
+        plist.write_bytes(plistlib.dumps({'ProgramArguments':['python3',str(self.root/'scripts/auto-update.py')]}))
+        self.assertIs(public_runtime.auto_update_agent_installed(self.home,self.root),True)
+        plist.write_text('broken');self.assertEqual(public_runtime.auto_update_agent_state(self.home,self.root),'missing')
 
 
 if __name__=='__main__':unittest.main()

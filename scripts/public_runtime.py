@@ -111,3 +111,18 @@ def verify_plugin_entries(entries, root, after='reload'):
             entry.get('status') != 'running' or entry.get('error') or
             Path(entry.get('path', '')).resolve() != (root/'plugin/role-workflow').resolve()):
         raise RuntimeError('role-workflow is not running cleanly from this checkout')
+
+
+def auto_update_agent_state(home, root):
+    """'installed' for this checkout's LaunchAgent, 'foreign' for another checkout's, else 'missing'."""
+    import plistlib
+    plist = Path(home)/'Library/LaunchAgents'/(AUTO_UPDATE_LABEL+'.plist')
+    try:
+        arguments = plistlib.loads(plist.read_bytes()).get('ProgramArguments', [])
+    except (OSError, ValueError, AttributeError):
+        return 'missing'
+    return 'installed' if str(Path(root)/'scripts/auto-update.py') in arguments else 'foreign'
+
+
+def auto_update_agent_installed(home, root):
+    return auto_update_agent_state(home, root) == 'installed'

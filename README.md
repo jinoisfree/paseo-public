@@ -75,8 +75,11 @@ Paseo 계정 홈, 자격 증명, 작업 상태는 각 계정의 `~/.paseo`를 �
 
 **`paseo` 명령이 출력 없이 실패할 때**
 설치기는 앱 안의 CLI(`Paseo.app/Contents/Resources/bin/paseo`)를 먼저 쓰고 `--version`으로 확인합니다.
-PATH의 `paseo`가 다른 계정 소유의 권한 없는 심볼릭 링크이면 출력 없이 종료 1로 끝날 수 있습니다.
-`ls -l $(command -v paseo)`로 확인하고 `chmod -h 755`로 고치거나,
+자동으로 찾은 CLI 경로는 `config.json`에 저장하지 않습니다. 직접 넣은 `paseo` 값은 그대로 두되,
+그 값이 앱 안의 CLI를 가리키거나 읽을 수 없는 링크이면 앱 안의 CLI를 대신 씁니다.
+PATH의 `paseo`가 다른 계정 소유의 권한 없는 심볼릭 링크이면 터미널에서 출력 없이 종료 1로
+끝날 수 있어, 설치기가 경고 한 줄을 출력합니다(`--dry-run`은 `pathCliWarning`에 표시).
+설치기는 그 파일을 고치지 않습니다. 링크 소유 계정에서 경고의 `chmod -h 755 <경로>`를 실행하거나,
 `~/.config/paseo-public/config.json`의 `paseo`에 사용할 CLI 경로를 지정하세요.
 
 **자동 업데이트가 동작하는지 확인할 때**
@@ -88,7 +91,8 @@ python3 scripts/auto-update.py --check
 - `registrationMatches`가 `false`이면 `registeredPath`가 이 저장소가 아닙니다.
   위 `--replace-registration`으로 전환해야 자동 업데이트가 건너뛰지 않습니다.
 - `agentInstalled`가 `false`이면 이 저장소의 자동 업데이트 LaunchAgent가 없습니다.
-  `./install.sh --with-auto-update`로 등록하세요.
+  `./install.sh --with-auto-update`로 등록하세요. 설치 마지막 줄에도 실제 등록 상태가
+  `등록됨`·`미등록`·`다른 저장소에 등록됨`으로 표시됩니다.
 - `skipReason`이 `null`이 아니면 지금 업데이트를 건너뛰는 이유입니다
   (`branch`, `dirty`, `daemon-stopped`, `foreign-plugin`).
 - `--check`는 원격을 읽기만 하며 fetch나 파일 변경을 하지 않습니다.
@@ -134,6 +138,9 @@ python3 scripts/auto-update.py --check
 등록 경로 불일치, 실패·롤백 때 macOS 알림을 보냅니다. 최신·일시적 건너뜀에는
 알리지 않습니다. 바쁨의 연속 3회 건너뜀은 위 안내대로 알리며,
 알림 전달 실패는 업데이트 결과를 바꾸지 않습니다.
+등록 경로 불일치 알림에는 등록된 경로와 `./install.sh --replace-registration --with-auto-update`
+해결 명령이 들어 있고, 같은 경로로 계속 건너뛰는 동안에는 반복하지 않습니다.
+다른 결과나 다른 경로가 나오면 다시 알립니다.
 
 자동 업데이트 예약만 해제하려면 다음 명령을 실행하세요. 플러그인 등록과
 작업 데이터는 유지합니다. 옵션 없는 `./uninstall.sh`는 기존처럼 전체 등록을 해제합니다.

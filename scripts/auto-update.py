@@ -7,7 +7,6 @@ import fcntl
 import json
 import os
 from pathlib import Path
-import plistlib
 import re
 import subprocess
 import sys
@@ -17,7 +16,7 @@ from time import sleep
 # A read-only --check must not create repository __pycache__ files either.
 sys.dont_write_bytecode = True
 
-from public_runtime import ROOT, AUTO_UPDATE_LABEL, load_config, auto_update_data, auto_update_logs, node_executable, busy_workflows, verify_plugin_entries
+from public_runtime import ROOT, AUTO_UPDATE_LABEL, load_config, auto_update_data, auto_update_logs, node_executable, busy_workflows, verify_plugin_entries, auto_update_agent_installed
 from setup import cli_path, read_paseo, same_plugin
 
 BUSY_INTERVAL = 600
@@ -53,7 +52,7 @@ class Updater:
         self.state_file = self.state_dir/'state.json'
         self.log = None
         self.sequence = 0
-        self.state = {'startedAt': stamp(), 'previousCommit': None, 'targetCommit': None, 'afterCommit': None, 'busyStreak': 0}
+        self.state = {'startedAt': stamp(), 'previousCommit': None, 'targetCommit': None, 'afterCommit': None, 'busyStreak': 0, 'notifiedSkip': None}
 
     def command(self, command, *, check=True, timeout=120):
         command = list(map(str, command))
@@ -100,6 +99,17 @@ class Updater:
 
     def finish(self, result, reason, *, notify=False, **values):
         busy = result == 'skipped' and reason == 'busy'
+        message = reason
+        if result == 'skipped' and reason == 'foreign-plugin':
+            # Tell once per distinct mismatch; the same registered path does not repeat the notification.
+            path = self.registered_path()
+            mark = {'reason': reason, 'path': path}
+            notify = self.state.get('notifiedSkip') != mark
+            self.state['notifiedSkip'] = mark
+            message = (f'role-workflow가 이 저장소가 아닌 {path or "알 수 없는 경로"}에 등록돼 있어 자동 업데이트를 건너뜁니다. '
+                       '해결: ./install.sh --replace-registration --with-auto-update')
+        else:
+            self.state['notifiedSkip'] = None
         self.state['busyStreak'] = self.state['busyStreak'] + 1 if busy else 0
         self.state.update(result=result, reason=reason, finishedAt=stamp(), logDirectory=str(self.log), **values)
         temporary = self.state_file.with_suffix('.tmp')
@@ -107,7 +117,6 @@ class Updater:
         temporary.replace(self.state_file)
         self.event(**self.state)
         print(json.dumps(self.state, ensure_ascii=False))
-        message = reason
         if busy and self.state['busyStreak'] == BUSY_NOTIFY_STREAK:
             notify = True
             workflows = ', '.join(f'#{number}' for number in self.state['busyWorkflows'])
@@ -178,16 +187,16 @@ class Updater:
         print(json.dumps({'currentCommit': current, 'remoteCommit': remote[0], 'updateNeeded': current != remote[0],
                           'registeredPath': entry.get('path') if isinstance(entry, dict) else None,
                           'registrationMatches': isinstance(entry, dict) and same_plugin(entry, self.root),
-                          'agentInstalled': self.agent_installed(), 'skipReason': skip}, ensure_ascii=False))
+                          'agentInstalled': auto_update_agent_installed(self.home, self.root), 'skipReason': skip}, ensure_ascii=False))
         return 0
 
-    def agent_installed(self):
-        plist = self.home/'Library/LaunchAgents'/(AUTO_UPDATE_LABEL+'.plist')
+    def registered_path(self):
         try:
-            arguments = plistlib.loads(plist.read_bytes()).get('ProgramArguments', [])
+            account = read_paseo(self.home)
+            entry = account.get('plugins', {}).get('role-workflow')
+            return entry.get('path') if isinstance(entry, dict) else None
         except (OSError, ValueError, AttributeError):
-            return False
-        return str(self.root/'scripts/auto-update.py') in arguments
+            return None
 
     def run(self):
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -209,6 +218,11 @@ class Updater:
                     if type(streak) is not int or streak < 0:
                         raise ValueError('Invalid busy streak; update refused')
                     self.state['busyStreak'] = streak
+                    skip = saved.get('notifiedSkip')
+                    if skip is not None and not (isinstance(skip, dict) and isinstance(skip.get('reason'), str) and
+                                                 (skip.get('path') is None or isinstance(skip['path'], str))):
+                        raise ValueError('Invalid notified skip; update refused')
+                    self.state['notifiedSkip'] = skip
                 return self.update()
             except (OSError, ValueError, KeyError, TypeError, RuntimeError) as error:
                 return self.finish('failed', str(error), notify=True)

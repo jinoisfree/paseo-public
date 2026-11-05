@@ -16,7 +16,7 @@ import time
 import datetime
 from xml.sax.saxutils import escape
 from fold_daemon_setup import deploy
-from public_runtime import ROOT, LABEL, AUTO_UPDATE_LABEL, load_config, config_path, data_root, logs_root, auto_update_logs, node_executable, app_path, backup_root, busy_workflows, verify_plugin_entries
+from public_runtime import ROOT, LABEL, AUTO_UPDATE_LABEL, load_config, config_path, data_root, logs_root, auto_update_logs, node_executable, app_path, backup_root, busy_workflows, verify_plugin_entries, auto_update_agent_state
 
 
 def run(command, home, *, check=True, capture=False):
@@ -28,19 +28,71 @@ def run(command, home, *, check=True, capture=False):
                           capture_output=capture, text=True)
 
 
+def is_file(path):
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
+def link_target(path):
+    """None for a regular file, the resolved target for a readable link, False for an unreadable link."""
+    try:
+        if not path.is_symlink():
+            return None
+        os.readlink(path)
+        return path.resolve()
+    except OSError:
+        return False
+
+
 def cli_path(config):
-    # The CLI bundled in the app is preferred over PATH, which may hold a link the account cannot execute.
+    # The CLI inside the app wins over a PATH link, which may belong to another account and be unreadable.
+    # Automatically detected paths are never saved, so a stale path cannot override this later.
+    bundled = app_path(config)/'Contents/Resources/bin/paseo'
     value = config.get('paseo')
     if value:
         candidate = Path(value).expanduser()
         if not candidate.is_absolute():
             candidate = Path(shutil.which(str(candidate)) or str(candidate))
+    elif is_file(bundled):
+        return bundled
     else:
-        bundled = app_path(config)/'Contents/Resources/bin/paseo'
-        candidate = bundled if bundled.is_file() else Path(shutil.which('paseo') or str(bundled))
-    if not candidate.is_file():
+        candidate = Path(shutil.which('paseo') or str(bundled))
+    if candidate != bundled and is_file(bundled):
+        target = link_target(candidate)
+        if target is False or (target is not None and target == bundled.resolve()):
+            return bundled
+    if not is_file(candidate):
         raise RuntimeError('Paseo CLI를 찾지 못했습니다. Paseo 설치 후 config.json의 paseo 경로를 확인하세요.')
     return candidate
+
+
+def path_cli_warning():
+    """A PATH `paseo` link this account cannot read makes the terminal command fail silently. File access only."""
+    for directory in os.environ.get('PATH', '').split(os.pathsep):
+        link = Path(directory or '.')/'paseo'
+        try:
+            if not link.is_symlink():
+                if link.exists():
+                    return None  # The first real `paseo` on PATH is not a link.
+                continue
+        except OSError:
+            continue
+        if link_target(link) is not False:
+            return None
+        try:
+            uid = link.lstat().st_uid
+            try:
+                owner = pwd.getpwuid(uid).pw_name
+            except KeyError:
+                owner = str(uid)
+        except OSError:
+            owner = '알 수 없음'
+        return (f'경고: PATH의 {link}는 이 계정에서 읽을 수 없는 심볼릭 링크입니다(소유자: {owner}). '
+                f'터미널의 paseo 명령이 출력 없이 실패할 수 있습니다. 링크 소유 계정에서 `chmod -h 755 {link}`를 실행하세요. '
+                '설치기는 이 파일을 수정하지 않으며 앱 안의 CLI로 설치합니다.')
+    return None
 
 
 def verify_cli(paseo, home):
@@ -66,6 +118,7 @@ def same_plugin(entry, root=None):
     return entry.get('source') == 'directory' and Path(entry.get('path', '')).resolve() == (root/'plugin/role-workflow').resolve()
 
 
+AGENT_LABELS = {'installed': '등록됨', 'foreign': '다른 저장소에 등록됨', 'missing': '미등록'}
 CONFLICT_KINDS = {'not-directory': 'source가 directory가 아님', 'missing-path': 'path 없음',
                   'copy-without-git': '.git 없는 사본', 'other-git-repo': '다른 git 저장소'}
 
@@ -242,7 +295,8 @@ def main(argv=None):
     plan = {'action':args.action,'home':str(home),'plugin':str(ROOT/'plugin/role-workflow'),
             'node':node,'python':sys.executable,'paseo':str(paseo),'config':str(config_path()),
             'data':str(data_root(config)),'logs':str(logs_root(config)),
-            'withFoldReapply':args.with_fold_reapply,'withAutoUpdate':args.with_auto_update,'dryRun':args.dry_run}
+            'withFoldReapply':args.with_fold_reapply,'withAutoUpdate':args.with_auto_update,'dryRun':args.dry_run,
+            'pathCliWarning':path_cli_warning()}
     conflict = registration_conflict(entry) if entry and not same_plugin(entry) and args.action == 'install' else None
     plan.update(registrationConflict=conflict, replaceRegistration=args.replace_registration)
     if conflict and not args.replace_registration:
@@ -251,6 +305,8 @@ def main(argv=None):
         options = [flag for flag, used in (('--with-auto-update', args.with_auto_update), ('--with-fold-reapply', args.with_fold_reapply)) if used]
         raise RuntimeError(conflict_message(conflict, options))
     print(json.dumps(plan,ensure_ascii=False,indent=2))
+    if plan['pathCliWarning'] and not args.dry_run:
+        print(plan['pathCliWarning'],file=sys.stderr)
     if args.dry_run:
         print('DRY RUN: npm 의존성/플러그인 등록/launchd 변경 없음. 계정의 데이터는 보존합니다.')
         return 0
@@ -302,7 +358,7 @@ def main(argv=None):
     elif entry.get('enabled') is False:
         run(command('plugin','enable','role-workflow'),home)
     # An existing same-path registration is retained without interrupting active tasks.
-    config.update(node=node,python=os.environ.get('PASEO_PUBLIC_PYTHON') or shutil.which('python3') or sys.executable,paseo=str(paseo),dependenciesLock=lock)
+    config.update(node=node,python=os.environ.get('PASEO_PUBLIC_PYTHON') or shutil.which('python3') or sys.executable,dependenciesLock=lock)
     config.setdefault('phoneNotifications',False)
     config_path().parent.mkdir(parents=True,exist_ok=True)
     config_path().write_text(json.dumps(config,ensure_ascii=False,indent=2)+'\n')
@@ -322,7 +378,7 @@ def main(argv=None):
     print('설치 완료. 폴더 열기는 사이드바/커맨드 센터에서 사용할 수 있습니다.')
     if replaced:
         print(f'이전 등록({entry.get("path")})은 삭제하지 않았습니다. 확인 후 직접 정리하세요. 설정 백업: {replaced}')
-    print(f'등록 경로: {ROOT/"plugin/role-workflow"} · 자동 업데이트: {"등록됨" if args.with_auto_update else "미등록"}')
+    print(f'등록 경로: {ROOT/"plugin/role-workflow"} · 자동 업데이트: {AGENT_LABELS[auto_update_agent_state(home,ROOT)]}')
     return 0
 
 
