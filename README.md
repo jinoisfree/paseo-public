@@ -44,12 +44,54 @@ Paseo의 설정 명령으로 켜고 실행 중인 데몬에 설정을 다시 읽
 
 같은 경로에서 다시 실행하면 기존 등록과 설정을 유지합니다.
 다른 경로의 `role-workflow`가 이미 있으면 덮어쓰지 않고 중단합니다.
-기존 작업이 끝난 뒤 등록 경로를 먼저 확인하세요.
+기존 작업이 끝난 뒤 아래 문제 해결 절의 `--replace-registration`으로 전환하세요.
 
 다른 macOS 계정에서도 그 계정으로 로그인해 설치합니다.
 Paseo 계정 홈, 자격 증명, 작업 상태는 각 계정의 `~/.paseo`를 사용하며 공유하지 않습니다.
 **폴더 열기**의 기본 루트는 `~/paseo-work`입니다.
 다른 폴더를 쓰려면 자동 작업 설정의 ‘폴더 열기 루트’를 바꾸세요.
+
+### 문제 해결
+
+**‘다른 경로의 role-workflow가 이미 등록돼 있습니다’로 중단될 때**
+`.git` 없는 이전 사본이나 다른 저장소가 등록된 경우입니다. 먼저 충돌 내용을 확인합니다.
+`registrationConflict`에 등록된 source·path와 분류가 나오며 이 단계는 아무것도 바꾸지 않습니다.
+
+```sh
+./install.sh --dry-run
+```
+
+진행 중인 작업이 없으면 같은 명령에 `--replace-registration`을 붙여 이 저장소로 전환합니다.
+`--with-auto-update` 등 다른 옵션도 그대로 함께 씁니다.
+
+```sh
+./install.sh --replace-registration
+```
+
+데몬이 실행 중이어야 하고, 지시 전송·압축 중인 작업이 있으면 작업 번호와 함께 중단합니다.
+전환 전에 `~/.paseo/config.json`을 데이터 폴더의 `backups/registration-<시각>.json`에
+백업하며, 실패하면 이전 경로를 다시 등록합니다. 이전 사본 폴더는 지우지 않으니 확인 후 직접 정리하세요.
+옵션 없이는 자동으로 전환하지 않습니다.
+
+**`paseo` 명령이 출력 없이 실패할 때**
+설치기는 앱 안의 CLI(`Paseo.app/Contents/Resources/bin/paseo`)를 먼저 쓰고 `--version`으로 확인합니다.
+PATH의 `paseo`가 다른 계정 소유의 권한 없는 심볼릭 링크이면 출력 없이 종료 1로 끝날 수 있습니다.
+`ls -l $(command -v paseo)`로 확인하고 `chmod -h 755`로 고치거나,
+`~/.config/paseo-public/config.json`의 `paseo`에 사용할 CLI 경로를 지정하세요.
+
+**자동 업데이트가 동작하는지 확인할 때**
+
+```sh
+python3 scripts/auto-update.py --check
+```
+
+- `registrationMatches`가 `false`이면 `registeredPath`가 이 저장소가 아닙니다.
+  위 `--replace-registration`으로 전환해야 자동 업데이트가 건너뛰지 않습니다.
+- `agentInstalled`가 `false`이면 이 저장소의 자동 업데이트 LaunchAgent가 없습니다.
+  `./install.sh --with-auto-update`로 등록하세요.
+- `skipReason`이 `null`이 아니면 지금 업데이트를 건너뛰는 이유입니다
+  (`branch`, `dirty`, `daemon-stopped`, `foreign-plugin`).
+- `--check`는 원격을 읽기만 하며 fetch나 파일 변경을 하지 않습니다.
 
 ## 선택: 매일 자동 업데이트
 

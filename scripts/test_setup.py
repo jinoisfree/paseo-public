@@ -16,6 +16,7 @@ import contextlib
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 spec=importlib.util.spec_from_file_location('public_setup',Path(__file__).with_name('setup.py'))
 setup=importlib.util.module_from_spec(spec);spec.loader.exec_module(setup)
+original_cli_path=setup.cli_path
 
 
 class SetupTests(unittest.TestCase):
@@ -31,26 +32,39 @@ class SetupTests(unittest.TestCase):
         (self.root/'launchd/fold-reapply.daemon.plist.in').write_bytes((Path(__file__).resolve().parents[1]/'launchd/fold-reapply.daemon.plist.in').read_bytes())
         (self.root/'launchd/auto-update.plist.in').write_bytes((Path(__file__).resolve().parents[1]/'launchd/auto-update.plist.in').read_bytes())
         self.config=self.home/'.config/paseo-public/config.json'
-        self.commands=[]
+        self.commands=[];self.reads=[];self.version_code=0;self.version_error='';self.launchctl_code=0;self.ls_override=None;self.fail_install=False;self.hook=None
         self.env=mock.patch.dict(os.environ,{'HOME':str(self.home),'PASEO_PUBLIC_CONFIG':str(self.config),'PASEO_PUBLIC_NODE':str(self.node)})
         self.env.start();self.addCleanup(self.env.stop)
-        self.patches=[mock.patch.object(setup,'ROOT',self.root),mock.patch.object(setup,'cli_path',return_value=self.paseo),
+        self.patches=[mock.patch.object(setup,'ROOT',self.root),mock.patch.object(setup.time,'sleep'),mock.patch.object(setup,'cli_path',return_value=self.paseo),
                       mock.patch.object(setup.subprocess,'check_output',return_value='v26.0.0\n'),mock.patch.object(setup,'run',side_effect=self.fake_run)]
         for patch in self.patches:patch.start();self.addCleanup(patch.stop)
 
     def fake_run(self,command,home,**kwargs):
-        args=list(map(str,command));self.commands.append(args)
-        if 'install' in args:
+        args=list(map(str,command))
+        # Read-only probes are kept apart so tests can assert that nothing was mutated.
+        if args[1:2]==['--version'] or args[1:3]==['plugin','ls'] or args[1:2]==['print']:
+            self.reads.append(args)
+            if args[1:2]==['--version']:return subprocess.CompletedProcess(args,self.version_code,stdout='',stderr=self.version_error)
+            if args[1:2]==['print']:return subprocess.CompletedProcess(args,self.launchctl_code,stdout='',stderr='no such service')
+            if self.ls_override is not None:return subprocess.CompletedProcess(args,0,stdout=json.dumps(self.ls_override),stderr='')
+            entry=json.loads((self.home/'.paseo/config.json').read_text()).get('plugins',{}).get('role-workflow')
+            listing=[{'id':'role-workflow','enabled':True,'status':'running','path':entry['path']}] if entry else []
+            return subprocess.CompletedProcess(args,0,stdout=json.dumps(listing),stderr='')
+        self.commands.append(args)
+        if self.hook:self.hook(args)
+        if 'install' in args and 'plugin' in args:
+            if self.fail_install and str(self.root/'plugin/role-workflow') in args:
+                raise subprocess.CalledProcessError(1,args)
             config=json.loads((self.home/'.paseo/config.json').read_text())
-            config.setdefault('plugins',{})['role-workflow']={'source':'directory','path':str(self.root/'plugin/role-workflow'),'enabled':True}
+            config.setdefault('plugins',{})['role-workflow']={'source':'directory','path':args[args.index('install')+1],'enabled':True}
             (self.home/'.paseo/config.json').write_text(json.dumps(config))
         if 'remove' in args:
-            config=json.loads((self.home/'.paseo/config.json').read_text());config['plugins'].pop('role-workflow')
+            config=json.loads((self.home/'.paseo/config.json').read_text());config.get('plugins',{}).pop('role-workflow',None)
             (self.home/'.paseo/config.json').write_text(json.dumps(config))
         return subprocess.CompletedProcess(args,0,stdout='',stderr='')
 
     def ready(self,enabled=True):
-        (self.home/'.paseo').mkdir()
+        (self.home/'.paseo').mkdir(exist_ok=True)
         (self.home/'.paseo/paseo.pid').write_text('{}')
         (self.home/'.paseo/config.json').write_text(json.dumps({'pluginsEnabled':enabled}))
 
@@ -187,6 +201,138 @@ class SetupTests(unittest.TestCase):
         self.execute('uninstall','--with-auto-update')
         self.assertEqual(plist.read_bytes(),content)
         self.assertEqual(self.commands,[])
+
+    def capture(self,*arguments):
+        output=io.StringIO()
+        with contextlib.redirect_stdout(output):
+            try:return setup.main(arguments),output.getvalue(),None
+            except RuntimeError as error:return None,output.getvalue(),str(error)
+
+    def register(self,path,source='directory'):
+        file=self.home/'.paseo/config.json'
+        file.write_text(json.dumps({'pluginsEnabled':True,'plugins':{'role-workflow':{'source':source,'path':str(path),'enabled':True}}}))
+        return file.read_bytes()
+
+    def old_copy(self,git=False,name='old'):
+        old=self.home/'releases'/name;(old/'plugin/role-workflow').mkdir(parents=True,exist_ok=True)
+        if git:(old/'.git').mkdir(exist_ok=True)
+        return old/'plugin/role-workflow'
+
+    def test_conflict_message_has_path_kind_and_resolution_command(self):
+        self.ready()
+        cases={'missing-path':(self.root/'gone','directory','path 없음'),'copy-without-git':(self.old_copy(),'directory','.git 없는 사본'),
+               'other-git-repo':(self.old_copy(git=True,name='repo'),'directory','다른 git 저장소'),'not-directory':(self.root/'x','npm','directory가 아님')}
+        for kind,(path,source,label) in cases.items():
+            with self.subTest(kind=kind):
+                before=self.register(path,source)
+                code,_,error=self.capture('install','--with-auto-update')
+                self.assertIsNone(code)
+                self.assertIn(str(path),error);self.assertIn(label,error);self.assertIn(f'source={source}',error)
+                self.assertIn('./install.sh --replace-registration --with-auto-update',error)
+                self.assertEqual((self.home/'.paseo/config.json').read_bytes(),before)
+        self.assertEqual(self.commands,[]);self.assertEqual([c for c in self.reads if c[1]=='plugin'],[])
+
+    def test_dry_run_reports_conflict_and_exit_status(self):
+        self.ready();old=self.old_copy();before=self.register(old)
+        code,text,error=self.capture('install','--dry-run')
+        self.assertIsNone(code);self.assertIn('replace-registration',error)
+        plan=json.loads(text)
+        self.assertEqual(plan['registrationConflict'],{'source':'directory','path':str(old),'kind':'copy-without-git'})
+        self.assertIs(plan['replaceRegistration'],False)
+        code,text,error=self.capture('install','--dry-run','--replace-registration')
+        self.assertEqual((code,error),(0,None))
+        plan=json.loads(text[:text.index('DRY RUN')]);self.assertIs(plan['replaceRegistration'],True)
+        self.assertEqual(plan['registrationConflict']['kind'],'copy-without-git')
+        self.assertEqual(self.commands,[]);self.assertEqual(self.reads,[])
+        self.assertEqual((self.home/'.paseo/config.json').read_bytes(),before)
+
+    def test_replace_option_is_install_only(self):
+        for arguments in (('uninstall','--replace-registration'),('install','--fold-reapply-system','--replace-registration')):
+            with self.subTest(arguments=arguments),contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):setup.main(arguments)
+
+    def test_replacement_is_refused_without_daemon_or_when_workflows_are_busy(self):
+        self.ready();old=self.old_copy();before=self.register(old)
+        (self.home/'.paseo/paseo.pid').unlink()
+        with self.assertRaisesRegex(RuntimeError,'Paseo를 먼저 실행'):self.execute('install','--replace-registration')
+        (self.home/'.paseo/paseo.pid').write_text('{}')
+        state=self.home/'.paseo/role-workflow/state.json';state.parent.mkdir()
+        state.write_text(json.dumps({'workflows':[{'status':'active','number':17,'plan':{'compaction':'busy'}},
+                                                   {'status':'paused','number':3,'plan':{'compaction':'busy'}}]}))
+        with self.assertRaisesRegex(RuntimeError,'#17'):self.execute('install','--replace-registration')
+        self.assertEqual(self.commands,[]);self.assertEqual((self.home/'.paseo/config.json').read_bytes(),before)
+        self.assertFalse((self.home/'Library/Application Support/paseo-public/backups').exists())
+
+    def test_replacement_backs_up_removes_installs_then_verifies(self):
+        self.ready();old=self.old_copy();before=self.register(old)
+        backups=self.home/'Library/Application Support/paseo-public/backups'
+        seen=[]
+        self.hook=lambda args:seen.append((args[1:3],[file.read_bytes() for file in backups.glob('registration-*.json')])) if args[1:3]==['plugin','remove'] else None
+        code,text,error=self.capture('install','--replace-registration')
+        self.assertEqual((code,error),(0,None))
+        self.assertEqual([call[1:3] for call in self.commands if call[1]=='plugin'],[['plugin','remove'],['plugin','install']])
+        self.assertEqual(seen[0],(['plugin','remove'],[before]))  # backup exists before removal
+        (backup,)=backups.glob('registration-*.json');self.assertEqual(backup.stat().st_mode&0o777,0o600)
+        self.assertEqual([c for c in self.commands if c[1:3]==['plugin','install']][0][3],str(self.root/'plugin/role-workflow'))
+        self.assertEqual(json.loads((self.home/'.paseo/config.json').read_text())['plugins']['role-workflow']['path'],str(self.root/'plugin/role-workflow'))
+        self.assertEqual([call[1:3] for call in self.reads if call[1]=='plugin'],[['plugin','ls']]*2)
+        self.assertTrue(old.exists());self.assertIn(str(old),text)  # never deleted, only reported
+        self.assertIn('자동 업데이트: 미등록',text.splitlines()[-1]);self.assertIn(str(self.root/'plugin/role-workflow'),text.splitlines()[-1])
+
+    def test_failed_replacement_reinstalls_the_previous_path(self):
+        for failure in ('install','verify'):
+            with self.subTest(failure=failure):
+                self.commands.clear();self.reads.clear()
+                self.ready();old=self.old_copy();before=self.register(old)
+                self.fail_install=failure=='install'
+                self.ls_override=[{'id':'role-workflow','enabled':True,'status':'error','path':str(self.root/'plugin/role-workflow')}] if failure=='verify' else None
+                with self.assertRaises(RuntimeError) as caught:self.execute('install','--replace-registration')
+                message=str(caught.exception)
+                self.assertIn('등록 전환 실패',message);self.assertIn(f'이전 등록({old})을 다시 설치',message);self.assertIn('registration-',message)
+                self.assertEqual(self.commands[-1][1:4],['plugin','install',str(old)])
+                self.ls_override=None
+                self.assertEqual(json.loads((self.home/'.paseo/config.json').read_text())['plugins']['role-workflow']['path'],str(old))
+
+    def test_failed_replacement_without_previous_path_says_so(self):
+        self.ready();self.register(self.root/'gone');self.fail_install=True
+        with self.assertRaisesRegex(RuntimeError,'복원하지 못했습니다'):self.execute('install','--replace-registration')
+
+    def test_cli_prefers_config_then_app_bundle_then_path(self):
+        app=self.home/'Paseo.app';bundled=app/'Contents/Resources/bin/paseo';bundled.parent.mkdir(parents=True);bundled.write_text('x')
+        other=self.home/'bin/paseo';other.parent.mkdir();other.write_text('x')
+        with mock.patch.object(setup.shutil,'which',return_value=str(other)):
+            self.assertEqual(original_cli_path({'app':str(app)}),bundled)
+            self.assertEqual(original_cli_path({'app':str(app),'paseo':str(other)}),other)
+            bundled.unlink()
+            self.assertEqual(original_cli_path({'app':str(app)}),other)
+        with mock.patch.object(setup.shutil,'which',return_value=None),self.assertRaisesRegex(RuntimeError,'CLI를 찾지 못했습니다'):
+            original_cli_path({'app':str(app)})
+
+    def test_cli_version_failure_explains_link_permissions_and_dry_run_skips_it(self):
+        self.ready();self.version_code=1
+        with self.assertRaises(RuntimeError) as caught:self.execute('install')
+        message=str(caught.exception)
+        self.assertIn(str(self.paseo),message);self.assertIn('종료 코드 1',message);self.assertIn('chmod -h 755',message);self.assertIn('ls -l',message)
+        self.assertEqual(self.commands,[])
+        self.reads.clear();self.assertEqual(self.execute('install','--dry-run'),0);self.assertEqual(self.reads,[])
+        with mock.patch.object(setup,'run',side_effect=PermissionError('denied')),self.assertRaisesRegex(RuntimeError,'denied'):
+            setup.verify_cli(self.paseo,self.home)
+
+    def test_post_install_verification_failure_is_reported(self):
+        self.ready()
+        for listing in ([],[{'id':'role-workflow','enabled':False,'status':'running','path':str(self.root/'plugin/role-workflow')}],
+                        [{'id':'role-workflow','enabled':True,'status':'running','path':str(self.root/'other')}]):
+            with self.subTest(listing=listing):
+                self.ls_override=listing
+                with self.assertRaisesRegex(RuntimeError,'등록 확인 실패'):self.execute('install')
+
+    def test_auto_update_agent_must_be_loaded(self):
+        self.ready()
+        code,text,error=self.capture('install','--with-auto-update')
+        self.assertEqual((code,error),(0,None));self.assertIn('자동 업데이트: 등록됨',text.splitlines()[-1])
+        self.assertEqual(self.reads[-1],['/bin/launchctl','print',f'gui/{os.getuid()}/{setup.AUTO_UPDATE_LABEL}'])
+        self.launchctl_code=113
+        with self.assertRaisesRegex(RuntimeError,'LaunchAgent가 로드돼 있지 않습니다\\(113\\)'):self.execute('install','--with-auto-update')
 
 
 if __name__=='__main__':unittest.main()

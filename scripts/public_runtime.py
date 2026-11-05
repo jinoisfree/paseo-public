@@ -77,3 +77,37 @@ def installer_dist(version, config=None):
     config = load_config() if config is None else config
     template = config.get('distTemplate')
     return Path(template.format(version=version)).expanduser() if template else data_root(config)/f'build/paseo-{version}/packages/app/dist'
+
+
+def busy_workflows(home):
+    """Numbers of active workflows that are sending an instruction or compacting."""
+    file = Path(home)/'.paseo/role-workflow/state.json'
+    if not file.exists():
+        return []
+    data = json.loads(file.read_text())
+    workflows = data['workflows']
+    if not isinstance(workflows, list):
+        raise ValueError('Invalid workflow state; update refused')
+    blocked = []
+    for w in workflows:
+        if not isinstance(w, dict):
+            raise ValueError('Invalid workflow; update refused')
+        if w.get('status') != 'active':
+            continue
+        if any(w.get(key) is not None and not isinstance(w[key], dict) for key in ('pending', 'plan', 'execute')):
+            raise ValueError('Invalid workflow member; update refused')
+        if ((w.get('pending') or {}).get('stage') == 'sending' or
+                any((w.get(role) or {}).get('compaction') for role in ('plan', 'execute'))):
+            blocked.append(w.get('number', w.get('id', '번호 미확인')))
+    return blocked
+
+
+def verify_plugin_entries(entries, root, after='reload'):
+    """Check `plugin ls role-workflow --json` output for a clean registration from root."""
+    if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
+        raise RuntimeError(f'Expected one role-workflow plugin after {after}')
+    entry = entries[0]
+    if (entry.get('id') != 'role-workflow' or entry.get('enabled') is not True or
+            entry.get('status') != 'running' or entry.get('error') or
+            Path(entry.get('path', '')).resolve() != (root/'plugin/role-workflow').resolve()):
+        raise RuntimeError('role-workflow is not running cleanly from this checkout')

@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import subprocess
 import sys
@@ -16,7 +17,7 @@ from time import sleep
 # A read-only --check must not create repository __pycache__ files either.
 sys.dont_write_bytecode = True
 
-from public_runtime import ROOT, load_config, auto_update_data, auto_update_logs, node_executable
+from public_runtime import ROOT, AUTO_UPDATE_LABEL, load_config, auto_update_data, auto_update_logs, node_executable, busy_workflows, verify_plugin_entries
 from setup import cli_path, read_paseo, same_plugin
 
 BUSY_INTERVAL = 600
@@ -61,6 +62,7 @@ class Updater:
                    PATH=str(Path(node_executable(self.config)).parent)+os.pathsep+env.get('PATH', ''),
                    PYTHONDONTWRITEBYTECODE='1')
         env.pop('PASEO_HOST', None)
+        env['GIT_OPTIONAL_LOCKS'] = '0'  # --check must not refresh the index
         self.sequence += 1
         log = self.log/f'{self.sequence:02d}-{Path(command[0]).name}.log' if self.log else None
         try:
@@ -144,39 +146,14 @@ class Updater:
         return None
 
     def busy(self):
-        file = self.home/'.paseo/role-workflow/state.json'
-        if not file.exists():
-            return []
-        data = json.loads(file.read_text())
-        workflows = data['workflows']
-        if not isinstance(workflows, list):
-            raise ValueError('Invalid workflow state; update refused')
-        blocked = []
-        for w in workflows:
-            if not isinstance(w, dict):
-                raise ValueError('Invalid workflow; update refused')
-            if w.get('status') != 'active':
-                continue
-            if any(w.get(key) is not None and not isinstance(w[key], dict) for key in ('pending', 'plan', 'execute')):
-                raise ValueError('Invalid workflow member; update refused')
-            if ((w.get('pending') or {}).get('stage') == 'sending' or
-                    any((w.get(role) or {}).get('compaction') for role in ('plan', 'execute'))):
-                blocked.append(w.get('number', w.get('id', '번호 미확인')))
-        return blocked
+        return busy_workflows(self.home)
 
     def install_reload(self):
         self.command([sys.executable, self.root/'scripts/setup.py', 'install'], timeout=3600)
         paseo = cli_path(self.config)
         self.command([paseo, 'plugin', 'reload', 'role-workflow', '--home', self.home/'.paseo'])
         result = self.command([paseo, 'plugin', 'ls', 'role-workflow', '--json', '--home', self.home/'.paseo'])
-        entries = json.loads(result.stdout)
-        if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
-            raise RuntimeError('Expected one role-workflow plugin after reload')
-        entry = entries[0]
-        if (entry.get('id') != 'role-workflow' or entry.get('enabled') is not True or
-                entry.get('status') != 'running' or entry.get('error') or
-                Path(entry.get('path', '')).resolve() != (self.root/'plugin/role-workflow').resolve()):
-            raise RuntimeError('role-workflow is not running cleanly from this checkout')
+        verify_plugin_entries(json.loads(result.stdout), self.root)
 
     def rollback(self, previous, target):
         # Do not reset another branch or a commit created by a concurrent user.
@@ -191,8 +168,26 @@ class Updater:
         remote = self.git('ls-remote', 'origin', 'refs/heads/main').stdout.split()
         if len(remote) != 2 or not re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', remote[0]) or remote[1] != 'refs/heads/main':
             raise RuntimeError('origin/main could not be read')
-        print(json.dumps({'currentCommit': current, 'remoteCommit': remote[0], 'updateNeeded': current != remote[0]}, ensure_ascii=False))
+        account = read_paseo(self.home)
+        plugins = account.get('plugins') if isinstance(account, dict) else None
+        entry = plugins.get('role-workflow') if isinstance(plugins, dict) else None
+        try:
+            skip = self.safety()
+        except ValueError:
+            skip = 'invalid-registration'
+        print(json.dumps({'currentCommit': current, 'remoteCommit': remote[0], 'updateNeeded': current != remote[0],
+                          'registeredPath': entry.get('path') if isinstance(entry, dict) else None,
+                          'registrationMatches': isinstance(entry, dict) and same_plugin(entry, self.root),
+                          'agentInstalled': self.agent_installed(), 'skipReason': skip}, ensure_ascii=False))
         return 0
+
+    def agent_installed(self):
+        plist = self.home/'Library/LaunchAgents'/(AUTO_UPDATE_LABEL+'.plist')
+        try:
+            arguments = plistlib.loads(plist.read_bytes()).get('ProgramArguments', [])
+        except (OSError, ValueError, AttributeError):
+            return False
+        return str(self.root/'scripts/auto-update.py') in arguments
 
     def run(self):
         self.state_dir.mkdir(parents=True, exist_ok=True)

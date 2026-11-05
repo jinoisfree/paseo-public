@@ -342,10 +342,59 @@ class AutoUpdateTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()) as output, mock.patch.object(auto,'ROOT',self.root), mock.patch.object(auto,'load_config',return_value=self.config):
             self.assertEqual(auto.main(['--check']),0)
         data=json.loads(output.getvalue())
-        self.assertEqual(data,{'currentCommit':self.previous,'remoteCommit':self.target,'updateNeeded':True})
+        self.assertEqual(data,{'currentCommit':self.previous,'remoteCommit':self.target,'updateNeeded':True,
+                               'registeredPath':str(self.root/'plugin/role-workflow'),'registrationMatches':True,
+                               'agentInstalled':False,'skipReason':None})
         self.assertEqual({str(p.relative_to(self.root)):p.read_bytes() for p in self.root.rglob('*') if p.is_file()},before)
         self.assertFalse((self.base/'data').exists());self.assertFalse((self.base/'logs').exists())
         self.assertEqual(self.calls(),[])
+
+
+    def check_output(self):
+        with contextlib.redirect_stdout(io.StringIO()) as output, mock.patch.object(auto,'ROOT',self.root), mock.patch.object(auto,'load_config',return_value=self.config):
+            self.assertEqual(auto.main(['--check']),0)
+        return json.loads(output.getvalue())
+
+    def test_check_reports_registration_agent_and_skip_reason_without_writing(self):
+        self.write_account(foreign=True)
+        plist=self.home/'Library/LaunchAgents'/(auto.AUTO_UPDATE_LABEL+'.plist')
+        plist.parent.mkdir(parents=True)
+        for scripts,expected in (('/other/scripts/auto-update.py',False),(str(self.root/'scripts/auto-update.py'),True)):
+            plist.write_bytes(auto.plistlib.dumps({'ProgramArguments':['python3',scripts]}))
+            data=self.check_output()
+            self.assertEqual((data['registeredPath'],data['registrationMatches'],data['agentInstalled'],data['skipReason']),
+                             (str(self.root/'other'),False,expected,'foreign-plugin'))
+        plist.write_text('not a plist');self.assertIs(self.check_output()['agentInstalled'],False)
+        plist.unlink();self.assertIs(self.check_output()['agentInstalled'],False)
+        (self.home/'.paseo/paseo.pid').unlink()
+        self.assertEqual(self.check_output()['skipReason'],'daemon-stopped')
+        (self.home/'.paseo/paseo.pid').write_text(json.dumps({'pid':os.getpid()}))
+        (self.home/'.paseo/config.json').write_text(json.dumps({'pluginsEnabled':True}))
+        data=self.check_output();self.assertEqual((data['registeredPath'],data['registrationMatches']),(None,False))
+        self.assertEqual(data['skipReason'],'foreign-plugin')
+        (self.home/'.paseo/config.json').write_text(json.dumps({'pluginsEnabled':True,'plugins':[]}))
+        self.assertEqual(self.check_output()['skipReason'],'invalid-registration')
+        self.write_account();self.assertIsNone(self.check_output()['skipReason'])
+        self.assertFalse((self.base/'data').exists());self.assertFalse((self.base/'logs').exists())
+        self.assertEqual(self.calls(),[])
+
+    def test_busy_check_and_plugin_verification_are_shared_with_setup(self):
+        import public_runtime
+        spec=importlib.util.spec_from_file_location('public_setup_shared',Path(__file__).with_name('setup.py'))
+        shared=importlib.util.module_from_spec(spec);spec.loader.exec_module(shared)
+        self.assertIs(auto.busy_workflows,public_runtime.busy_workflows)
+        self.assertIs(shared.busy_workflows,public_runtime.busy_workflows)
+        self.assertIs(auto.verify_plugin_entries,public_runtime.verify_plugin_entries)
+        self.assertIs(shared.verify_plugin_entries,public_runtime.verify_plugin_entries)
+        self.workflow.write_text(json.dumps({'workflows':[{'status':'active','number':9,'pending':{'stage':'sending'}},{'status':'error','number':8,'pending':{'stage':'sending'}}]}))
+        self.workflow_before=self.workflow.read_bytes()
+        self.assertEqual(self.updater().busy(),[9]);self.assertEqual(public_runtime.busy_workflows(self.home),[9])
+        self.workflow.write_text(json.dumps({'workflows':[{'status':'active','plan':[]}]}));self.workflow_before=self.workflow.read_bytes()
+        with self.assertRaisesRegex(ValueError,'Invalid workflow member'):public_runtime.busy_workflows(self.home)
+        good={'id':'role-workflow','enabled':True,'status':'running','path':str(self.root/'plugin/role-workflow')}
+        public_runtime.verify_plugin_entries([good],self.root)
+        with self.assertRaisesRegex(RuntimeError,'after install'):public_runtime.verify_plugin_entries([],self.root,'install')
+        with self.assertRaisesRegex(RuntimeError,'not running cleanly'):public_runtime.verify_plugin_entries([{**good,'error':'x'}],self.root)
 
 
 if __name__=='__main__':unittest.main()
