@@ -28,8 +28,6 @@ class SetupTests(unittest.TestCase):
         self.node=self.root/'node';self.node.write_text('fixture');self.node.chmod(0o755)
         (self.root/'package-lock.json').write_text('{}')
         (self.root/'launchd').mkdir()
-        (self.root/'launchd/fold-reapply.plist.in').write_bytes((Path(__file__).resolve().parents[1]/'launchd/fold-reapply.plist.in').read_bytes())
-        (self.root/'launchd/fold-reapply.daemon.plist.in').write_bytes((Path(__file__).resolve().parents[1]/'launchd/fold-reapply.daemon.plist.in').read_bytes())
         (self.root/'launchd/auto-update.plist.in').write_bytes((Path(__file__).resolve().parents[1]/'launchd/auto-update.plist.in').read_bytes())
         self.config=self.home/'.config/paseo-public/config.json'
         self.commands=[];self.reads=[];self.version_code=0;self.version_error='';self.launchctl_code=0;self.ls_override=None;self.fail_install=False;self.hook=None
@@ -83,28 +81,33 @@ class SetupTests(unittest.TestCase):
         config={'logsDir':str(self.home/'logs & data'),'app':str(self.home/'Applications/Paseo.app')}
         plist=setup.launch_plist(config,str(self.node),self.home)
         self.assertEqual(plist['EnvironmentVariables']['PASEO_PUBLIC_CONFIG'],str(self.config))
-        self.assertEqual(plist['StandardOutPath'],str(self.home/'logs & data/stdout.log'))
+        self.assertEqual(plist['StandardOutPath'],str(self.home/'logs & data/auto-update/stdout.log'))
         self.assertEqual(plist['WorkingDirectory'],str(self.home))
         self.assertNotIn('__',json.dumps(plist))
 
-    def test_system_option_uses_app_owner_home_and_no_plugin_registration(self):
-        owner = pwd.struct_passwd(('example', 'x', 501, os.getgid(), '', str(self.home), '/bin/sh'))
-        app = self.root/'Paseo.app'; app.mkdir()
-        with mock.patch.object(setup, 'app_path', return_value=app), mock.patch.object(setup.pwd, 'getpwuid', return_value=owner), mock.patch.object(setup, 'deploy', return_value=0) as deploy:
-            self.assertEqual(self.execute('install', '--fold-reapply-system', '--dry-run'), 0)
-        spec, backup, action = deploy.call_args.args
-        self.assertEqual(spec['UserName'], 'example')
-        self.assertEqual(spec['EnvironmentVariables']['HOME'], str(self.home))
-        self.assertEqual(spec['EnvironmentVariables']['PASEO_HOME'], str(self.home/'.paseo'))
-        self.assertNotIn('LimitLoadToSessionType', spec)
-        self.assertTrue(spec['StartOnMount'])
-        self.assertEqual(spec['ProgramArguments'][0], '/bin/sh')
-        self.assertIn('--app "$3"', spec['ProgramArguments'][2])
-        self.assertEqual(self.commands, [])
+    def test_fold_options_were_removed(self):
+        for arguments in (('install','--with-fold-reapply'),('install','--fold-reapply-system','--dry-run')):
+            with self.subTest(arguments=arguments),contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):setup.main(arguments)
+        self.assertFalse((Path(__file__).resolve().parents[1]/'launchd/fold-reapply.plist.in').exists())
+
+    def test_install_and_uninstall_retire_this_checkouts_legacy_fold_watcher(self):
+        agents=self.home/'Library/LaunchAgents';agents.mkdir(parents=True)
+        legacy=agents/(setup.LEGACY_FOLD_LABEL+'.plist')
+        foreign=plistlib.dumps({'ProgramArguments':['python3','/other/scripts/auto-reapply-fold.py']})
+        legacy.write_bytes(foreign)
+        self.ready();self.assertEqual(self.execute('install'),0)
+        self.assertEqual(legacy.read_bytes(),foreign)  # another checkout's watcher is left alone
+        for action in ('install','uninstall'):
+            with self.subTest(action=action):
+                legacy.write_bytes(plistlib.dumps({'ProgramArguments':['python3',str(self.root/'scripts/auto-reapply-fold.py')]}))
+                self.commands.clear();self.assertEqual(self.execute(action),0)
+                self.assertFalse(legacy.exists())
+                self.assertTrue(any('bootout' in command and f'gui/{os.getuid()}/{setup.LEGACY_FOLD_LABEL}' in command for command in self.commands))
 
     def test_dry_run_has_no_writes_or_daemon_commands(self):
         before=sorted(str(path.relative_to(self.home)) for path in self.home.rglob('*'))
-        self.assertEqual(self.execute('install','--dry-run','--with-fold-reapply'),0)
+        self.assertEqual(self.execute('install','--dry-run'),0)
         self.assertEqual(sorted(str(path.relative_to(self.home)) for path in self.home.rglob('*')),before)
         self.assertEqual(self.commands,[])
 
@@ -140,7 +143,7 @@ class SetupTests(unittest.TestCase):
 
     def test_auto_update_calendar_and_account_paths(self):
         config={'logsDir':str(self.home/'logs & data')}
-        spec=setup.launch_plist(config,str(self.node),self.home,auto_update=True)
+        spec=setup.launch_plist(config,str(self.node),self.home)
         self.assertEqual(spec['Label'],'io.github.jinoisfree.paseo-public.auto-update')
         self.assertEqual(spec['StartCalendarInterval'],{'Hour':4,'Minute':30})
         self.assertIs(spec['RunAtLoad'],False)
@@ -153,7 +156,7 @@ class SetupTests(unittest.TestCase):
 
     def test_auto_update_dry_install_and_uninstall_do_not_write_or_contact_daemon(self):
         before=sorted(str(path.relative_to(self.home)) for path in self.home.rglob('*'))
-        self.assertEqual(self.execute('install','--with-auto-update','--with-fold-reapply','--dry-run'),0)
+        self.assertEqual(self.execute('install','--with-auto-update','--dry-run'),0)
         self.assertEqual(self.execute('uninstall','--with-auto-update','--dry-run'),0)
         self.assertEqual(sorted(str(path.relative_to(self.home)) for path in self.home.rglob('*')),before)
         self.assertEqual(self.commands,[])
@@ -247,7 +250,7 @@ class SetupTests(unittest.TestCase):
         self.assertEqual((self.home/'.paseo/config.json').read_bytes(),before)
 
     def test_replace_option_is_install_only(self):
-        for arguments in (('uninstall','--replace-registration'),('install','--fold-reapply-system','--replace-registration')):
+        for arguments in (('uninstall','--replace-registration'),('uninstall','--replace-registration','--dry-run')):
             with self.subTest(arguments=arguments),contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):setup.main(arguments)
 

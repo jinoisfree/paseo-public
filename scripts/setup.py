@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Account-local installer. Dry runs never change files or contact Paseo."""
 import argparse
-import contextlib
-import grp
 import pwd
 import hashlib
 import json
@@ -15,8 +13,7 @@ import sys
 import time
 import datetime
 from xml.sax.saxutils import escape
-from fold_daemon_setup import deploy
-from public_runtime import ROOT, LABEL, AUTO_UPDATE_LABEL, load_config, config_path, data_root, logs_root, auto_update_logs, node_executable, app_path, backup_root, busy_workflows, verify_plugin_entries, auto_update_agent_state
+from public_runtime import ROOT, LEGACY_FOLD_LABEL, AUTO_UPDATE_LABEL, load_config, config_path, data_root, logs_root, auto_update_logs, node_executable, app_path, backup_root, busy_workflows, verify_plugin_entries, auto_update_agent_state
 
 
 def run(command, home, *, check=True, capture=False):
@@ -190,15 +187,13 @@ def replace_registration(paseo, home, config, entry):
     return backup
 
 
-def launch_plist(config, node, home, owner=None, *, auto_update=False):
+def launch_plist(config, node, home):
+    """The daily auto-update LaunchAgent; the only launchd job this installer registers."""
     values = {'__PYTHON__':config.get('python') or os.environ.get('PASEO_PUBLIC_PYTHON') or shutil.which('python3') or sys.executable,'__REPOSITORY__':str(ROOT),'__HOME__':str(home),
               '__PATH__':str(Path(node).parent)+os.pathsep+os.environ.get('PATH','/usr/bin:/bin'),
               '__APP__':str(app_path(config)),'__PASEO_HOME__':str(home/'.paseo'),
               '__LOGS__':str(logs_root(config)), '__CONFIG__':str(config_path())}
-    if owner is not None:
-        values.update(__USER__=owner.pw_name, __GROUP__=grp.getgrgid(owner.pw_gid).gr_name)
-    template = 'auto-update.plist.in' if auto_update else ('fold-reapply.daemon.plist.in' if owner is not None else 'fold-reapply.plist.in')
-    text = (ROOT/'launchd'/template).read_text()
+    text = (ROOT/'launchd/auto-update.plist.in').read_text()
     for key,value in values.items():
         text = text.replace(key,escape(value))
     return plistlib.loads(text.encode())
@@ -223,64 +218,19 @@ def install_agent(label, generated, home):
         run(['/bin/launchctl', 'bootstrap', f'gui/{os.getuid()}', plist], home)
 
 
-@contextlib.contextmanager
-def owner_environment(owner):
-    # sudo's HOME is not the app owner's HOME. Never register plugins into root's Paseo.
-    original = os.environ.copy()
-    try:
-        os.environ.update(HOME=owner.pw_dir, PASEO_HOME=str(Path(owner.pw_dir)/'.paseo'))
-        os.environ.pop('PASEO_PUBLIC_CONFIG', None)
-        os.environ.pop('PASEO_PUBLIC_NODE', None)
-        yield
-    finally:
-        os.environ.clear()
-        os.environ.update(original)
-
-
-def system_setup(args):
-    app = app_path(load_config()).absolute()
-    owner = pwd.getpwuid(app.stat().st_uid)
-    with owner_environment(owner):
-        config = load_config()
-        config['app'] = str(app)
-        node = node_executable(config)
-        version = subprocess.check_output([node, '--version'], text=True).strip()
-        if int(version.lstrip('v').split('.')[0]) < 22:
-            raise RuntimeError('Node.js 22 이상이 필요합니다.')
-        if not args.dry_run and args.action == 'install':
-            if not (ROOT/'node_modules/.bin/tsx').is_file():
-                raise RuntimeError('앱 소유 계정에서 ./install.sh를 먼저 실행하세요. sudo 모드는 감시만 설치합니다.')
-            account = read_paseo(Path(owner.pw_dir))
-            if not same_plugin(account.get('plugins', {}).get('role-workflow', {})):
-                raise RuntimeError('앱 소유 계정의 role-workflow 등록을 먼저 확인하세요.')
-            # Private pre-existing automation must be migrated with its own installer.
-            legacy = Path(owner.pw_dir)/'Library/LaunchAgents/com.jino.paseo-fold-reapply.plist'
-            if legacy.exists() or Path('/Library/LaunchDaemons/com.jino.paseo-fold-reapply.plist').exists():
-                raise RuntimeError('다른 접기 감시가 있습니다. 중복 설치하지 않습니다.')
-        spec = launch_plist(config, node, Path(owner.pw_dir), owner)
-        return deploy(spec, data_root(config)/'system-install-backup', args.action, dry=args.dry_run)
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['install','uninstall'])
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--with-auto-update', action='store_true', help='daily 04:30 updater; with uninstall, remove only this agent')
     parser.add_argument('--replace-registration', action='store_true', help='install only: replace a foreign role-workflow registration with this checkout')
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument('--with-fold-reapply', action='store_true')
-    mode.add_argument('--fold-reapply-system', action='store_true', help='sudo: install only the app-owner system watcher; --dry-run needs no sudo')
     args = parser.parse_args(argv)
-    if args.with_auto_update and args.fold_reapply_system:
-        parser.error('--with-auto-update는 계정별 LaunchAgent 옵션입니다.')
-    if args.replace_registration and (args.action != 'install' or args.fold_reapply_system):
+    if args.replace_registration and args.action != 'install':
         parser.error('--replace-registration은 일반 install에서만 쓸 수 있습니다.')
     if sys.version_info < (3,12):
         raise RuntimeError('Python 3.12 이상이 필요합니다.')
-    if args.fold_reapply_system:
-        return system_setup(args)
     if os.geteuid() == 0 and not args.dry_run:
-        raise RuntimeError('일반 설치는 sudo 없이 실행하세요. 시스템 감시는 --fold-reapply-system을 사용하세요.')
+        raise RuntimeError('설치는 sudo 없이 실행하세요.')
     home = Path.home()
     config = load_config()
     node = node_executable(config)
@@ -295,14 +245,14 @@ def main(argv=None):
     plan = {'action':args.action,'home':str(home),'plugin':str(ROOT/'plugin/role-workflow'),
             'node':node,'python':sys.executable,'paseo':str(paseo),'config':str(config_path()),
             'data':str(data_root(config)),'logs':str(logs_root(config)),
-            'withFoldReapply':args.with_fold_reapply,'withAutoUpdate':args.with_auto_update,'dryRun':args.dry_run,
+            'withAutoUpdate':args.with_auto_update,'dryRun':args.dry_run,
             'pathCliWarning':path_cli_warning()}
     conflict = registration_conflict(entry) if entry and not same_plugin(entry) and args.action == 'install' else None
     plan.update(registrationConflict=conflict, replaceRegistration=args.replace_registration)
     if conflict and not args.replace_registration:
         if args.dry_run:
             print(json.dumps(plan,ensure_ascii=False,indent=2))
-        options = [flag for flag, used in (('--with-auto-update', args.with_auto_update), ('--with-fold-reapply', args.with_fold_reapply)) if used]
+        options = ['--with-auto-update'] if args.with_auto_update else []
         raise RuntimeError(conflict_message(conflict, options))
     print(json.dumps(plan,ensure_ascii=False,indent=2))
     if plan['pathCliWarning'] and not args.dry_run:
@@ -316,7 +266,7 @@ def main(argv=None):
             run(command('plugin','remove','role-workflow'),home)
         remove_agent(AUTO_UPDATE_LABEL, 'auto-update.py', home)
         if not args.with_auto_update:
-            remove_agent(LABEL, 'auto-reapply-fold.py', home)
+            remove_agent(LEGACY_FOLD_LABEL, 'auto-reapply-fold.py', home)
         print('등록 해제 완료. 설정·워크플로·빌드·백업·로그는 삭제하지 않았습니다.')
         return 0
     if not (home/'.paseo/paseo.pid').exists():
@@ -325,15 +275,6 @@ def main(argv=None):
         busy = busy_workflows(home)
         if busy:
             raise RuntimeError('진행 중인 작업이 있어 등록을 전환하지 않습니다: '+', '.join(f'#{number}' for number in busy))
-    if args.with_fold_reapply:
-        if (Path('/Library/LaunchDaemons')/(LABEL+'.plist')).exists():
-            raise RuntimeError('시스템 접기 감시가 있습니다. 사용자 감시를 중복 설치하지 않습니다.')
-        app = app_path(config)
-        if not app.exists() or app.stat().st_uid != os.getuid():
-            raise RuntimeError('공용 앱 자동 재적용은 앱 소유 계정 한 곳에서만 등록하세요.')
-        conflict = run(['/bin/launchctl','print',f'gui/{os.getuid()}/com.jino.paseo-fold-reapply'],home,check=False,capture=True)
-        if conflict.returncode == 0:
-            raise RuntimeError('기존 접기 감시 에이전트가 있습니다. 중복 등록하지 않습니다.')
     if args.with_auto_update:
         updater = home/'Library/LaunchAgents'/(AUTO_UPDATE_LABEL+'.plist')
         if updater.exists() and str(ROOT/'scripts/auto-update.py') not in plistlib.loads(updater.read_bytes()).get('ProgramArguments', []):
@@ -363,13 +304,11 @@ def main(argv=None):
     config_path().parent.mkdir(parents=True,exist_ok=True)
     config_path().write_text(json.dumps(config,ensure_ascii=False,indent=2)+'\n')
     config_path().chmod(0o600)
-    if args.with_fold_reapply:
-        data_root(config).mkdir(parents=True,exist_ok=True)
-        logs_root(config).mkdir(parents=True,exist_ok=True)
-        install_agent(LABEL, plistlib.dumps(launch_plist(config,node,home),sort_keys=False), home)
+    # The sidebar fold feature was removed; retire its watcher if this checkout registered one.
+    remove_agent(LEGACY_FOLD_LABEL, 'auto-reapply-fold.py', home)
     if args.with_auto_update:
         auto_update_logs(config).mkdir(parents=True, exist_ok=True)
-        install_agent(AUTO_UPDATE_LABEL, plistlib.dumps(launch_plist(config,node,home,auto_update=True),sort_keys=False), home)
+        install_agent(AUTO_UPDATE_LABEL, plistlib.dumps(launch_plist(config,node,home),sort_keys=False), home)
     verify_registration(paseo, home)
     if args.with_auto_update:
         agent = run(['/bin/launchctl','print',f'gui/{os.getuid()}/{AUTO_UPDATE_LABEL}'],home,check=False,capture=True)

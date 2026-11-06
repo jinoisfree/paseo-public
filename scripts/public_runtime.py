@@ -5,7 +5,8 @@ from pathlib import Path
 import shutil
 
 ROOT = Path(__file__).resolve().parents[1]
-LABEL = 'io.github.jinoisfree.paseo-public.fold-reapply'
+# Watcher of the removed sidebar fold feature; kept only so install/uninstall can retire it.
+LEGACY_FOLD_LABEL = 'io.github.jinoisfree.paseo-public.fold-reapply'
 AUTO_UPDATE_LABEL = 'io.github.jinoisfree.paseo-public.auto-update'
 
 
@@ -66,17 +67,6 @@ def app_path(config=None):
 def backup_root(config=None):
     config = load_config() if config is None else config
     return Path(config.get('backupDir', data_root(config)/'backups')).expanduser()
-
-
-def build_root(config=None):
-    config = load_config() if config is None else config
-    return Path(config.get('buildDir', data_root(config)/'build')).expanduser()
-
-
-def installer_dist(version, config=None):
-    config = load_config() if config is None else config
-    template = config.get('distTemplate')
-    return Path(template.format(version=version)).expanduser() if template else data_root(config)/f'build/paseo-{version}/packages/app/dist'
 
 
 def busy_workflows(home):
