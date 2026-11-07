@@ -33,7 +33,7 @@ export function PlacementPickerCard({ item, theme }: PluginTimelineItemProps<z.i
         <Pressable accessibilityRole="button" disabled={busy} onPress={() => void pick("worktree")} style={{ padding: 10, borderWidth: 1, borderColor: c.border, borderRadius: 8 }}>
           <Text style={{ color: c.foreground }}>따로 작업 공간 만들어 바로 시작</Text>
         </Pressable>
-        <Text style={{ color: c.foregroundMuted }}>이 폴더의 복사본(Git worktree)을 따로 만들어 지금 바로 구현을 시작해요. 서로 섞이지 않지만, 사이드바에 줄이 하나 더 생기고, 푸시한 뒤 원래 폴더로 합치는 단계가 있어요. 두 작업이 같은 곳을 고쳤다면 합칠 때 직접 정리해야 할 수 있어요.</Text>
+        <Text style={{ color: c.foregroundMuted }}>이 폴더의 복사본(Git worktree)을 따로 만들어 지금 바로 구현을 시작해요. 서로 섞이지 않지만, 사이드바에 줄이 하나 더 생기고, 끝나면 원래 폴더로 합치는 단계가 있어요. 그사이 앞 작업이 먼저 끝났다면 구현 담당이 그 변경까지 합쳐 겹친 곳을 정리하고, 다시 검증한 뒤 푸시해요. 어느 쪽 의도를 살릴지 판단이 필요할 때만 물어봐요.</Text>
         <Pressable accessibilityRole="button" disabled={busy} onPress={() => void pick("wait")} style={{ padding: 10, borderWidth: 1, borderColor: c.border, borderRadius: 8 }}>
           <Text style={{ color: c.foreground }}>앞 작업이 끝나면 시작</Text>
         </Pressable>

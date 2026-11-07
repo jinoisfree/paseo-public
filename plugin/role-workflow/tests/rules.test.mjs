@@ -175,3 +175,21 @@ test('the first-reply mode question is skipped only for exact choices the plugin
  for (const text of ['연합개발','연합개발로 진행해줘','일반개발로 해줘']) assert.notEqual(requestedMode(text),null,text);
  assert.equal(requestedMode('연합개발 테스트'),null);
 });
+
+
+test("AC-11: subagents stay in the executor folder and shared resource checks have one owner", () => {
+  const implementation = RULES["20-implementation.md"];
+  assert.ok(implementation.includes("하위 에이전트는 구현 담당의 작업 폴더(worktree로 배치됐으면 그 worktree 경로)에서만 일하며, 별도 워크스페이스·폴더를 만들지 않는다."));
+  assert.ok(implementation.includes("실제 데몬 e2e처럼 포트·데몬을 쓰는 공유 자원 검사는 구현 담당이 한 번만 실행한다."));
+  assert.ok(!RULES["40-paseo-role-workflow.md"].includes("하위 에이전트는 구현 담당의 작업 폴더"), "subagent folder policy has one original");
+});
+
+test("AC-15: workflow rules require merge, retest and review before approval, distinct from rejection bypasses", () => {
+  const rules = RULES["40-paseo-role-workflow.md"];
+  assert.ok(rules.includes("로컬 HEAD와 원격 추적 tip이 대상 커밋의 조상인지 읽기 전용으로 확인한다"));
+  assert.ok(rules.includes("최신 기준 브랜치를 worktree 브랜치에 merge·충돌 정리·전체 시험 재실행하도록 보완 plan을 지시하고 결과를 재검증한 커밋을 pushTargets로 쓴다"));
+  assert.ok(rules.includes("계획 담당이 사용자에게 input으로 묻는다"));
+  const push = rules.split("## 4. 푸시")[1].split("## 5.")[0];
+  assert.ok(push.includes("푸시 거절 뒤 pull·rebase·merge로 우회하지 않고 사용자 결정을 받는다. 이는 푸시 승인 전에 계획된 merge 보완과 구별한다."));
+  assert.ok(push.includes("플러그인은 merge·rebase·force를 직접 실행하지 않는다"));
+});

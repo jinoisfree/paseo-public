@@ -158,6 +158,8 @@ const workflowSchema = z.object({
     .object({ path: z.string(), branch: z.string(), base: z.string(), workspaceId: z.string() })
     .nullable()
     .default(null),
+  /** Commit sets already notified about a required base merge; survives restart and retargeting. */
+  worktreeMergeNotices: z.array(z.string()).default([]),
   /** Result of moving the planner's checkout to the pushed, verified commit. */
   integration: z.object({ commit: z.string(), ok: z.boolean(), detail: z.string() }).nullable().default(null),
   pushTargets: pushTargetsSchema.default([]),
@@ -599,6 +601,7 @@ export class WorkflowEngine {
     db: () => this.db(),
     save: () => this.save(),
     now: () => this.now(),
+    touch: (w, detail) => this.touch(w, detail),
     settings: () => this.settings(),
     invalidatePush: (w, progress) => this.invalidatePush(w, progress),
     setPushUnverified: (w, value) => this.setPushUnverified(w, value),
@@ -1260,6 +1263,7 @@ export class WorkflowEngine {
         isolation: "undecided",
         placement: null,
         worktree: null,
+        worktreeMergeNotices: [],
         integration: null,
         pushTargets: [],
         pushEpoch: 0,
@@ -3042,8 +3046,9 @@ export class WorkflowEngine {
             const detail = w.placement.stage === "choice"
               ? `구현 시작 방법 선택을 기다립니다: 같은 폴더에서 #${blocker.number} 작업이 진행 중입니다.`
               : `같은 폴더의 #${blocker.number} ${blocker.title} 작업이 끝나면 #${w.number} 구현을 자동으로 시작합니다.`;
-            if (w.detail !== detail + (w.placement.reason ? ` ${w.placement.reason}` : ""))
-              this.touch(w, detail + (w.placement.reason ? ` ${w.placement.reason}` : ""));
+            const explained = detail + (w.placement.reason ? ` ${w.placement.reason}` : "") +
+              " 그 작업을 완료 표시하거나 보관하면 바로 시작합니다.";
+            if (w.detail !== explained) this.touch(w, explained);
             await this.save();
             if (w.placement.stage === "choice" && w.plan && !this.placementCards.has(w.id) && this.port.placementPicker) {
               await this.port.placementPicker(w.plan.id, w.id, blocker);

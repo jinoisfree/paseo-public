@@ -201,16 +201,19 @@ try {
 
   await step("without overlap a federated executor opens in the planner workspace tab", async () => {
     writeFileSync(control, JSON.stringify({ mode: "role", scenario: "shared-tab",
-      plan: [workflowBlock("plan", "탭에서 더미 구현"), workflowBlock("input", "e2e 확인 끝")],
+      plan: [workflowBlock("plan", "탭에서 더미 구현")],
       execute: [workflowBlock("result", "탭 구현 완료")],
     }));
     try {
       const planner = await runAgent("연합개발로 진행해줘. 탭 배치 계획을 세워줘.");
-      let flow = await waitFor("federated tab workflow", async () => state().workflows.find(w => w.plan?.id === planner && w.mode === "federated"));
+      let flow = await waitFor("federated tab workflow", async () => state().workflows.find(w => w.plan?.id === planner && w.mode === "federated" && (w.selectionPlan || w.processed.length)));
       if (!flow.selectionPlan) {
-        await cli("send", planner, "계획을 확정해줘.", "--wait", "--wait-timeout", "120s");
+        await cli("send", planner, "계획을 확정해줘.");
         flow = await waitFor("held tab plan", async () => state().workflows.find(w => w.id === flow.id && w.selectionPlan));
       }
+      writeFileSync(control, JSON.stringify({ mode: "role", scenario: "shared-tab-review",
+        plan: [workflowBlock("input", "e2e 확인 끝")], execute: [workflowBlock("result", "탭 구현 완료")],
+      }));
       const { models } = await rpc("workflow.models", { provider: "claude" });
       const model = models.find(m => m.isDefault) ?? models[0];
       const thinking = model.thinkingOptions.find(o => o.isDefault)?.id ?? model.thinkingOptions[0]?.id ?? "";
@@ -260,12 +263,13 @@ try {
     assert((await run("git", ["ls-remote", remote])).stdout === "", "a commit reached the remote");
   });
 
+  let worktreeFlow;
   await step("a federated executor works in its own worktree of the same repository", async () => {
     writeFileSync(
       control,
       JSON.stringify({
         mode: "role", scenario: "overlap-worktree",
-        plan: [workflowBlock("plan", "feature.txt를 추가한다"), workflowBlock("input", "e2e 확인 끝")],
+        plan: [workflowBlock("plan", "feature.txt를 추가한다")],
         execute: [workflowBlock("result", "구현 완료")],
       }),
     );
@@ -273,16 +277,19 @@ try {
       const planner = await runAgent("연합개발로 진행해줘. feature.txt를 추가하는 계획을 세워줘.");
       let flow = await waitFor("federated workflow", async () => {
         const found = state().workflows.find((w) => w.plan?.id === planner);
-        return found?.mode === "federated" ? found : null;
+        return found?.mode === "federated" && (found.selectionPlan || found.processed.length) ? found : null;
       });
       if (!flow.selectionPlan) {
         // The turn that names the mode only sets it; the next planner turn carries the plan.
-        await cli("send", planner, "계획을 확정해줘.", "--wait", "--wait-timeout", "120s");
+        await cli("send", planner, "계획을 확정해줘.");
         flow = await waitFor("held plan", async () => {
           const found = state().workflows.find((w) => w.id === flow.id);
           return found?.selectionPlan ? found : null;
         });
       }
+      writeFileSync(control, JSON.stringify({ mode: "role", scenario: "overlap-worktree-review",
+        plan: [workflowBlock("input", "e2e 확인 끝")], execute: [workflowBlock("result", "구현 완료")],
+      }));
       const { models } = await rpc("workflow.models", { provider: "claude" });
       const model = models.find((m) => m.isDefault) ?? models[0];
       assert(model, "no Claude model in the catalog");
@@ -317,6 +324,53 @@ try {
         // The executor's result was processed and the planner answered the review.
         return found?.lastResult && found.status === "needs_input" ? found : null;
       }, 120_000);
+      worktreeFlow = state().workflows.find(w => w.id === flow.id);
+    } finally {
+      writeFileSync(control, JSON.stringify({ mode: "text", text: "2" }));
+    }
+  });
+
+  await step("AC-12/AC-13: base advancement blocks approval until the executor merges it", async () => {
+    const flow = worktreeFlow;
+    assert(flow?.worktree, "worktree scenario did not finish");
+    const fixtureGit = async (cwd, args) => {
+      const result = await run("git", args, { cwd });
+      assert(result.code === 0, result.stderr);
+      return result.stdout.trim();
+    };
+    const reportTarget = async commit => {
+      const targets = [{ repository: flow.worktree.path, remote: "origin", branch: await fixtureGit(work, ["branch", "--show-current"]), commit }];
+      writeFileSync(control, JSON.stringify({ mode: "text", text: `푸시대상: ${JSON.stringify(targets)}\n${workflowBlock("note", "대상 기록")}` }));
+      const result = await cli("send", flow.plan.id, "이 검증 대상 커밋을 기록해줘.");
+      assert(result.code === 0, result.stderr);
+      await waitFor("reported push target", async () => state().workflows.find(w => w.id === flow.id && w.pushTargets[0]?.commit === commit && !w.pending));
+      await rpc("workflow.progress", { number: flow.number, project: work, progress: "done" });
+    };
+    try {
+      const candidate = await fixtureGit(flow.worktree.path, ["rev-parse", "HEAD"]);
+      const baseBranch = await fixtureGit(work, ["branch", "--show-current"]);
+      await fixtureGit(work, ["update-ref", `refs/remotes/origin/${baseBranch}`, candidate]);
+      await reportTarget(candidate);
+      const advanced = await run("git", ["-c", "user.email=e2e@example.invalid", "-c", "user.name=e2e", "commit", "-q", "--allow-empty", "-m", "base advances before approval"], { cwd: work });
+      assert(advanced.code === 0, advanced.stderr);
+      const head = await fixtureGit(work, ["rev-parse", "HEAD"]);
+      const before = await fixtureGit(work, ["show-ref"]);
+      let blocked = false;
+      try { await rpc("workflow.push-prepare", { id: flow.id }); }
+      catch (error) { blocked = /기준 브랜치.*앞서 있어 먼저 합쳐야 합니다/.test(String(error)); }
+      assert(blocked, "approval preparation accepted a commit missing the advanced base");
+      await waitFor("base merge notice", async () => {
+        const found = state().workflows.find(w => w.id === flow.id);
+        return found?.worktreeMergeNotices.length === 1 && !found.managedPush && found;
+      });
+      assert(await fixtureGit(work, ["show-ref"]) === before, "approval gate wrote a Git ref");
+      // The harness represents the executor performing its approved merge plan; the plugin never merges.
+      const merged = await run("git", ["merge", "--ff-only", "--no-edit", head], { cwd: flow.worktree.path });
+      assert(merged.code === 0, merged.stderr);
+      await reportTarget(await fixtureGit(flow.worktree.path, ["rev-parse", "HEAD"]));
+      const prepared = await rpc("workflow.push-prepare", { id: flow.id });
+      assert(prepared.state === "prepared" && prepared.targets[0].commit === head, "merged target was not prepared");
+      assert((await run("git", ["ls-remote", remote])).stdout === "", "approval preparation wrote to the remote");
     } finally {
       writeFileSync(control, JSON.stringify({ mode: "text", text: "2" }));
     }

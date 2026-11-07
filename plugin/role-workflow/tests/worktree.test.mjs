@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { WorkflowEngine } from "../server/engine.ts";
 import { createRepoProbe } from "../server/git.ts";
 import { settingsSchema } from "../shared/contracts.ts";
-import { integrateWorktree } from "../server/worktree.ts";
+import { checkWorktreeBase, integrateWorktree, worktreeContext } from "../server/worktree.ts";
 
 const run = promisify(execFile);
 const git = (cwd, ...args) =>
@@ -107,7 +107,7 @@ async function fixture(t, { placement = "worktree", overlap = true, foreign = fa
     await finish("A", "plan", { next: "기능 구현" });
     return engine.selectExecutor(id, { provider: "codex", model: "builder", thinking: "high" });
   };
-  return { dir, repo, other, base, id, file, get engine() { return engine; }, agents, blocker, addBlocker, cards, created, sent, worktrees, state, finish, start,
+  return { dir, repo, other, base, id, file, get engine() { return engine; }, probe, agents, blocker, addBlocker, cards, created, sent, worktrees, state, finish, start,
     restart: async () => { await engine.close(); engine = new WorkflowEngine(file, port, undefined, probe); await engine.tick(); },
   };
 }
@@ -244,6 +244,7 @@ test("AC-02/AC-03/AC-09: idle overlap waits durably for a single choice, then cr
   assert.equal(w.isolation, "undecided");
   assert.equal(w.pending.stage, "queued");
   assert.equal(w.placement.stage, "choice");
+  assert.match(w.detail, /그 작업을 완료 표시하거나 보관하면 바로 시작합니다\.$/);
   assert.equal(f.created.length, 0);
   assert.equal(f.sent.length, 0);
   assert.equal(f.cards.length, 1);
@@ -253,6 +254,7 @@ test("AC-02/AC-03/AC-09: idle overlap waits durably for a single choice, then cr
   w = await f.state();
   assert.equal(w.isolation, "undecided");
   assert.equal(w.placement.stage, "choice");
+  assert.match(w.detail, /그 작업을 완료 표시하거나 보관하면 바로 시작합니다\.$/);
   assert.equal(f.created.length, 0);
   assert.equal(f.cards[1].workflowId, f.cards[0].workflowId, "re-attachment uses the same timeline identity");
   assert.equal((await f.engine.selectPlacement(f.id, "worktree")).ok, true);
@@ -277,6 +279,7 @@ test(`AC-04: wait keeps instructions queued until the blocker is ${release}`, as
   assert.equal(w.pending.stage, "queued");
   assert.equal(f.created.length, 0);
   assert.match(w.detail, /작업이 끝나면 .* 구현을 자동으로 시작합니다/);
+  assert.match(w.detail, /그 작업을 완료 표시하거나 보관하면 바로 시작합니다\.$/);
   await f.restart();
   assert.equal(f.created.length, 0);
   const blocker = f.engine.database.workflows.find(w => w.id === f.blocker.id);
@@ -317,6 +320,7 @@ test(`AC-06: ${unavailable} automatically waits with an explanation`, async t =>
   assert.equal(w.placement.stage, "waiting");
   assert.ok(w.placement.reason);
   assert.ok(w.detail.includes(w.placement.reason));
+  assert.match(w.detail, /그 작업을 완료 표시하거나 보관하면 바로 시작합니다\.$/);
   assert.equal(f.cards.length, 0);
   assert.equal(f.worktrees.length, 0);
   assert.equal(f.created.length, 0);
@@ -392,4 +396,168 @@ test("AC-10: running writer protection and conflict warnings still block shared 
   }
   assert.equal(f.cards.length, 0);
   assert.equal(f.worktrees.length, 0);
+});
+
+
+async function readyWorktreePush(f) {
+  await f.start();
+  const w = f.engine.database.workflows[0];
+  await git(f.repo, "remote", "add", "origin", f.other);
+  await git(f.repo, "update-ref", "refs/remotes/origin/main", f.base);
+  await git(f.repo, "config", "branch.main.remote", "origin");
+  await git(f.repo, "config", "branch.main.merge", "refs/heads/main");
+  await writeFile(path.join(w.worktree.path, "feature.txt"), "feature\n");
+  await git(w.worktree.path, "add", "feature.txt");
+  await git(w.worktree.path, "commit", "-q", "-m", "feature");
+  const commit = await git(w.worktree.path, "rev-parse", "HEAD");
+  w.pushTargets = [{ repository: w.worktree.path, remote: "origin", branch: "main", commit }];
+  w.progress = "done";
+  w.status = "needs_input";
+  w.pending = null;
+  w.inbox = null;
+  for (const agent of f.agents.values()) agent.status = "idle";
+  f.sent.length = 0;
+  return { w, commit };
+}
+
+for (const advanced of ["local", "tracking"])
+test(`AC-12: ${advanced} base advancement blocks approval without changing Git and notifies once per commit`, async t => {
+  const f = await fixture(t);
+  let { w, commit } = await readyWorktreePush(f);
+  const ahead = await git(f.repo, "commit-tree", `${f.base}^{tree}`, "-p", f.base, "-m", "base advanced");
+  await git(f.repo, "update-ref", advanced === "local" ? "refs/heads/main" : "refs/remotes/origin/main", ahead);
+  const refs = async () => Promise.all([git(f.repo, "show-ref"), git(f.other, "show-ref"), git(w.worktree.path, "status", "--porcelain")]);
+  const before = await refs();
+  await assert.rejects(f.engine.prepareManagedPush(f.id), new RegExp(`기준 브랜치 main가 ${ahead.slice(0, 12)}로 앞서 있어 먼저 합쳐야 합니다`));
+  assert.deepEqual(await refs(), before, "no refs or files were written by the approval gate");
+  assert.equal((await f.state()).managedPush, null);
+  assert.match((await f.state()).detail, /기준 브랜치 main가/);
+  assert.equal(f.sent.length, 1);
+  assert.equal(f.sent[0].id, "A");
+  assert.match(f.sent[0].prompt, /보완 plan을 지시하세요/);
+  assert.match(f.sent[0].prompt, /merge하고 충돌을 정리한 뒤 전체 시험을 다시 실행/);
+  assert.match(f.sent[0].prompt, /사용자에게 input/);
+  f.agents.get("A").status = "idle";
+  await assert.rejects(f.engine.prepareManagedPush(f.id), /앞서 있어/);
+  assert.equal(f.sent.length, 1);
+  await f.restart();
+  w = f.engine.database.workflows[0];
+  await assert.rejects(f.engine.prepareManagedPush(f.id), /앞서 있어/);
+  assert.equal(f.sent.length, 1, "notification deduplication survives restart");
+  const next = await git(f.repo, "commit-tree", `${commit}^{tree}`, "-p", commit, "-m", "another target");
+  w.pushTargets[0].commit = next;
+  await assert.rejects(f.engine.prepareManagedPush(f.id), /앞서 있어/);
+  assert.equal(f.sent.length, 2);
+  f.agents.get("A").status = "idle";
+  w.pushTargets[0].commit = commit;
+  await assert.rejects(f.engine.prepareManagedPush(f.id), /앞서 있어/);
+  assert.equal(f.sent.length, 2, "returning to a previous target does not repeat its notice");
+  assert.deepEqual(await refs(), before);
+});
+
+test("AC-13: merging the advanced base opens approval and lets verified integration fast-forward", async t => {
+  const f = await fixture(t);
+  const { w } = await readyWorktreePush(f);
+  await writeFile(path.join(f.repo, "base.txt"), "base change\n");
+  await git(f.repo, "add", "base.txt");
+  await git(f.repo, "commit", "-q", "-m", "base change");
+  const ahead = await git(f.repo, "rev-parse", "HEAD");
+  await git(f.repo, "update-ref", "refs/remotes/origin/main", ahead);
+  await assert.rejects(f.engine.prepareManagedPush(f.id), /앞서 있어/);
+  // This is the executor's planned work in the isolated fixture, never plugin automation.
+  await git(w.worktree.path, "merge", "--no-edit", "main");
+  const merged = await git(w.worktree.path, "rev-parse", "HEAD");
+  w.pushTargets[0].commit = merged;
+  f.agents.get("A").status = "idle";
+  const prepared = await f.engine.prepareManagedPush(f.id);
+  assert.equal(prepared.state, "prepared");
+  assert.equal(prepared.targets[0].commit, merged);
+  assert.equal(await git(f.repo, "rev-parse", "HEAD"), ahead, "approval preparation never integrates");
+  // The remote push is not executed: apply the verified-push integration boundary directly.
+  await integrateWorktree(w, f.probe, prepared);
+  assert.equal(w.integration.ok, true);
+  assert.equal(await git(f.repo, "rev-parse", "HEAD"), merged);
+  assert.equal(await readFile(path.join(f.repo, "feature.txt"), "utf8"), "feature\n");
+  assert.equal(await readFile(path.join(f.repo, "base.txt"), "utf8"), "base change\n");
+});
+
+for (const mode of ["shared", "general", "undecided"])
+test(`AC-14: ${mode} bypasses the worktree gate and retains the existing approval path`, async t => {
+  const f = await fixture(t);
+  const { w } = await readyWorktreePush(f);
+  if (mode === "general") w.mode = "general";
+  else w.isolation = mode;
+  const unexpected = () => { throw new Error("base probe must not run"); };
+  f.probe.identity = unexpected;
+  f.probe.branchTips = unexpected;
+  f.probe.isAncestor = unexpected;
+  const prepared = await f.engine.prepareManagedPush(f.id);
+  assert.equal(prepared.state, "prepared");
+  assert.equal(f.sent.length, 0);
+});
+
+for (const missing of ["identity", "detached", "upstream", "unconfigured tracking", "graph", "probe"])
+test(`AC-14: unreadable ${missing} blocks approval without guessing`, async t => {
+  const f = await fixture(t);
+  const { w } = await readyWorktreePush(f);
+  if (missing === "identity") f.probe.identity = async () => null;
+  else if (missing === "detached") await git(f.repo, "checkout", "--detach", "-q");
+  else if (missing === "upstream") await git(f.repo, "update-ref", "-d", "refs/remotes/origin/main");
+  else if (missing === "unconfigured tracking") {
+    await git(f.repo, "config", "--remove-section", "branch.main");
+    await git(f.repo, "update-ref", "-d", "refs/remotes/origin/main");
+  }
+  else if (missing === "graph") f.probe.isAncestor = async () => null;
+  else f.probe.branchTips = undefined;
+  await assert.rejects(f.engine.prepareManagedPush(f.id), /기준 브랜치를 확인하지 못했습니다/);
+  assert.equal((await f.state()).managedPush, null);
+  assert.match((await f.state()).detail, /기준 브랜치를 확인하지 못했습니다/);
+  assert.equal(f.sent.length, 1);
+});
+
+test("AC-15: worktree context assigns pre-approval merge, retest and review to the two roles", async t => {
+  const f = await fixture(t);
+  await f.start();
+  const context = worktreeContext(f.engine.database.workflows[0]);
+  assert.match(context, /로컬 HEAD와 원격 추적 tip을 대상 커밋에 포함/);
+  assert.match(context, /계획 담당은 구현 담당에게 최신 기준 브랜치를 worktree 브랜치에 merge하고 충돌을 정리한 뒤 전체 시험을 다시 실행하도록 보완 plan을 지시/);
+  assert.match(context, /계획 담당이 재검증한 커밋을 pushTargets/);
+  assert.match(context, /사용자에게 input으로 묻는다/);
+  assert.match(context, /플러그인은 이 merge를 실행하지 않으며, rebase·force로 이력을 다시 쓰지 않는다/);
+});
+
+
+test("AC-12: a failed reprepare invalidates an earlier prepared approval", async t => {
+  const f = await fixture(t);
+  const { w } = await readyWorktreePush(f);
+  const previous = await f.engine.prepareManagedPush(f.id);
+  assert.equal(previous.state, "prepared");
+  const ahead = await git(f.repo, "commit-tree", `${f.base}^{tree}`, "-p", f.base, "-m", "base advanced");
+  await git(f.repo, "update-ref", "refs/heads/main", ahead);
+  await assert.rejects(f.engine.prepareManagedPush(f.id), /앞서 있어/);
+  assert.equal((await f.state()).managedPush, null);
+  await assert.rejects(f.engine.executeManagedPush(f.id, previous.id, true), /작업 또는 푸시 대상이 바뀌었습니다/);
+});
+
+test("AC-12/AC-14: base inspection uses only read-only Git commands and fails closed on graph errors", async t => {
+  const f = await fixture(t);
+  const { w } = await readyWorktreePush(f);
+  const calls = [];
+  const probe = createRepoProbe(async (cwd, args) => {
+    calls.push(args);
+    return git(cwd, ...args);
+  });
+  assert.equal((await checkWorktreeBase(w, probe, w.pushTargets)).ok, true);
+  assert.ok(calls.some(args => args[0] === "merge-base"));
+  for (const args of calls) {
+    assert.ok(["rev-parse", "branch", "check-ref-format", "for-each-ref", "cat-file", "merge-base"].includes(args[0]), args.join(" "));
+    if (args[0] === "branch") assert.deepEqual(args, ["branch", "--show-current"]);
+    if (args[0] === "merge-base") assert.equal(args[1], "--is-ancestor");
+  }
+  const broken = createRepoProbe(async (cwd, args) => {
+    if (args[0] === "merge-base") throw Object.assign(new Error("read failure"), { code: 128 });
+    return git(cwd, ...args);
+  });
+  assert.equal(await broken.isAncestor(f.repo, f.base, w.pushTargets[0].commit), null);
+  assert.equal((await checkWorktreeBase(w, broken, w.pushTargets)).ok, false);
 });

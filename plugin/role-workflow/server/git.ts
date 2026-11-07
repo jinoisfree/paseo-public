@@ -30,6 +30,10 @@ export interface RepoProbe {
   commit?(cwd: string, hash: string): Promise<string | null>;
   /** Checkout identity: top level, HEAD, current branch ("" when detached) and shared Git dir. */
   identity?(cwd: string): Promise<RepoIdentity | null>;
+  /** Read the base branch and its tracking tip without fetching; unavailable refs fail closed. */
+  branchTips?(cwd: string, branch: string, remote: string): Promise<{ head: string; tracking: string } | null>;
+  /** null distinguishes an unreadable commit/graph from a known non-ancestor. */
+  isAncestor?(cwd: string, ancestor: string, commit: string): Promise<boolean | null>;
   /** Moves the checked-out branch to `commit` only as a fast-forward. Never merges or resets. */
   fastForward?(cwd: string, commit: string): Promise<{ ok: boolean; detail: string }>;
 }
@@ -205,6 +209,37 @@ export function createRepoProbe(run: typeof git = git): RepoProbe {
           branch: branch.trim(),
           common: await resolvedFolder(common.trim()),
         };
+      } catch {
+        return null;
+      }
+    },
+    async branchTips(cwd, branch, remote) {
+      try {
+        const ref = `refs/heads/${branch}`;
+        await run(cwd, ["check-ref-format", ref]);
+        const head = (await run(cwd, ["rev-parse", "--verify", `${ref}^{commit}`])).trim();
+        const upstream = (await run(cwd, ["for-each-ref", "--format=%(upstream)", ref])).trim();
+        const trackingRef = upstream || `refs/remotes/${remote}/${branch}`;
+        await run(cwd, ["check-ref-format", trackingRef]);
+        // Without an upstream configuration, check the proposed remote's tracking ref.
+        // An absent or unreadable tip must block rather than silently skip the remote base.
+        const tracking = (await run(cwd, ["rev-parse", "--verify", `${trackingRef}^{commit}`])).trim();
+        return { head, tracking };
+      } catch {
+        return null;
+      }
+    },
+    async isAncestor(cwd, ancestor, commit) {
+      if (![ancestor, commit].every(hash => /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(hash))) return null;
+      try {
+        await run(cwd, ["cat-file", "-e", `${ancestor}^{commit}`]);
+        await run(cwd, ["cat-file", "-e", `${commit}^{commit}`]);
+        try {
+          await run(cwd, ["merge-base", "--is-ancestor", ancestor, commit]);
+          return true;
+        } catch (error) {
+          return (error as { code?: unknown }).code === 1 ? false : null;
+        }
       } catch {
         return null;
       }

@@ -5,7 +5,7 @@ import path from "node:path";
 import { build } from "esbuild";
 import { chromium } from "playwright";
 
-test("AC-02/AC-03/AC-04: placement card explains both choices, sends the RPC, then hides buttons", { timeout: 60000 }, async t => {
+test("AC-02/AC-03/AC-04/AC-15: placement card explains both choices, sends the RPC, then hides buttons", { timeout: 60000 }, async t => {
   const root = path.resolve(import.meta.dirname, "..");
   const bundle = await build({
     stdin: { contents: `
@@ -43,7 +43,7 @@ createRoot(document.getElementById('root')).render(<PlacementPickerCard item={{d
     await page.getByText("같은 폴더에서 다른 작업이 아직 진행 중이에요", { exact: true }).waitFor();
     assert.equal(await page.getByRole("button").count(), 2);
     await page.getByText("#7 기존 작업 작업이 이 폴더의 파일을 고치고 있어요. 두 작업이 같은 파일을 동시에 고치면 서로의 변경이 섞일 수 있어서, 어떻게 진행할지 골라 주세요.", { exact: true }).waitFor();
-    await page.getByText("이 폴더의 복사본(Git worktree)을 따로 만들어 지금 바로 구현을 시작해요. 서로 섞이지 않지만, 사이드바에 줄이 하나 더 생기고, 푸시한 뒤 원래 폴더로 합치는 단계가 있어요. 두 작업이 같은 곳을 고쳤다면 합칠 때 직접 정리해야 할 수 있어요.", { exact: true }).waitFor();
+    await page.getByText("이 폴더의 복사본(Git worktree)을 따로 만들어 지금 바로 구현을 시작해요. 서로 섞이지 않지만, 사이드바에 줄이 하나 더 생기고, 끝나면 원래 폴더로 합치는 단계가 있어요. 그사이 앞 작업이 먼저 끝났다면 구현 담당이 그 변경까지 합쳐 겹친 곳을 정리하고, 다시 검증한 뒤 푸시해요. 어느 쪽 의도를 살릴지 판단이 필요할 때만 물어봐요.", { exact: true }).waitFor();
     await page.getByText("지금 화면(같은 작업 공간)에서 그대로 진행해요. #7 작업이 끝나면 자동으로 시작해요. 섞일 걱정은 없지만 그동안 기다려야 해요.", { exact: true }).waitFor();
     await page.getByRole("button", { name: label, exact: true }).click();
     await page.getByText(confirmation, { exact: true }).waitFor();
