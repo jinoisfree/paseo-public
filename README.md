@@ -235,7 +235,8 @@ GitHub Actions(`.github/workflows/check.yml`)가 푸시와 PR마다 macOS·Node 
 생성 규칙 동기화 여부를 확인합니다. 개인 차단 목록은 CI에 없으므로 공용 패턴만 검사합니다.
 
 실제 Paseo 데몬 검증은 수동으로 실행합니다. `npm run e2e`는 임시 `PASEO_HOME`과 무작위 포트로
-데몬을 따로 띄우고, 이 체크아웃의 플러그인을 설치해 가짜 Claude 모델과 대화시킵니다.
+데몬을 따로 띄우고, 이 체크아웃의 플러그인을 설치해 가짜 모델(Claude Messages·Codex Responses)과 대화시킵니다.
+설치된 Codex CLI가 가짜 모델 제공자를 쓰도록 임시 `CODEX_HOME`을 만듭니다.
 실제 계정·사용량을 쓰지 않으며 사용 중인 데몬과 설정은 건드리지 않습니다. 기본 CLI는
 `/Applications/Paseo.app/Contents/Resources/bin/paseo`이고 `--paseo <경로>`로 바꿀 수 있습니다.
 실패하면 실행 폴더(로그·`results.json`)를 남기며 `--keep`으로 성공 때도 남깁니다.

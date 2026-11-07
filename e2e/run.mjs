@@ -61,6 +61,21 @@ const env = { ...baseEnv, PASEO_HOME: home };
 const cli = (...args) => run(paseo, [...args, "--home", home], { env });
 
 writeFileSync(control, JSON.stringify({ mode: "text", text: "2" }));
+await mkdir(join(root, "codex-home"), { recursive: true });
+writeFileSync(
+  join(root, "codex-home", "config.toml"),
+  [
+    // A known model family, so Codex offers its shell tool; requests still go to the fake provider.
+    'model = "gpt-5.4"',
+    'model_provider = "fake"',
+    "[model_providers.fake]",
+    'name = "fake"',
+    `base_url = "http://127.0.0.1:${modelPort}/v1"`,
+    'env_key = "FAKE_KEY"',
+    'wire_api = "responses"',
+    "",
+  ].join("\n"),
+);
 await run("git", ["init", "-q"], { cwd: work });
 await run("git", ["-c", "user.email=e2e@example.invalid", "-c", "user.name=e2e", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: work });
 const remote = join(root, "remote.git");
@@ -86,6 +101,7 @@ writeFileSync(
             DISABLE_ERROR_REPORTING: "1",
           },
         },
+        codex: { env: { CODEX_HOME: join(root, "codex-home"), FAKE_KEY: "e2e-fixture-only" } },
       },
     },
   }),
@@ -128,8 +144,8 @@ const agentFile = (id) => {
     });
   return walk(join(home, "agents"))[0];
 };
-const runAgent = async (prompt) => {
-  const result = await cli("run", "--provider", "claude", "--cwd", work, "--wait-timeout", "120s", "--json", prompt);
+const runAgent = async (prompt, provider = "claude") => {
+  const result = await cli("run", "--provider", provider, "--cwd", work, "--wait-timeout", "120s", "--json", prompt);
   const id = /"agentId":\s*"([^"]+)"/.exec(result.stdout)?.[1];
   if (!id) throw new Error(`agent did not start: ${result.stdout}${result.stderr}`.slice(0, 600));
   return id;
@@ -265,6 +281,32 @@ try {
     } finally {
       writeFileSync(control, JSON.stringify({ mode: "text", text: "2" }));
     }
+  });
+
+  await step("codex: a question is enrolled with the injected instructions", async () => {
+    const agent = await runAgent("1+1은? 숫자만 답하세요.", "codex");
+    const saved = readFileSync(agentFile(agent), "utf8");
+    assert(saved.includes("paseo-work-mode-v4"), "work-mode block missing from the Codex system prompt");
+    await waitFor("codex enrollment", async () => state().workflows.find((w) => w.plan?.id === agent));
+    const calls = readFileSync(modelLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    const codex = calls.filter((call) => call.api === "responses");
+    assert(codex.length > 0, "Codex never called the fake model");
+    assert(codex.some((call) => call.instructions.includes("paseo-work-mode-v4")), "the instructions did not reach the model");
+  });
+
+  await step("codex: the agent's shell cannot git push; nothing reaches the remote", async () => {
+    writeFileSync(control, JSON.stringify({ mode: "tool", command: "git push origin HEAD:main", text: "push attempted" }));
+    try {
+      await runAgent("일반개발로 진행해줘. 원격에 푸시해줘.", "codex");
+    } finally {
+      writeFileSync(control, JSON.stringify({ mode: "text", text: "2" }));
+    }
+    const calls = readFileSync(modelLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    const codex = calls.filter((call) => call.api === "responses");
+    assert(codex.some((call) => call.callsTool), `the fake model found no shell tool: ${JSON.stringify(codex.at(-1)?.tools)}`);
+    const results = codex.filter((call) => call.toolResult).map((call) => call.toolResult).join("\n");
+    assert(/role-workflow-approval-required|role-workflow: 에이전트는 git push/.test(results), `push was not blocked: ${results.slice(0, 400)}`);
+    assert((await run("git", ["ls-remote", remote])).stdout === "", "a commit reached the remote");
   });
 
   await step("state and plugin survive a daemon restart", async () => {

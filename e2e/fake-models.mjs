@@ -22,6 +22,79 @@ const textOf = (content) =>
     ? content
     : (content ?? []).map((block) => block.text ?? "").filter(Boolean).join(" ");
 
+// OpenAI Responses API, as Codex calls it through a custom model provider.
+function responses(parsed, res) {
+  const settings = control();
+  const { mode = "text", command = "" } = settings;
+  let { text = "Done." } = settings;
+  const input = Array.isArray(parsed.input) ? parsed.input : [];
+  const toolOutput = input.findLast?.((item) => item.type === "function_call_output" || item.type === "custom_tool_call_output");
+  const lastUser = input.filter((item) => item.role === "user").at(-1);
+  const instructions = `${parsed.instructions ?? ""}${JSON.stringify(input.filter((item) => item.role === "developer" || item.role === "system"))}`;
+  const role = instructions.includes("당신은 이 사용자의 구현 역할이다") ? "execute" : "plan";
+  // Recent Codex sends its tools as an "additional_tools" input item, with shell access through a
+  // JavaScript "exec" custom tool; older releases list function tools in `tools`.
+  const offered = JSON.stringify([parsed.tools ?? [], input.filter((item) => item.type === "additional_tools")]);
+  const tools = [...offered.matchAll(/"name":"([a-z_]+)"/g)].map((match) => match[1]);
+  const shell = ["exec", "shell", "exec_command", "shell_command"].find((name) => tools.includes(name));
+  const callsTool = mode === "tool" && !toolOutput && !!shell;
+  if (mode === "role" && !toolOutput) {
+    const list = settings[role] ?? [text];
+    text = list[Math.min(turns[role]++, list.length - 1)];
+  }
+  appendFileSync(
+    logFile,
+    JSON.stringify({
+      at: new Date().toISOString(),
+      api: "responses",
+      model: parsed.model,
+      mode,
+      role,
+      tools,
+      system: instructions.length,
+      instructions: instructions.slice(0, 200000),
+      last: textOf(lastUser?.content?.map?.((part) => ({ text: part.text ?? part.input_text })) ?? lastUser?.content).slice(-2000),
+      toolResult: toolOutput ? JSON.stringify(toolOutput.output).slice(0, 4000) : undefined,
+      callsTool,
+    }) + "\n",
+  );
+  const rid = `resp_${Date.now()}`,
+    mid = `msg_${Date.now()}`;
+  const usage = { input_tokens: 1, input_tokens_details: null, output_tokens: 1, output_tokens_details: null, total_tokens: 2 };
+  let events;
+  if (callsTool) {
+    const callId = `call_${Date.now()}`;
+    const args =
+      shell === "shell" ? { command: ["bash", "-lc", command] } : shell === "exec_command" ? { cmd: command } : { command };
+    const item =
+      shell === "exec"
+        ? {
+            type: "custom_tool_call",
+            id: `ctc_${Date.now()}`,
+            call_id: callId,
+            name: "exec",
+            input: `const r = await tools.exec_command({ cmd: ${JSON.stringify(command)} });\ntext(r);`,
+          }
+        : { type: "function_call", id: `fc_${Date.now()}`, call_id: callId, name: shell, arguments: JSON.stringify(args) };
+    events = [
+      ["response.created", { type: "response.created", response: { id: rid } }],
+      ["response.output_item.added", { type: "response.output_item.added", output_index: 0, item: { ...item, ...(item.input ? { input: "" } : { arguments: "" }) } }],
+      ["response.output_item.done", { type: "response.output_item.done", output_index: 0, item }],
+      ["response.completed", { type: "response.completed", response: { id: rid, usage } }],
+    ];
+  } else
+    events = [
+      ["response.created", { type: "response.created", response: { id: rid } }],
+      ["response.output_item.added", { type: "response.output_item.added", output_index: 0, item: { type: "message", id: mid, role: "assistant", content: [] } }],
+      ["response.output_text.delta", { type: "response.output_text.delta", item_id: mid, output_index: 0, content_index: 0, delta: text }],
+      ["response.output_item.done", { type: "response.output_item.done", output_index: 0, item: { type: "message", id: mid, role: "assistant", content: [{ type: "output_text", text }] } }],
+      ["response.completed", { type: "response.completed", response: { id: rid, usage } }],
+    ];
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+  for (const [event, data] of events) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  res.end();
+}
+
 createServer((req, res) => {
   let body = "";
   req.on("data", (chunk) => (body += chunk));
@@ -34,6 +107,7 @@ createServer((req, res) => {
       res.writeHead(status, { "content-type": "application/json", ...headers });
       res.end(JSON.stringify(value));
     };
+    if (req.url.startsWith("/v1/responses")) return responses(parsed, res);
     if (!req.url.startsWith("/v1/messages")) return json(404, { error: "fixture" });
     if (req.url.includes("count_tokens")) return json(200, { input_tokens: 10 });
     const settings = control();
