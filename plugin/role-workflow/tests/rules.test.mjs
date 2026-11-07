@@ -134,6 +134,19 @@ test('lightweight reading and record policy remains consistent in injected promp
  assert.match(RULES['README.md'],/최종 검토.*30-verification.md/);
  assert.match(RULES['00-common.md'],/별도 spec\/design\/tasks\/ADR 파일을 강제하지/);
  assert.match(RULES['10-planning.md'],/일반 변경의 사전 별도 검토는 일률 의무가 아니다/);
+ // PARALLEL-SUBAGENTS AC-7: preserve the planning, execution and review boundaries.
+ assert.match(RULES['10-planning.md'],/갈래별로 담당 파일\(갈래끼리 겹치지 않음\), 선행 관계, 난이도\(단순\/보통\/어려움\), 완료 조건을 적는다/);
+ assert.match(RULES['10-planning.md'],/계획에는 모델 이름을 적지 않는다/);
+ assert.match(RULES['20-implementation.md'],/계획에 독립 갈래가 있고 실행 도구가 하위 에이전트 병렬 실행을 지원할 때만/);
+ assert.match(RULES['20-implementation.md'],/갈래가 2개 이하이거나, 변경이 작거나, 한 파일에 몰리면 직접 구현한다/);
+ assert.match(RULES['20-implementation.md'],/지원하지 않는 도구에서는 차례대로 직접 구현한다/);
+ assert.match(RULES['20-implementation.md'],/하위 에이전트의 모델·추론은 기본적으로 구현 담당과 같게 한다/);
+ assert.match(RULES['20-implementation.md'],/단순 갈래만 낮출 수 있으며, 구현 담당보다 높이지 않는다/);
+ assert.match(RULES['20-implementation.md'],/도구가 개별 지정을 지원하지 않으면 기본값\(구현 담당과 동일\)을 쓴다/);
+ assert.match(RULES['20-implementation.md'],/구현 담당이 전체 diff를 직접 읽어 담당 파일 밖 변경과 갈래 간 충돌을 확인하고, 전체 시험을 직접 실행한다/);
+ assert.match(RULES['20-implementation.md'],/하위 에이전트 보고만으로 검증을 기록하지 않는다/);
+ assert.match(RULES['20-implementation.md'],/커밋은 구현 담당만 한다/);
+ assert.match(RULES['00-common.md'],/구현 담당이 쓴 하위 에이전트도 구현 참여로 보며, 모델이 달라도 교차 모델 검증으로 세지 않는다/);
  assert.match(RULES['30-verification.md'],/고위험 변경.*다른 모델이 검증하기 전까지 완료로 판정하지/);
  assert.match(RULES['40-paseo-role-workflow.md'],/승인한 뒤 플러그인이 실행하고 원격 해시까지 확인한다\. 에이전트는 git push를 직접 실행하지 않으며/);
 });
