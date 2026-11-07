@@ -7,7 +7,6 @@ import { planConflictSchema } from "../shared/plan-disposition";
 import { generalStateSchema, type GeneralAgent } from "../shared/general-agent";
 import { verdictProblem, verdictView, VERDICT_REPAIR } from "./verdict";
 import { generalAnswers, configChoice, type GeneralQuestion } from "./general-agent";
-import { unlink } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { z } from "zod";
@@ -17,11 +16,9 @@ import {
   settingsSchema,
   projectDefaultsSchema,
   archiveEntrySchema,
-  type ArchiveEntry,
-  type ArchiveCandidate,
   type Settings,
 } from "../shared/contracts";
-import { archiveCandidates, isFinished, type ArchiveInspection } from "./archive";
+import { isFinished, type ArchiveInspection } from "./archive";
 import {
   parseDecision,
   DecisionError,
@@ -70,6 +67,7 @@ import { ExecutorChoice } from "./executor-choice";
 import { ManagedPushes } from "./managed-pushes";
 import { GeneralMode } from "./general-mode";
 import { PushAudit } from "./push-audit";
+import { Archives } from "./archives";
 
 const memberSchema = z.object({
   id: z.string(),
@@ -312,7 +310,7 @@ const databaseSchema = z.object({
   workflows: z.array(workflowSchema),
   archives: z.array(archiveEntrySchema).max(500).default([]),
 });
-type Database = z.infer<typeof databaseSchema>;
+export type Database = z.infer<typeof databaseSchema>;
 export interface Snapshot {
   id: string;
   workspaceId: string;
@@ -529,7 +527,6 @@ export class WorkflowEngine {
   private cleanupChecked = false;
   private pushTitlesChecked = false;
   private readonly pendingTitles = new Set<string>();
-  private archiveCheckedAt = -Infinity;
   // Display-only observations; compaction identity and deduplication remain durable.
   private readonly compressionReasons = new Map<string, string>();
   private readonly compacting = new Map<string, Promise<void>>();
@@ -542,6 +539,15 @@ export class WorkflowEngine {
   private readonly scopeCache = new Map<string, Promise<string>>();
   private readonly managedRunner: ManagedPushRunner;
   private readonly managedExecutions = new Map<string, ManagedPush>();
+  private readonly archives = new Archives({
+    port: () => this.port,
+    db: () => this.db(),
+    save: () => this.save(),
+    serial: (work) => this.serial(work),
+    settings: () => this.settings(),
+    handoffPath: (w) => this.handoffPath(w),
+    savedHandoffs: () => this.savedHandoffs,
+  });
   private readonly pushAudit = new PushAudit({
     port: () => this.port,
     probe: () => this.probe,
@@ -2663,148 +2669,10 @@ export class WorkflowEngine {
     await this.advance(w);
   }
   archived(agentId: string) {
-    return this.serial(async () => {
-      const w = (await this.db()).workflows.find(
-        (candidate) => candidate.plan?.id === agentId || candidate.execute?.id === agentId,
-      );
-      if (!w) return;
-      if (isFinished(w)) await this.collectArchived(w);
-      else if (!automates(w) && w.plan?.id === agentId) await this.removeUndecided(w);
-    });
-  }
-  private async removeUndecided(w: Workflow, entry?: ArchiveEntry) {
-    const db = await this.db();
-    const previous = db.workflows;
-    const previousArchives = db.archives;
-    db.workflows = previous.filter((candidate) => candidate.id !== w.id);
-    if (entry)
-      db.archives = [...db.archives.filter((a) => a.id !== entry.id), entry]
-        .toSorted((a, b) => b.archivedAt.localeCompare(a.archivedAt))
-        .slice(0, 500);
-    try {
-      await this.save();
-    } catch (error) {
-      db.workflows = previous;
-      db.archives = previousArchives;
-      throw error;
-    }
-    this.savedHandoffs.delete(w.id);
-    await unlink(this.handoffPath(w)).catch(() => {});
-  }
-  private async cleanupArchived() {
-    const candidates = (await this.db()).workflows.filter(
-      (w) => !automates(w) || isFinished(w),
-    );
-    for (const w of candidates) {
-      try {
-        if (isFinished(w)) await this.collectArchived(w);
-        else if (w.plan && (await this.port.inspect(w.plan.id))?.archived === true)
-          await this.removeUndecided(w);
-      } catch {
-        console.error("role-workflow: undecided cleanup failed");
-      }
-    }
-  }
-  private archiveEntry(w: Workflow, archivedAt = new Date().toISOString()): ArchiveEntry {
-    const members = [w.plan, w.execute].filter((m) => m !== null);
-    return {
-      id: w.id,
-      number: w.number,
-      title: w.title,
-      projectId: w.projectId,
-      folder: path.basename(w.cwd),
-      progress: w.progress as "done" | "pushed" | "no_push",
-      workspaceIds: [...new Set(members.flatMap((m) => (m.workspaceId ? [m.workspaceId] : [])))],
-      agentIds: [...new Set([...members.map((m) => m.id), ...w.history])],
-      archivedAt,
-    };
-  }
-  private async collectArchived(w: Workflow): Promise<boolean> {
-    const members = [w.plan, w.execute].filter((m) => m !== null);
-    if (!isFinished(w) || !members.length) return false;
-    const times: number[] = [];
-    for (const member of members) {
-      const snapshot = await this.port.inspect(member.id);
-      if (snapshot?.archived !== true) return false;
-      if (snapshot.archivedAt && Number.isFinite(Date.parse(snapshot.archivedAt)))
-        times.push(Date.parse(snapshot.archivedAt));
-    }
-    const archivedAt =
-      times.length === members.length ? new Date(Math.max(...times)).toISOString() : undefined;
-    await this.removeUndecided(w, this.archiveEntry(w, archivedAt));
-    return true;
-  }
-  private async archiveRows(progress: "done" | "pushed", ids?: readonly string[]) {
-    const db = await this.db();
-    const workflows = db.workflows.filter(
-      (w) => isFinished(w) && w.progress === progress && (!ids || ids.includes(w.id)),
-    );
-    if (!workflows.length) return [];
-    const workspaceIds = [
-      ...new Set(
-        workflows.flatMap((w) =>
-          [w.plan, w.execute].flatMap((m) => (m?.workspaceId ? [m.workspaceId] : [])),
-        ),
-      ),
-    ];
-    const inspection = await this.port.archiveInspection(workspaceIds);
-    return archiveCandidates(
-      db.workflows,
-      inspection,
-      progress,
-      db.settings.archiveAfterDays,
-      Date.now(),
-      ids,
-    );
-  }
-  private async applyArchive(rows: ArchiveCandidate[], progress: "done" | "pushed") {
-    const archivedIds: string[] = [];
-    const errors: { id: string; error: string }[] = [];
-    for (const row of rows) {
-      try {
-        // Refresh again immediately before the first mutation of this flow.
-        const current = (await this.archiveRows(progress, [row.id]))[0];
-        if (!current) continue;
-        const w = (await this.db()).workflows.find((candidate) => candidate.id === row.id);
-        if (!w) continue;
-        for (const workspaceId of current.workspaceIds) {
-          // A previous half may already be archived. Recheck the remaining half as well.
-          const fresh = (await this.archiveRows(progress, [row.id]))[0];
-          if (!fresh?.workspaceIds.includes(workspaceId))
-            throw new Error("보관 조건이 변경되어 남은 워크스페이스를 보존했습니다.");
-          await this.port.archiveWorkspace(workspaceId);
-        }
-        // The archive RPC confirmed every workspace; queued archive events can now no-op.
-        await this.removeUndecided(w, this.archiveEntry(w));
-        archivedIds.push(row.id);
-      } catch (error) {
-        errors.push({ id: row.id, error: error instanceof Error ? error.message : String(error) });
-      }
-    }
-    return { rows, archivedIds, errors };
+    return this.archives.archived(agentId);
   }
   archiveFinished(apply = false, ids: readonly string[] = []) {
-    return this.serial(async () => {
-      if (apply && !ids.length) return { rows: [], archivedIds: [], errors: [] };
-      const rows = await this.archiveRows("done", apply ? ids : undefined);
-      return apply ? this.applyArchive(rows, "done") : { rows, archivedIds: [], errors: [] };
-    });
-  }
-  private async checkArchives() {
-    const now = Date.now();
-    if (now - this.archiveCheckedAt < 10 * 60 * 1000) return;
-    this.archiveCheckedAt = now;
-    for (const w of (await this.db()).workflows) {
-      if (isFinished(w)) await this.collectArchived(w).catch(() => false);
-    }
-    if (!(await this.settings()).autoArchivePushed) return;
-    try {
-      const result = await this.applyArchive(await this.archiveRows("pushed"), "pushed");
-      for (const error of result.errors)
-        console.error("role-workflow: archive failed", error.id, error.error);
-    } catch {
-      console.error("role-workflow: archive inspection failed; workspaces preserved");
-    }
+    return this.archives.archiveFinished(apply, ids);
   }
   syncProjectTitles() {
     return this.serial(async () => {
@@ -2817,7 +2685,7 @@ export class WorkflowEngine {
       if (!this.cleanupChecked) {
         await this.db();
         this.cleanupChecked = true;
-        await this.cleanupArchived();
+        await this.archives.cleanupArchived();
         if ((await this.db()).workflows.some((w) => w.conflict)) await this.refreshConflicts();
       }
       if (!this.pushTitlesChecked) {
@@ -2836,7 +2704,7 @@ export class WorkflowEngine {
         await this.syncWorkflow(w).catch((error) =>
           console.error(`role-workflow: #${w.number} sync failed; will retry:`, error),
         );
-      await this.checkArchives().catch((error) =>
+      await this.archives.checkArchives().catch((error) =>
         console.error("role-workflow: archive check failed; will retry:", error),
       );
       for (const w of (await this.db()).workflows) {
