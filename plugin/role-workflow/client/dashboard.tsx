@@ -309,6 +309,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
             ["notifyStopped", "작업 중단 알림"],
             ["autoResumeQuota", "사용 한도 해소 시 자동 재개"],
             ["autoResumeTransient", "일시 오류 자동 재개"],
+            ["shellPushGuard", "에이전트 셸 git push 차단"],
             ["notifyCompleted", "작업 완료 알림"],
             ["koreanTitle", "한글 제목"],
             ["titleMarker", "제목 상태 색 표식"],

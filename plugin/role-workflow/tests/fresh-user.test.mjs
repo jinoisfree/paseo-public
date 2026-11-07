@@ -170,7 +170,7 @@ async function freshUser(
       // /push is a documented slash command, not an absolute file path.
       const redacted = prompt
         .replaceAll(home, "<temporary-home>")
-        .replaceAll("/push는", "<push-command>");
+        .replace(/(^|[\s'"(])\/push\b/g, "$1<push-command>");
       assert.doesNotMatch(redacted, /[/](?:Users|Volumes|home)[/]/);
       assert.deepEqual(
         [...redacted.matchAll(/(?:^|[\s"'`:(])(?:[A-Za-z]:[\\/]|\/)[^\s"'`<>]*/gu)].map(

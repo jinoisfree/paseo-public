@@ -39,6 +39,7 @@ export const settingsSchema = z.object({
   autoStart: z.boolean().default(true),
   autoResumeQuota: z.boolean().default(true),
   autoResumeTransient: z.boolean().default(true),
+  shellPushGuard: z.boolean().default(true),
   threshold: z.number().min(0.05).max(0.9).default(0.8),
   claudeCompression: claudeCompressionSchema,
   codexCompression: z.enum(["threshold", "native"]).default("threshold"),

@@ -29,7 +29,7 @@ test("title prompt follows toggle and skips managed or nonautomated conversation
       const result = await hooks.get("agent.create.before")({ request }, context);
       assert.equal(result.config.systemPrompt.includes("<paseo-title-v1>"), enabled);
       assert.match(result.config.systemPrompt, /<paseo-push-approval-v1>/);
-      assert.match(result.config.systemPrompt, /명시적 승인을 받은 뒤에만/);
+      assert.match(result.config.systemPrompt, /승인하면 플러그인이 실행한다/);
     }
     for (const env of [
       { PASEO_ROLE_WORKFLOW_MANAGED: "1" },

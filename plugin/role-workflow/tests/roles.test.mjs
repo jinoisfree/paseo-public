@@ -104,7 +104,7 @@ test("automated role blocks refer to role documents without embedding rule bodie
   for (const name of ["20-implementation.md", "40-paseo-role-workflow.md"])
     assert.ok(execute.includes(name));
   assert.match(plan, /제품 코드는 고치지 않는다/);
-  assert.match(plan, /사용자가 명시 승인한 푸시만 직접 실행/);
+  assert.match(plan, /git push는 직접 실행하지 않고 사용자의 화면 승인으로 플러그인이 실행한다/);
   for (const prompt of [plan, execute]) {
     assert.match(prompt, /한국어로 설명한다. 전달은 호스트의 자동 작업 흐름이 담당한다/);
     assert.doesNotMatch(prompt, /핵심 수학 알고리즘|단일 세션 검증|REQ\/AC|위험도.*기준 예시/);

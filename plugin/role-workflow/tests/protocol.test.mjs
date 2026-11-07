@@ -504,26 +504,20 @@ test("bundled thinking keeps short lists and ignores models beyond four", async 
   );
 });
 
-test("push approval instructs direct execution and verification without a required dedicated tool", () => {
+test("push approval routes pushes through the approved plugin push, never the agent shell", () => {
   const prompt = pushApprovalPrompt();
-  assert.doesNotMatch(
-    prompt,
-    /기본 실행 경로로 쓰지 않는다|전용 푸시 기능을 사용한다|전용 실행 경로를 사용한다/,
-  );
+  assert.doesNotMatch(prompt, /에이전트가 직접 실행|단독 셸 명령 git -C <저장소> push|원칙의 예외/);
   for (const text of [
-    "명시적으로 승인하면 에이전트가 직접 실행",
-    "사용자에게 되돌리지 않는다",
-    "단독 셸 명령 git -C <저장소> push <원격> <전체 커밋 해시>:refs/heads/<브랜치>",
+    "플러그인 화면에서 대상을 확인해 승인하면 플러그인이 실행한다",
+    "에이전트는 git push나 같은 원격 쓰기를 직접 실행하지 않는다",
+    "우회하지 않는다(-c·pushurl·GIT_CONFIG_GLOBAL 변경",
+    "/push 또는 개발 작업 화면의 '푸시 대상 확인'",
+    "채팅의 승인 문장만으로 푸시하지 않는다",
     "git -C <저장소> ls-remote",
-    "--force/--mirror/--tags/--all은 금지",
-    "다른 에이전트에게 넘기지 않는다",
-    "선택 경로",
-    "원칙의 예외",
     "merge-base --is-ancestor",
-    "non-fast-forward",
     "이미 원격에 반영됨",
-    "pull/rebase/merge/강제 푸시로 우회하지 않고",
-    "대상 커밋 변경에는 새 승인이 필요",
+    "강제 푸시·pull·rebase·merge로 우회하지 않고",
+    "대상 커밋이 바뀌면 다시 승인받는다",
   ]) {
     assert.ok(prompt.includes(text), text);
   }

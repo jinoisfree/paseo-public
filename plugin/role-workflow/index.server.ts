@@ -15,6 +15,7 @@ import {
   titlePrompt,
 } from "./server/protocol";
 import { WorkflowEngine } from "./server/engine";
+import { permissionCommands, PUSH_DENIED_MESSAGE, pushGuardEnv, runsGitPush } from "./server/push-guard";
 import { createRepoProbe } from "./server/git";
 import { createWorkspacePins } from "./server/workspace-pins";
 import { createPort, readCompletedTurn } from "./server/paseo-port";
@@ -171,7 +172,16 @@ export default function contribute(server: PluginServerContext) {
         seeds.delete(token);
         if (createdSeeds.size > 200) createdSeeds.delete(createdSeeds.keys().next().value!);
       }
-      return request;
+      if (request.provider !== "claude" && request.provider !== "codex") return request;
+      // Re-applied on every open, so resumed and reloaded sessions keep the guard too.
+      const guarded = await engine
+        .settings()
+        .then((settings) => (settings.shellPushGuard ? pushGuardEnv(directory, request.env) : null))
+        .catch((error: unknown) => {
+          report(error);
+          return null;
+        });
+      return guarded ? { ...request, env: guarded } : request;
     }),
     server.addHook("agent.create.after", async ({ agent }, context) => {
       attach(context.paseo);
@@ -227,6 +237,21 @@ export default function contribute(server: PluginServerContext) {
     }),
     server.addHook("agent.permission.before", async ({ agent, request }, context) => {
       attach(context.paseo);
+      if (
+        permissionCommands(request.input).some(runsGitPush) &&
+        (await engine.settings().catch(() => null))?.shellPushGuard
+      ) {
+        // The shell guard already makes the push fail; refusing here saves a doomed approval prompt.
+        const denied = await context.paseo.agents
+          .ref(agent.id)
+          .respondToPermission({
+            requestId: request.id,
+            response: { behavior: "deny", message: PUSH_DENIED_MESSAGE },
+          })
+          .then(() => true)
+          .catch(() => false);
+        if (denied) return;
+      }
       await engine.permission(agent.id, request).catch(report);
     }),
     server.addHook("agent.permission.after", async ({ agent, requestId, resolution }, context) => {

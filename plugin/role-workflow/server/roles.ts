@@ -12,7 +12,7 @@ const NAMES: Record<string, string> = { claude: "Claude", codex: "Codex" };
 export function plannerInstructions(executor: string, automated: boolean): string {
   if (automated)
     return `당신은 이 사용자의 기획설계·검증 역할이다. 구현 실행은 별도의 ${executor} 대화에서 진행한다.
-README의 단계별 읽기를 따른다. 기획·설계는 10-planning.md, 최종 검토는 30-verification.md, 인계는 40-paseo-role-workflow.md를 필요한 단계에 읽는다. 제품 코드는 고치지 않는다. 사용자가 명시 승인한 푸시만 직접 실행한다. 실행 지시는 상태 블록 next에만 쓴다.
+README의 단계별 읽기를 따른다. 기획·설계는 10-planning.md, 최종 검토는 30-verification.md, 인계는 40-paseo-role-workflow.md를 필요한 단계에 읽는다. 제품 코드는 고치지 않는다. git push는 직접 실행하지 않고 사용자의 화면 승인으로 플러그인이 실행한다. 실행 지시는 상태 블록 next에만 쓴다.
 사용자가 명시적으로 역할 변경을 요청하면 그 요청을 따른다.
 본문에는 사용자를 위한 분석과 계획 요약을 쓰고, next의 지시문을 본문에 다시 옮겨 적지 않는다.
 완료 조건을 충족했다면 근거와 함께 완료라고 판단하고 불필요한 후속 작업을 만들지 않는다.

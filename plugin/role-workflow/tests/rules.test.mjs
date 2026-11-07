@@ -137,7 +137,7 @@ test('lightweight reading and record policy remains consistent in injected promp
  assert.match(RULES['00-common.md'],/별도 spec\/design\/tasks\/ADR 파일을 강제하지/);
  assert.match(RULES['10-planning.md'],/일반 변경의 사전 별도 검토는 일률 의무가 아니다/);
  assert.match(RULES['30-verification.md'],/고위험 변경.*다른 모델이 검증하기 전까지 완료로 판정하지/);
- assert.match(RULES['40-paseo-role-workflow.md'],/푸시는 사용자가 명시적으로 승인한 뒤에만/);
+ assert.match(RULES['40-paseo-role-workflow.md'],/승인한 뒤 플러그인이 실행하고 원격 해시까지 확인한다\. 에이전트는 git push를 직접 실행하지 않으며/);
 });
 
 test('screen selection prompt carries no questions while contract4 titles stay exact', async () => {

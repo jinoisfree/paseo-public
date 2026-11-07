@@ -4634,11 +4634,12 @@ async function federationWithLoggedPush(t) {
   await f.engine.setRepositories(f.id, ["/repo", "/worktree"]);
   await f.finish("planner", "plan", "plan");
   const executor = f.created[0].id;
-  assert.match(f.sent[0].prompt, /명시적 승인을 직접 받은 대화가 단독 셸 명령/);
+  assert.match(f.sent[0].prompt, /에이전트는 git push를 직접 실행하지 않는다/);
+  assert.doesNotMatch(f.sent[0].prompt, /단독 셸 명령 git -C <저장소> push/);
   assert.doesNotMatch(f.sent[0].prompt, /전용 실행 경로를 사용한다/);
   assert.match(f.sent[0].prompt, /merge-base --is-ancestor/);
   assert.match(f.sent[0].prompt, /이미 원격에 반영됨/);
-  assert.match(f.sent[0].prompt, /pull\/rebase\/merge\/강제 푸시로 우회하지 않고/);
+  assert.match(f.sent[0].prompt, /강제 푸시·pull·rebase·merge로 우회하지 않고/);
   f.agents.get(executor).status = "idle";
   const report = `작업상태: 푸시\n${withArtifacts("result", { repositories: ["/repo"], pushTargets: [pushedCommit] })}`;
   const turn = readTurn(

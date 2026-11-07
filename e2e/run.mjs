@@ -62,6 +62,9 @@ const cli = (...args) => run(paseo, [...args, "--home", home], { env });
 writeFileSync(control, JSON.stringify({ mode: "text", text: "2" }));
 await run("git", ["init", "-q"], { cwd: work });
 await run("git", ["-c", "user.email=e2e@example.invalid", "-c", "user.name=e2e", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: work });
+const remote = join(root, "remote.git");
+await run("git", ["init", "-q", "--bare", remote]);
+await run("git", ["remote", "add", "origin", remote], { cwd: work });
 writeFileSync(
   join(home, "config.json"),
   JSON.stringify({
@@ -178,6 +181,20 @@ try {
       const flow = state().workflows.find((w) => w.plan?.id === generalAgent);
       return flow?.mode === "general" && flow.processed.length > 0;
     });
+  });
+
+  await step("an agent's shell cannot git push; nothing reaches the remote", async () => {
+    writeFileSync(control, JSON.stringify({ mode: "tool", command: "git push origin HEAD:main", text: "push attempted" }));
+    try {
+      await runAgent("일반개발로 진행해줘. 원격에 푸시해줘.");
+    } finally {
+      writeFileSync(control, JSON.stringify({ mode: "text", text: "2" }));
+    }
+    const calls = readFileSync(modelLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert(calls.some((call) => call.callsTool), "the fake model never asked for the push");
+    const results = calls.filter((call) => call.toolResult).map((call) => call.toolResult).join("\n");
+    assert(/role-workflow-approval-required|role-workflow: 에이전트는 git push/.test(results), `push was not blocked: ${results.slice(0, 400)}`);
+    assert((await run("git", ["ls-remote", remote])).stdout === "", "a commit reached the remote");
   });
 
   await step("state and plugin survive a daemon restart", async () => {
