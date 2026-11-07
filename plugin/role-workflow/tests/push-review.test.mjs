@@ -1,9 +1,8 @@
-import { installLifecycle } from "./lifecycle-fixture.mjs";
 import { test } from "node:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { WorkflowEngine } from "../server/engine.ts";
+import { TestWorkflowEngine as WorkflowEngine } from "./lifecycle-fixture.mjs";
 import assert from "node:assert/strict";
 import { pushReviewKey, syncPushReview } from "../server/push-review.ts";
 import { pinDaemonUrl } from "../server/workspace-lifecycle.ts";
@@ -237,7 +236,7 @@ async function fixture(t, options = {}) {
     repository: async (cwd) => path.resolve(cwd),
     pushedTarget: async () => true,
   };
-  let engine = new WorkflowEngine(file, installLifecycle(port), undefined, probe);
+  let engine = new WorkflowEngine(file, port, undefined, probe);
   t.after(async () => {
     await engine.close();
     await rm(dir, { recursive: true, force: true });
@@ -269,7 +268,7 @@ async function fixture(t, options = {}) {
         edit(db);
         await writeFile(file, JSON.stringify(db));
       }
-      engine = new WorkflowEngine(file, installLifecycle(port), undefined, probe);
+      engine = new WorkflowEngine(file, port, undefined, probe);
     },
   };
 }

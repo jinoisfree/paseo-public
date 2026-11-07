@@ -1,11 +1,10 @@
-import { installLifecycle } from "./lifecycle-fixture.mjs";
 import { test } from "node:test";
 import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, readFile, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { WorkflowEngine } from "../server/engine.ts";
+import { TestWorkflowEngine as WorkflowEngine } from "./lifecycle-fixture.mjs";
 import { readTurn } from "../server/paseo-port.ts";
 
 const decision = (status, next = "next task") =>
@@ -109,7 +108,7 @@ async function fixture(
     },
   };
   const file = path.join(dir, "state.json");
-  const engine = new WorkflowEngine(file, installLifecycle(port), notify, probe, now, managedRunner);
+  const engine = new WorkflowEngine(file, port, notify, probe, now, managedRunner);
   const id = await engine.enroll(
     agents.get("planner"),
     {
@@ -240,7 +239,7 @@ test("durable queued work resumes after reload without creating duplicate worksp
   const f = await fixture(t);
   await f.engine.control(f.id, "pause");
   await f.finish("planner", "p1", "plan");
-  const restarted = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const restarted = new WorkflowEngine(f.file, f.port);
   await restarted.control(f.id, "resume");
   await restarted.tick();
   assert.equal(f.created.length, 1);
@@ -276,7 +275,7 @@ test("uncertain delivery without an echo stops visibly; corrupt state is not ove
   assert.equal((await f.view()).status, "error");
   assert.match((await f.view()).detail, /전달 여부/);
   await writeFile(f.file, "corrupt");
-  const restarted = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const restarted = new WorkflowEngine(f.file, f.port);
   await assert.rejects(restarted.list());
   assert.equal(await readFile(f.file, "utf8"), "corrupt");
 });
@@ -357,7 +356,7 @@ test("error retains the latest result until an explicit resume", async (t) => {
   const state = JSON.parse(await readFile(f.file, "utf8"));
   state.workflows[0].status = "error";
   await writeFile(f.file, JSON.stringify(state));
-  const restarted = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const restarted = new WorkflowEngine(f.file, f.port);
   t.after(() => restarted.close());
   await restarted.ended("planner", "replacement", decision("plan", "recovered instruction"), null);
   assert.equal((await restarted.list()).workflows[0].status, "error");
@@ -492,7 +491,7 @@ test("legacy state defaults settings and suppresses historical completed notific
     delete db.settings[key];
   await writeFile(f.file, JSON.stringify(db));
   const events = [];
-  const engine = new WorkflowEngine(f.file, installLifecycle(f.port), async (e) => events.push(e));
+  const engine = new WorkflowEngine(f.file, f.port, async (e) => events.push(e));
   t.after(() => engine.close());
   assert.equal((await engine.settings()).notifyCompleted, true);
   await engine.tick();
@@ -554,7 +553,7 @@ test("legacy workflows and default enrollment are federated", async (t) => {
   delete db.workflows[0].mode;
   delete db.settings.askMode;
   await writeFile(f.file, JSON.stringify(db));
-  const engine = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const engine = new WorkflowEngine(f.file, f.port);
   t.after(() => engine.close());
   assert.equal((await engine.list()).workflows[0].mode, "federated");
   assert.equal((await engine.settings()).askMode, true);
@@ -708,7 +707,7 @@ test("completed uncreated executor resets thinking on a new plan", async (t) => 
   db.settings.executorModel = "codex/fixed";
   db.settings.executorThinking = "";
   await writeFile(f.file, JSON.stringify(db));
-  const restarted = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const restarted = new WorkflowEngine(f.file, f.port);
   t.after(() => restarted.close());
   await restarted.ended("planner", "new", decision("plan"), null);
   assert.equal(f.created[0].member.config.provider, "codex/fixed");
@@ -741,7 +740,7 @@ test("legacy titled default and failed turns do not rename", async (t) => {
   const db = JSON.parse(await readFile(f.file, "utf8"));
   delete db.workflows[0].titled;
   await writeFile(f.file, JSON.stringify(db));
-  const restarted = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const restarted = new WorkflowEngine(f.file, f.port);
   t.after(() => restarted.close());
   await restarted.ended("planner", "p", "제목: 새 제목", null);
   assert.equal((await restarted.list()).workflows[0].title, "task");
@@ -792,7 +791,7 @@ test("standalone codex is labelled general and turns green on completion", async
   w.plan = null;
   w.phase = "execute";
   await writeFile(f.file, JSON.stringify(db));
-  const restored = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const restored = new WorkflowEngine(f.file, f.port);
   t.after(() => restored.close());
   await restored.ended("planner", "first", "제목: 단독 작업\n" + decision("complete"), null);
   assert.deepEqual(
@@ -906,7 +905,7 @@ test("paused flow turns green on the planner's complete without resuming", async
   saved.progress = "active";
   await f.engine.close();
   await writeFile(f.file, JSON.stringify({ version: 1, settings: {}, workflows: [saved] }));
-  const engine = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const engine = new WorkflowEngine(f.file, f.port);
   t.after(() => engine.close());
   assert.equal((await engine.retitle(false, []))[0].title, "🟢 C[project]-01 멈춘 작업");
 });
@@ -923,7 +922,7 @@ test("retitle previews without writing, then numbers legacy flows and unmanaged 
   db.workflows[0].title = "예전 작업";
   db.workflows[0].execute = { ...db.workflows[0].plan, id: "gone", workspaceId: "archived" };
   await writeFile(f.file, JSON.stringify(db));
-  const engine = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const engine = new WorkflowEngine(f.file, f.port);
   t.after(() => engine.close());
   const unmanaged = [
     { workspaceId: "initial", provider: "claude", role: null, title: "중복은 제외" },
@@ -1050,7 +1049,7 @@ test("permission waiting ticks preserve updatedAt and perform zero writes", asyn
 test("first save after restart writes all artifacts and a failed handoff write is retried", async (t) => {
   const f = await fixture(t);
   await f.engine.close();
-  const restored = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const restored = new WorkflowEngine(f.file, f.port);
   t.after(() => restored.close());
   await recordWrites(t, async (writes) => {
     await restored.tick();
@@ -1272,7 +1271,7 @@ test("memory sequence survives eviction and legacy state loads with defaults", a
   delete db.workflows[0].plan.rememberedThrough;
   await f.engine.close();
   await writeFile(f.file, JSON.stringify(db));
-  const engine = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const engine = new WorkflowEngine(f.file, f.port);
   t.after(() => engine.close());
   for (let i = 0; i < 6; i++) {
     f.agents.get("planner").status = "idle";
@@ -1337,7 +1336,7 @@ test("memory cursor advances only after confirmed send including recovery after 
   assert.equal(w.pending.rememberedThrough, 1);
   f.histories.set(w.execute.id, { messageIds: [w.pending.id], key: "", text: "", failed: null });
   await f.engine.close();
-  const engine = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const engine = new WorkflowEngine(f.file, f.port);
   t.after(() => engine.close());
   await engine.control(f.id, "resume");
   w = JSON.parse(await readFile(f.file, "utf8")).workflows[0];
@@ -1390,7 +1389,7 @@ test("GPT planner uses and repairs only Claude settings then preserves assignmen
     modeId: "acceptEdits",
   });
   await f.engine.close();
-  const restored = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const restored = new WorkflowEngine(f.file, f.port);
   t.after(() => restored.close());
   f.agents.get("planner").usage = 0.85;
   f.agents.get(executor).status = "idle";
@@ -1492,7 +1491,7 @@ test("old settings load without changing the existing Codex executor configurati
     delete db.settings[key];
   const existing = structuredClone(db.workflows[0]);
   await writeFile(f.file, JSON.stringify(db));
-  const restored = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const restored = new WorkflowEngine(f.file, f.port);
   t.after(() => restored.close());
   assert.equal((await restored.settings()).claudeExecutorModel, "claude");
   const loaded = await restored.store.read();
@@ -1561,7 +1560,7 @@ test("project mode selection persists across restart, remains folder scoped, and
   assert.equal((await f.engine.startSettings(cwd, "codex")).askMode, true);
   assert.equal((await f.engine.startSettings(path.join(cwd, "other"), "codex")).askMode, true);
   await f.engine.close();
-  const restored = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const restored = new WorkflowEngine(f.file, f.port);
   t.after(() => restored.close());
   assert.equal((await restored.startSettings(cwd, "claude")).defaultMode, "general");
   assert.equal((await restored.startSettings(cwd, "claude")).askMode, true);
@@ -2082,7 +2081,7 @@ test("loading trims planner configuration and files a lone executor under genera
     id: "lone-agent",
     workspaceId: "lone-workspace",
   });
-  const engine = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const engine = new WorkflowEngine(f.file, f.port);
   t.after(() => engine.close());
   const views = (await engine.list()).workflows;
   assert.deepEqual(
@@ -2436,7 +2435,7 @@ test("flows stored before the new flags load as waiting questions and unread ans
   await writeFile(f.file, JSON.stringify(db));
   for (const id of ["asked-planner", "asked-executor"])
     f.agents.set(id, { ...f.agents.get("planner"), id, workspaceId: `workspace-${id}` });
-  const engine = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const engine = new WorkflowEngine(f.file, f.port);
   t.after(() => engine.close());
   await assert.rejects(engine.control("asked", "resume"), /답변을 기다리는 질문/);
   // The old interrupted turn no longer pauses the flow again; a bare resume carries on.
@@ -2480,7 +2479,7 @@ test("an instruction whose turn already ended and was seen is over, on resume an
   w.inbox = { agentId: "planner", key: "after", text: decision("plan", "새 계획"), failed: null };
   await writeFile(f.file, JSON.stringify(db));
   f.histories.set(executor, { text: "", key: "cut", messageIds: [w.pending.id], failed: null });
-  const engine = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const engine = new WorkflowEngine(f.file, f.port);
   t.after(() => engine.close());
   await engine.control(f.id, "resume");
   assert.equal(f.sent.length, 2);
@@ -2749,7 +2748,7 @@ test("a stored question whose executor never worked is answered to the planner",
   delete w.asker;
   delete w.held;
   await writeFile(f.file, JSON.stringify(db));
-  const engine = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const engine = new WorkflowEngine(f.file, f.port);
   t.after(() => engine.close());
   await assert.rejects(engine.control(f.id, "resume"), /답변을 기다리는 질문/);
   await engine.control(f.id, "resume", "계획을 다시 내 주세요");
@@ -2817,7 +2816,7 @@ test("renumbering restarts every project at one in the order its work was create
     ["ws-b1", "🔵 C[연합:계획]-12 다른 프로젝트"],
   ])
     f.renamed.push(structuredClone({ workspaceId, title: name }));
-  const engine = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const engine = new WorkflowEngine(f.file, f.port);
   t.after(() => engine.close());
   // Until renumbered, a project continues from its own highest number.
   f.agents.set("a3", { ...f.agents.get("planner"), id: "a3", workspaceId: "ws-a3", title: "a3" });
@@ -2895,7 +2894,7 @@ for (const limit of ["cycles", "turns"]) {
     const db = JSON.parse(await readFile(f.file, "utf8"));
     db.workflows[0][limit] = limit === "cycles" ? db.settings.maxCycles : db.settings.maxTurns;
     await writeFile(f.file, JSON.stringify(db));
-    const engine = new WorkflowEngine(f.file, installLifecycle(f.port));
+    const engine = new WorkflowEngine(f.file, f.port);
     t.after(() => engine.close());
     const result = await engine.control(f.id, "resume");
     assert.equal(result.ok, true);
@@ -3245,7 +3244,7 @@ for (const limit of ["cycles", "turns"]) {
     w.repeatedPlans = 3;
     w.plan.compaction = "interrupted compaction";
     await writeFile(f.file, JSON.stringify(db));
-    const engine = new WorkflowEngine(f.file, installLifecycle(f.port));
+    const engine = new WorkflowEngine(f.file, f.port);
     t.after(() => engine.close());
     await engine.ended(
       "planner",
@@ -3510,7 +3509,7 @@ test("old baseline state loads with optional repository fields defaulted", async
   const db = JSON.parse(await readFile(f.file, "utf8"));
   db.workflows[0].baseline = { head: "abc", dirty: [" M file\t1:2"] };
   await writeFile(f.file, JSON.stringify(db));
-  const restored = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const restored = new WorkflowEngine(f.file, f.port);
   t.after(() => restored.close());
   await restored.list();
   const loaded = await restored.store.read();
@@ -3772,7 +3771,7 @@ for (const role of ["plan", "execute"]) {
     f.engine.database.workflows[0][role].compaction = "orphaned-compaction";
     await f.engine.tick();
     await f.engine.close();
-    const restored = new WorkflowEngine(f.file, installLifecycle(f.port), undefined, null, f.now);
+    const restored = new WorkflowEngine(f.file, f.port, undefined, null, f.now);
     t.after(() => restored.close());
     f.advance(60_000);
     await restored.tick();
@@ -3863,7 +3862,7 @@ test("AC-07 a disabled saved schedule clears on reload without sending", async (
   const db = JSON.parse(await readFile(f.file, "utf8"));
   db.settings.autoResumeTransient = false;
   await writeFile(f.file, JSON.stringify(db));
-  const restored = new WorkflowEngine(f.file, installLifecycle(f.port), undefined, null, f.now);
+  const restored = new WorkflowEngine(f.file, f.port, undefined, null, f.now);
   t.after(() => restored.close());
   f.advance(60_000);
   await restored.tick();
@@ -4136,7 +4135,7 @@ test("old paused state has no transient record and is never resumed retroactivel
   delete db.settings.autoResumeTransient;
   db.workflows[0].detail = capacityError;
   await writeFile(f.file, JSON.stringify(db));
-  const restored = new WorkflowEngine(f.file, installLifecycle(f.port), undefined, null, f.now);
+  const restored = new WorkflowEngine(f.file, f.port, undefined, null, f.now);
   t.after(() => restored.close());
   f.advance(24 * 60 * 60_000);
   await restored.tick();
@@ -4197,7 +4196,7 @@ test("transient retry history and pending ID survive a plugin reload without res
   await f.fail("capacity-again", capacityError);
   const before = await stored(f);
   await f.engine.close();
-  const restored = new WorkflowEngine(f.file, installLifecycle(f.port), undefined, null, f.now);
+  const restored = new WorkflowEngine(f.file, f.port, undefined, null, f.now);
   t.after(() => restored.close());
   await restored.tick();
   assert.deepEqual((await stored(f)).transientPause, before.transientPause);
@@ -4358,7 +4357,7 @@ for (const excluded of ["disabled", "expired", "old-state", "general", "complete
       if (excluded === "general") db.workflows[0].mode = "general";
       if (excluded === "completed") db.workflows[0].status = "completed";
       await writeFile(f.file, JSON.stringify(db));
-      f.engine = new WorkflowEngine(f.file, installLifecycle(f.port), undefined, null, f.now);
+      f.engine = new WorkflowEngine(f.file, f.port, undefined, null, f.now);
       t.after(() => f.engine.close());
     }
     await f.engine.tick();
@@ -4415,7 +4414,7 @@ test("quota recovery survives reload without resetting attempts or retry timing"
   await f.fail("again");
   const before = (await stored(f)).quotaPause;
   await f.engine.close();
-  const restored = new WorkflowEngine(f.file, installLifecycle(f.port), undefined, null, f.now);
+  const restored = new WorkflowEngine(f.file, f.port, undefined, null, f.now);
   t.after(() => restored.close());
   await restored.tick();
   assert.deepEqual((await stored(f)).quotaPause, { ...before, lastCheckedAt: f.now() });
@@ -4494,7 +4493,7 @@ test("account-driven retries persist across restart and stop after five attempts
   f.account("b");
   await f.engine.tick();
   await f.engine.close();
-  f.engine = new WorkflowEngine(f.file, installLifecycle(f.port), undefined, null, f.now);
+  f.engine = new WorkflowEngine(f.file, f.port, undefined, null, f.now);
   t.after(() => f.engine.close());
   f.advance(60_000);
   await f.engine.tick();
@@ -4507,7 +4506,7 @@ test("account-driven retries persist across restart and stop after five attempts
     await f.engine.ended(f.executor, `switched-${attempt}`, "", quotaError);
     if (attempt === 1) {
       await f.engine.close();
-      f.engine = new WorkflowEngine(f.file, installLifecycle(f.port), undefined, null, f.now);
+      f.engine = new WorkflowEngine(f.file, f.port, undefined, null, f.now);
       t.after(() => f.engine.close());
     }
     const delay = [5, 15, 30, 60, 60][attempt - 1] * 60_000;
@@ -4537,7 +4536,7 @@ test("previous quota record format defaults to no account-driven retries", async
   const db = JSON.parse(await readFile(f.file, "utf8"));
   delete db.workflows[0].quotaPause.accountRetry;
   await writeFile(f.file, JSON.stringify(db));
-  const restored = new WorkflowEngine(f.file, installLifecycle(f.port), undefined, null, f.now);
+  const restored = new WorkflowEngine(f.file, f.port, undefined, null, f.now);
   t.after(() => restored.close());
   f.advance(60 * 60_000);
   await restored.tick();
@@ -4576,7 +4575,7 @@ test("explicit repositories and exact push targets survive reload; malformed tar
   assert.deepEqual(calls, [target]);
   assert.equal((await stored(f)).pushCheck.targets[0].result, "pushed");
   await f.engine.close();
-  const restored = new WorkflowEngine(f.file, installLifecycle(f.port), undefined, probe);
+  const restored = new WorkflowEngine(f.file, f.port, undefined, probe);
   t.after(() => restored.close());
   assert.deepEqual((await restored.list()).workflows[0].repositories, [repository]);
   await restored.ended("planner", "new", "작업상태: 진행", null);
@@ -4875,7 +4874,7 @@ test("push recheck survives reload and remains pinned when another task changes 
   await f.engine.tick();
   assert.equal(calls.length, 1, "no immediate polling");
   await f.engine.close();
-  const restored = new WorkflowEngine(f.file, installLifecycle(f.port), undefined, probe, () => now);
+  const restored = new WorkflowEngine(f.file, f.port, undefined, probe, () => now);
   t.after(() => restored.close());
   available = true;
   now += 30_001;
@@ -4993,7 +4992,7 @@ test("a read-only follow-up preserves an existing legacy blue display without cr
   const db = JSON.parse(await readFile(f.file, "utf8"));
   db.workflows[0].progress = "pushed";
   await writeFile(f.file, JSON.stringify(db));
-  const engine = new WorkflowEngine(f.file, installLifecycle(f.port), undefined, verifiedPushProbe);
+  const engine = new WorkflowEngine(f.file, f.port, undefined, verifiedPushProbe);
   t.after(() => engine.close());
   await engine.ended("planner", "explain", "작업상태: 푸시", null);
   assert.equal((await stored(f)).progress, "pushed");
@@ -5366,7 +5365,7 @@ test("verified pushes pin with a visible review marker; unpin survives reload an
   assert.match(f.renamed.at(-1).title, /\[PUSH\]/);
   assert.equal((await stored(f)).pushReview.workspaces[0].phase, "acknowledged");
   await f.engine.close();
-  const restored = new WorkflowEngine(f.file, installLifecycle(f.port), undefined, probe);
+  const restored = new WorkflowEngine(f.file, f.port, undefined, probe);
   t.after(() => restored.close());
   await restored.ended("planner", "same", report(target), null);
   await restored.tick();
@@ -5537,7 +5536,7 @@ test("replayed general turns cannot re-pin acknowledged work, even when that tur
   pinnedAt = null;
   await f.engine.tick();
   await f.engine.close();
-  const restored = new WorkflowEngine(f.file, installLifecycle(f.port), undefined, verifiedPushProbe);
+  const restored = new WorkflowEngine(f.file, f.port, undefined, verifiedPushProbe);
   t.after(() => restored.close());
   await ended(restored);
   assert.equal(calls, 1);
@@ -5659,7 +5658,7 @@ test("queued federation resumes exactly once by polling when the other writer's 
   assert.equal(events.filter((event) => event.kind === "waiting").length, 1);
   assert.match(events.find((event) => event.kind === "waiting").body, /진행 후 #1 .*진행 예정/);
   await f.engine.close();
-  const restored = new WorkflowEngine(f.file, installLifecycle(f.port), async (event) => events.push(event));
+  const restored = new WorkflowEngine(f.file, f.port, async (event) => events.push(event));
   t.after(() => restored.close());
   await restored.tick();
   await new Promise((resolve) => setImmediate(resolve));
@@ -5718,7 +5717,7 @@ test("stored writer waits without a blocker number remain readable and acquire t
   const db = JSON.parse(await readFile(f.file, "utf8"));
   delete db.workflows[0].writerWait.blocker;
   await writeFile(f.file, JSON.stringify(db));
-  const restored = new WorkflowEngine(f.file, installLifecycle(f.port), async (event) => events.push(event));
+  const restored = new WorkflowEngine(f.file, f.port, async (event) => events.push(event));
   t.after(() => restored.close());
   assert.equal((await restored.list()).workflows[0].waitingFor, undefined);
   await restored.tick();
@@ -5763,7 +5762,7 @@ test("a running executor finishes into the general handoff; reload and late resu
   assert.equal(f.sent.length, 2);
   await f.engine.ended(executor, "late-result", decision("result"), null);
   await f.engine.close();
-  const restored = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const restored = new WorkflowEngine(f.file, f.port);
   t.after(() => restored.close());
   await restored.tick();
   assert.equal(f.sent.length, 2);
@@ -5812,7 +5811,7 @@ for (const receipt of [true, false])
     };
     await f.engine.control(f.id, "general");
     await f.engine.close();
-    const restored = new WorkflowEngine(f.file, installLifecycle(f.port));
+    const restored = new WorkflowEngine(f.file, f.port);
     t.after(() => restored.close());
     await restored.tick();
     await restored.tick();
@@ -5845,7 +5844,7 @@ test("critical constraints survive fifty later memories, reload and full context
     );
   assert.equal((await stored(f)).memories.length, 50);
   await f.engine.close();
-  const restored = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const restored = new WorkflowEngine(f.file, f.port);
   t.after(() => restored.close());
   await restored.ended("planner", "after-reload", decision("plan"), null);
   assert.match(f.sent.at(-1).prompt, /배포 전에 사용자 승인/);
@@ -6104,7 +6103,7 @@ test("managed receipt survives plugin reload and a failed or unknown execution n
   await f.engine.close();
   const restored = new WorkflowEngine(
     f.file,
-    installLifecycle(f.port),
+    f.port,
     undefined,
     verifiedPushProbe,
     Date.now,
@@ -6156,7 +6155,7 @@ test("managed failed turns, structured new plans and manual target changes inval
       await writeFile(f.file, JSON.stringify(db));
       const engine = new WorkflowEngine(
         f.file,
-        installLifecycle(f.port),
+        f.port,
         undefined,
         verifiedPushProbe,
         Date.now,
@@ -6257,7 +6256,7 @@ test("unverified push reports stay visibly unresolved across follow-ups and relo
   await f.engine.ended("planner", "explanation", "설명만 보충합니다.", null);
   assert.equal((await stored(f)).pushUnverified, true);
   await f.engine.close();
-  const restored = new WorkflowEngine(f.file, installLifecycle(f.port), undefined, verifiedPushProbe);
+  const restored = new WorkflowEngine(f.file, f.port, undefined, verifiedPushProbe);
   t.after(() => restored.close());
   await restored.tick();
   assert.match(f.renamed.at(-1).title, /\[푸시 확인필요\]/);
@@ -6429,7 +6428,7 @@ test("automatic push audit caches absent evidence across reload and invalidates 
   assert.equal(reads, 1);
   assert.equal((await stored(f)).pushAudit.outcome, "none");
   await f.engine.close();
-  const restored = new WorkflowEngine(f.file, installLifecycle(f.port), undefined, verifiedPushProbe, () => now);
+  const restored = new WorkflowEngine(f.file, f.port, undefined, verifiedPushProbe, () => now);
   t.after(() => restored.close());
   await restored.auditPushes();
   assert.equal(reads, 1, "restart preserves the next audit time");
@@ -6469,7 +6468,7 @@ test("automatic push audit bounds retries and preserves exhaustion across reload
   now += 600_001;
   await f.engine.auditPushes();
   await f.engine.close();
-  const restored = new WorkflowEngine(f.file, installLifecycle(f.port), undefined, verifiedPushProbe, () => now);
+  const restored = new WorkflowEngine(f.file, f.port, undefined, verifiedPushProbe, () => now);
   t.after(() => restored.close());
   await restored.auditPushes();
   assert.equal(reads, 5);
@@ -6642,7 +6641,7 @@ test("automatic push audit crash on the last attempt records exhaustion without 
     after: now,
   };
   await writeFile(f.file, JSON.stringify(db));
-  const restored = new WorkflowEngine(f.file, installLifecycle(f.port), undefined, verifiedPushProbe, () => now);
+  const restored = new WorkflowEngine(f.file, f.port, undefined, verifiedPushProbe, () => now);
   t.after(() => restored.close());
   await restored.auditPushes();
   assert.equal(reads, 1);
@@ -6743,7 +6742,7 @@ test("a state file that fails to load is read again once it is repaired", async 
   const f = await fixture(t);
   const good = await readFile(f.file, "utf8");
   await writeFile(f.file, "{ broken");
-  const restarted = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const restarted = new WorkflowEngine(f.file, f.port);
   t.after(() => restarted.close());
   await assert.rejects(restarted.startSettings(f.dir ?? path.dirname(f.file), "claude"));
   await writeFile(f.file, good);
@@ -6823,7 +6822,7 @@ test("more push targets than the state can hold are refused, keeping the file lo
   const view = await f.view();
   assert.notEqual(view.progress, "pushed");
   assert.ok((await stored(f)).pushTargets.length <= 8);
-  const restarted = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const restarted = new WorkflowEngine(f.file, f.port);
   t.after(() => restarted.close());
   assert.equal((await restarted.list()).workflows.length, 1);
 });
@@ -6844,7 +6843,7 @@ test("no-push completion is blue, durable and separate from push receipts", asyn
   await f.engine.ended("planner", "read-followup", "설정 설명입니다.", null);
   assert.equal((await f.view()).progress, "no_push");
   await f.engine.close();
-  const restored = new WorkflowEngine(f.file, installLifecycle(f.port));
+  const restored = new WorkflowEngine(f.file, f.port);
   t.after(() => restored.close());
   assert.match((await restored.retitle(false, []))[0].title, /^🔵 .*\[푸시 불필요\]/u);
   await restored.ended("planner", "new-edit", "새 수정", null, "", false, "", false, undefined, {
@@ -6963,7 +6962,7 @@ test(`provider compression ${provider}/${max} boundary, duplicate event and rest
  a.contextUsage.contextWindowUsedTokens=at;await f.engine.tick();await new Promise(r=>setImmediate(r));await f.engine.tick();
  assert.deepEqual(f.compacted,["planner"]);const stored=JSON.parse(await readFile(f.file,"utf8"));assert.equal(stored.workflows[0].plan.compactedForTurn,"boundary");
  a.contextUsage.contextWindowUsedTokens=at+1;await f.finish("planner","boundary","plan");await f.engine.tick();assert.equal(f.compacted.length,1);
- await f.engine.close();const restarted=new WorkflowEngine(f.file,installLifecycle(f.port));t.after(()=>restarted.close());await restarted.tick();assert.equal(f.compacted.length,1);
+ await f.engine.close();const restarted=new WorkflowEngine(f.file,f.port);t.after(()=>restarted.close());await restarted.tick();assert.equal(f.compacted.length,1);
 });
 for(const blocked of ["running","permission","missing","invalid"])
 test(`Claude override never compacts with ${blocked} context/agent state`,async t=>{

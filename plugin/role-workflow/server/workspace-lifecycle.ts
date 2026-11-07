@@ -1,3 +1,5 @@
+import { readArchiveInspection } from "./paseo-port";
+import type { ArchiveInspection } from "./archive";
 import { operationalApi } from "./timeline-cards";
 import { createRepoProbe } from "./git";
 import { execFile } from "node:child_process";
@@ -8,30 +10,51 @@ import path from "node:path";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 
 import type { PaseoApi } from "@getpaseo/client";
-import type { Workflow, WorkflowPort } from "./engine";
+import type { Workflow } from "./engine";
 import type { PushReviewPort } from "./push-review";
 
 export type CleanupReadiness = { stage: "ready" | "pending" | "skipped" | "done" | "failed"; detail: string; ownedPinAt?: string };
-export interface LifecycleHost {
-  port(): WorkflowPort;
+export interface LifecyclePolicy {
   db(): Promise<{ workflows: Workflow[] }>;
   cleanupReadiness?(w: Workflow): Promise<CleanupReadiness>;
 }
 
 /** The only mutation boundary for workspace archive and automatic pins. */
+const policyBindings = new WeakMap<WorkspaceLifecycle, (policy: LifecyclePolicy) => void>();
+/** Composition-only registration. Instances expose operations, not a policy factory. */
+export function bindWorkspaceLifecycle(lifecycle: WorkspaceLifecycle, policy: LifecyclePolicy) {
+  const bind = policyBindings.get(lifecycle);
+  if (!bind) throw new Error("알 수 없는 작업 공간 관문입니다.");
+  bind(policy);
+}
 export class WorkspaceLifecycle {
-  constructor(private readonly host: LifecycleHost, private readonly transport: LifecycleTransport = {}) {}
-  get supportsArchive() { return typeof this.transport.archiveWorkspace === "function"; }
-  get supportsPins() { return !!this.transport.pushReview; }
-  get supportsUnpin() { return typeof this.transport.pushReview?.unpin === "function"; }
-  get(id: string) { return this.transport.pushReview?.get(id) ?? Promise.resolve(null); }
+  #policy: Readonly<LifecyclePolicy> | null = null;
+  readonly #transport: LifecycleTransport;
+  readonly #inspect: (ids: readonly string[]) => Promise<ArchiveInspection>;
+  constructor(transport: LifecycleTransport = {}, inspect: (ids: readonly string[]) => Promise<ArchiveInspection> = async () => { throw new Error("작업 공간 조회를 지원하지 않습니다."); }) {
+    this.#transport = transport;
+    this.#inspect = inspect;
+    policyBindings.set(this, policy => {
+      if (this.#policy) throw new Error("작업 공간 정책은 한 번만 연결할 수 있습니다.");
+      this.#policy = Object.freeze({ db: policy.db, cleanupReadiness: policy.cleanupReadiness });
+    });
+    Object.freeze(this);
+  }
+  get #policyState() {
+    if (!this.#policy) throw new Error("작업 공간 정책이 연결되지 않았습니다.");
+    return this.#policy;
+  }
+  get supportsArchive() { return typeof this.#transport.archiveWorkspace === "function"; }
+  get supportsPins() { return !!this.#transport.pushReview; }
+  get supportsUnpin() { return typeof this.#transport.pushReview?.unpin === "function"; }
+  get(id: string) { return this.#transport.pushReview?.get(id) ?? Promise.resolve(null); }
   private async executor(id: string) {
-    return (await this.host.db()).workflows.find(w => w.isolation === "worktree" &&
+    return (await this.#policyState.db()).workflows.find(w => w.isolation === "worktree" &&
       (w.execute?.workspaceId === id || w.worktree?.workspaceId === id));
   }
   async pinWorkspace(id: string): Promise<string> {
     if (await this.executor(id)) throw new Error("따로 작업 공간은 자동 고정하지 않습니다.");
-    const port = this.transport.pushReview;
+    const port = this.#transport.pushReview;
     if (!port) throw new Error("작업 공간 고정을 지원하지 않습니다.");
     // Do not take ownership of a pin placed since the caller's last inspection.
     const current = await port.get(id);
@@ -39,9 +62,9 @@ export class WorkspaceLifecycle {
     return port.pin(id);
   }
   async unpinOwned(id: string, expected: string): Promise<boolean> {
-    const port = this.transport.pushReview;
+    const port = this.#transport.pushReview;
     if (!port?.unpin || !expected) return false;
-    const rows = (await this.host.db()).workflows.flatMap(w =>
+    const rows = (await this.#policyState.db()).workflows.flatMap(w =>
       [...w.startPin?.workspaces ?? [], ...w.pushReview?.workspaces ?? []]);
     if (!rows.some(row => row.id === id && row.ownedPinAt === expected)) return false;
     const current = await port.get(id);
@@ -50,7 +73,7 @@ export class WorkspaceLifecycle {
     return (await port.get(id))?.pinnedAt === null;
   }
   private async idleWorkspace(id: string) {
-    const inspection = await this.host.port().archiveInspection([id]);
+    const inspection = await this.#inspect([id]);
     const workspace = inspection.workspaces.find(ws => ws.id === id);
     const agents = inspection.conversations.filter(a => a.workspaceId === id);
     if (!workspace || workspace.pinnedAt !== null || workspace.archiving || !agents.length || agents.some(a =>
@@ -59,12 +82,12 @@ export class WorkspaceLifecycle {
   }
   async archive(id: string): Promise<void> {
     if (await this.executor(id)) throw new Error("따로 작업 공간은 안전 정리 확인을 거쳐야 보관할 수 있습니다.");
-    const inspection = await this.host.port().archiveInspection([id]);
+    const inspection = await this.#inspect([id]);
     const cwd = inspection.workspaces.find(ws => ws.id === id)?.cwd;
     if (cwd) await verifyOrdinaryWorktree(cwd);
     if (!await this.idleWorkspace(id)) throw new Error("보관 직전 실행·권한·고정 상태가 바뀌어 보존합니다.");
     if (!cwd) throw new Error("작업 공간 디렉터리를 확인하지 못해 보존합니다.");
-    await this.transport.archiveWorkspace!(id);
+    await this.#transport.archiveWorkspace!(id);
   }
   /** Only the engine-wired cleanup verifier can provide this call's single-use ready proof. */
   async archiveCleaned(w: Workflow): Promise<CleanupReadiness> {
@@ -72,8 +95,8 @@ export class WorkspaceLifecycle {
     let proof: CleanupReadiness;
     try {
       if (!id || await this.executor(id) !== w) return { stage: "pending", detail: "따로 작업 공간 소속이 바뀌어 보존합니다." };
-      if (!this.host.cleanupReadiness) return { stage: "pending", detail: "안전 정리 확인 증표가 없어 보존합니다." };
-      proof = await this.host.cleanupReadiness(w);
+      if (!this.#policyState.cleanupReadiness) return { stage: "pending", detail: "안전 정리 확인 증표가 없어 보존합니다." };
+      proof = await this.#policyState.cleanupReadiness(w);
       if (proof.stage !== "ready") return proof;
       // Last activity query is after every copy/unpin/Git check, immediately before mutation.
       const agents = await this.idleWorkspace(id);
@@ -83,7 +106,7 @@ export class WorkspaceLifecycle {
     } catch {
       return { stage: "pending", detail: "보관 직전 상태를 조회하지 못해 보존합니다. 다음 점검 때 다시 확인합니다." };
     }
-    await this.transport.archiveWorkspace!(id);
+    await this.#transport.archiveWorkspace!(id);
     return proof;
   }
 }
@@ -94,7 +117,7 @@ interface LifecycleTransport {
 }
 
 /** Raw capabilities stay in this closure; only policy-checked operations leave it. */
-function createLifecycleFactory(getApi: () => PaseoApi, home: string) {
+function createLifecycleAccess(getApi: () => PaseoApi, home: string) {
   const pins = createWorkspacePins(home);
   const transport: LifecycleTransport = {
     async archiveWorkspace(id) {
@@ -121,7 +144,15 @@ function createLifecycleFactory(getApi: () => PaseoApi, home: string) {
       },
     },
   };
-  return { lifecycle: (host: LifecycleHost) => new WorkspaceLifecycle(host, transport), closeLifecycle: () => pins.close() };
+  let created = false;
+  return {
+    createLifecycle() {
+      if (created) throw new Error("작업 공간 관문은 한 번만 만들 수 있습니다.");
+      created = true;
+      return new WorkspaceLifecycle(transport, ids => readArchiveInspection(operationalApi(getApi()), ids));
+    },
+    closeLifecycle: () => pins.close(),
+  };
 }
 /** The public workspace handle lacks pin(), so use the daemon's existing local pin RPC. */
 export function pinDaemonUrl(listen: string) {
@@ -188,7 +219,11 @@ async function verifyOrdinaryWorktree(cwd: string) {
     const head = await run(["rev-parse", "--verify", "HEAD^{commit}"]);
     const probe = createRepoProbe();
     const hazards = await probe.cleanupHazards!(cwd, head);
-    if (!hazards || hazards.length) throw new Error(hazards?.join("; ") || "숨겨진 Git 변경을 확인하지 못했습니다.");
+    if (!hazards || hazards.length) {
+      const manual = hazards?.some(reason => reason.includes("reflog"))
+        ? ". 기록에 남은 커밋과 파일을 확인한 뒤 Paseo에서 해당 작업 공간을 직접 보관하세요(커밋하지 않은 파일과 Git이 무시하는 파일은 지워집니다)" : "";
+      throw new Error((hazards?.join("; ") || "숨겨진 Git 변경을 확인하지 못했습니다.") + manual);
+    }
     let included = false;
     for (const remote of (await run(["remote"])).split("\n").filter(Boolean)) {
       const prefix = `refs/remotes/${remote}/`;
@@ -207,7 +242,7 @@ async function verifyOrdinaryWorktree(cwd: string) {
   }
 }
 
-/** Entry point receives only the reduced API and policy-bound lifecycle factory. */
+/** Entry point receives only the reduced API and single lifecycle instance creator. */
 export function createWorkspaceAccess(home: string) {
   let source: PaseoApi | null = null;
   const getApi = () => {
@@ -217,6 +252,6 @@ export function createWorkspaceAccess(home: string) {
   return {
     attach(api: PaseoApi) { source = api; return operationalApi(api); },
     api: () => operationalApi(getApi()),
-    ...createLifecycleFactory(getApi, home),
+    ...createLifecycleAccess(getApi, home),
   };
 }

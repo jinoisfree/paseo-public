@@ -303,3 +303,24 @@ test(`AC-205 N-3: initialized submodule ${kind} is skipped even when parent stat
   const head = git(parent, "rev-parse", "HEAD").trim();
   assert.match((await createRepoProbe().cleanupHazards(parent, head)).join(" "), /초기화된 submodule.*미커밋.*원격/);
 });
+
+test("AC-205 N-3: submodule timeout preserves the cause and tells how to archive directly", async () => {
+  const probe = createRepoProbe(async (cwd, args) => {
+    if (args[0] === "submodule" && args[1] === "foreach") throw Object.assign(Error("timed out"), { killed: true, signal: "SIGTERM" });
+    return "";
+  });
+  await assert.rejects(probe.cleanupHazards("/repo", "a".repeat(40)), error => {
+    assert.match(error.message, /서브모듈\(submodule\) 조회가 5초/);
+    assert.match(error.message, /Paseo에서 해당 작업 공간을 직접 보관/);
+    assert.match(error.message, /커밋하지 않은 파일.*지워집니다/);
+    return true;
+  });
+});
+
+test("AC-205 N-3: overflowing submodule output remains a buffer limit reason rather than a timeout", async () => {
+  const probe = createRepoProbe(async (cwd, args) => {
+    if (args[0] === "submodule" && args[1] === "foreach") throw Object.assign(Error("buffer full"), { killed: true, code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" });
+    return "";
+  });
+  await assert.rejects(probe.cleanupHazards("/repo", "a".repeat(40)), /32MB/);
+});

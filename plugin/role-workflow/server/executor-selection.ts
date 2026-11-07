@@ -1,4 +1,4 @@
-import { unknownData, readData, writeData } from "./data-records";
+import { unknownData } from "./data-records";
 import { EXECUTOR_QUESTIONS, type ExecutorSelection, type SelectionField, type SelectionStage } from "../shared/executor-selection";
 import type { ExecutorModel } from "./protocol";
 import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
@@ -10,11 +10,11 @@ export function selectionQuestions(input: unknown): SelectionField[] {
   const fields: SelectionField[] = [];
   for (const [index, question] of questions.entries()) {
     const stage = stages.find(stage => {
-      const q = readData(EXECUTOR_QUESTIONS, stage);
+      const q = EXECUTOR_QUESTIONS[stage];
       return question?.question === q.question || question?.title === q.question;
     });
     if (!stage || fields.some(x => x.stage === stage)) return [];
-    const q = readData(EXECUTOR_QUESTIONS, stage);
+    const q = EXECUTOR_QUESTIONS[stage];
     fields.push({ stage, keys: [...new Set([q.question, q.header, `Question ${index + 1}`,
       ...(typeof question.id === "string" ? [question.id] : [])])] });
   }
@@ -24,7 +24,7 @@ export function selectionQuestions(input: unknown): SelectionField[] {
 }
 export function pendingFields(pending: ExecutorSelection["pending"]): SelectionField[] {
   return pending?.fields ?? (pending?.stage ? [{stage: pending.stage,
-    keys: [readData(EXECUTOR_QUESTIONS, pending.stage).question, readData(EXECUTOR_QUESTIONS, pending.stage).header, "Question 1"]}] : []);
+    keys: [EXECUTOR_QUESTIONS[pending.stage].question, EXECUTOR_QUESTIONS[pending.stage].header, "Question 1"]}] : []);
 }
 export function selectionAnswers(input: unknown, fields: SelectionField[]): Partial<Record<SelectionStage, string>> {
   const answers = input && typeof input === "object" ? unknownData(input, "answers") : null;
@@ -46,10 +46,10 @@ export function timelineSelections(items: readonly AgentTimelineItem[]) {
     const fields: SelectionField[] = [];
     const values: Partial<Record<SelectionStage, string>> = {};
     for (const block of blocks) {
-      const stage = stages.find(stage => block.startsWith(readData(EXECUTOR_QUESTIONS, stage).question + "\n"));
+      const stage = stages.find(stage => block.startsWith(EXECUTOR_QUESTIONS[stage].question + "\n"));
       if (!stage || fields.some(x => x.stage === stage)) return [];
-      fields.push({stage, keys:[readData(EXECUTOR_QUESTIONS, stage).question]});
-      writeData(values, stage, block.slice(readData(EXECUTOR_QUESTIONS, stage).question.length + 1).trim());
+      fields.push({stage, keys:[EXECUTOR_QUESTIONS[stage].question]});
+      values[stage] = block.slice(EXECUTOR_QUESTIONS[stage].question.length + 1).trim();
     }
     return fields.length ? [{id:item.callId, fields, values}] : [];
   });

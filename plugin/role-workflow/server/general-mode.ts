@@ -1,4 +1,3 @@
-import { readData, writeData, deleteData } from "./data-records";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { AgentPermissionResponse, AgentTimelineItem } from "@getpaseo/protocol/agent-types";
@@ -118,7 +117,7 @@ export class GeneralMode {
     ) {
       const names = generalQuestionNames(request.input);
       if (names.length) {
-        writeData(w.generalState.questions, request.id, names);
+        w.generalState.questions[request.id] = names;
         await this.host.save();
       }
     }
@@ -132,8 +131,8 @@ export class GeneralMode {
       (w) => w.mode === "general" && w.plan?.id === agentId,
     );
     if (general) {
-      const names = readData(general.generalState.questions, requestId);
-      deleteData(general.generalState.questions, requestId);
+      const names = general.generalState.questions[requestId];
+      delete general.generalState.questions[requestId];
       if (names && resolution.behavior === "allow")
         this.recordGeneralAnswers(general, generalAnswers(resolution.updatedInput, names));
       else if (names?.includes("model")) {
@@ -309,11 +308,11 @@ export class GeneralMode {
   async rememberGeneral(w: Workflow, choice: GeneralAgent) {
     const db = await this.host.db();
     if (db.settings.rememberProjectChoices)
-      writeData(db.projects, path.resolve(w.cwd), {
-        ...readData(db.projects, path.resolve(w.cwd)),
+      db.projects[path.resolve(w.cwd)] = {
+        ...db.projects[path.resolve(w.cwd)],
         mode: "general",
         general: choice,
-      });
+      };
   }
   /** Returns a planner that never received an executor to working alone. */
   generalize(w: Workflow) {
@@ -431,7 +430,7 @@ export class GeneralMode {
   async captureTransitionResult(w: Workflow) {
     const pending = w.pending;
     if (!pending || pending.stage === "queued") return true;
-    const member = readData(w, pending.role);
+    const member = w[pending.role];
     if (!member?.workspaceId) return true;
     if (w.inbox?.agentId === member.id && w.inbox.answers) return true;
     if (w.transitionTurns.some((turn) => turn.agentId === member.id && turn.answers)) return true;

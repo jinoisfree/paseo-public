@@ -1,4 +1,3 @@
-import { readData } from "./data-records";
 import { GENERAL_QUESTIONS } from "../shared/general-agent";
 import type { WorkflowProvider } from "../shared/assignment";
 import { stripFences } from "../shared/fences";
@@ -270,7 +269,7 @@ export function parseProgress(text: string): Progress | null {
   const last = [...prose.matchAll(/^작업상태:[ \t]*(계획|진행|완료|푸시|푸시 불필요)[ \t]*$/gm)].at(
     -1,
   )?.[1];
-  return last ? readData(PROGRESS_WORDS, last) : null;
+  return last ? PROGRESS_WORDS[last] : null;
 }
 
 /** The colour a title already carries, for workspaces whose state is nowhere but the title. */
@@ -300,7 +299,7 @@ export function projectTitleLabel(name: string): string {
   };
   const short = words
     .slice(0, 2)
-    .map((word) => readData(abbreviations, word.toLowerCase()) ?? word)
+    .map((word) => abbreviations[word.toLowerCase()] ?? word)
     .join(" ");
   const chars = Array.from(short);
   return chars.length <= 16 ? short : `${chars.slice(0, 15).join("").trimEnd()}…`;
@@ -356,18 +355,18 @@ export function decorateTitle(
   let progressBadge = "";
   if (detail.progress === "pushed") progressBadge = PUSH_REVIEW_MARKER;
   if (detail.progress === "no_push") progressBadge = "[푸시 불필요] ";
-  const badge = detail.pushState ? readData(badges, detail.pushState) : progressBadge;
+  const badge = detail.pushState ? badges[detail.pushState] : progressBadge;
   const waiting = detail.waitingFor
     ? `[#${String(detail.waitingFor).padStart(2, "0")} 때문에 대기] `
     : "";
   const base = waiting + badge + stripTitleDecor(title);
-  const name = readData(PROVIDER_NAMES, provider.split("/")[0]);
+  const name = PROVIDER_NAMES[provider.split("/")[0]];
   if (!name || (!role && !marker)) return base;
   const generation = detail.generation ?? 1;
   let label = projectTitleLabel(detail.projectName ?? "");
   if (role && role !== "pair")
     label += `:${role === "plan" ? "계획" : "실행"}${generation > 1 ? generation : ""}`;
   const number = String(detail.number ?? 0).padStart(2, "0");
-  const symbol = marker ? `${readData(PROGRESS_SYMBOLS, detail.progress ?? "active")} ` : "";
+  const symbol = marker ? `${PROGRESS_SYMBOLS[detail.progress ?? "active"]} ` : "";
   return `${symbol}${name}[${label}]-${number} ${base}`;
 }

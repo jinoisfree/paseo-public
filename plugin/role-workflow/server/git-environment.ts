@@ -1,4 +1,3 @@
-import { deleteData } from "./data-records";
 /** The daemon's own environment must not point git at another repository or config. */
 export function gitEnvironment(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
@@ -12,7 +11,7 @@ export function gitEnvironment(): NodeJS.ProcessEnv {
         key,
       )
     )
-      deleteData(env, key);
+      delete env[key];
   }
   return env;
 }

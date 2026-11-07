@@ -1,4 +1,3 @@
-import { readData } from "./data-records";
 import type { Settings } from "../shared/contracts";
 import { capabilities } from "../shared/capabilities";
 import type { Workflow, WorkflowPort } from "./engine";
@@ -27,7 +26,7 @@ export interface RecoveryHost {
 export class Recovery {
   constructor(private readonly host: RecoveryHost) {}
   async quotaFailure(w: Workflow, role: Role, inbox: NonNullable<Workflow["inbox"]>) {
-    const provider = readData(w, role)?.config.provider.split("/")[0];
+    const provider = w[role]?.config.provider.split("/")[0];
     const limit = usageLimit(provider ?? "", inbox.failed ?? "");
     const previous = w.quotaPause;
     w.quotaPause = null;

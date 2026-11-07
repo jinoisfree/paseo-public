@@ -1,4 +1,3 @@
-import { readData } from "./data-records";
 import { execFile } from "node:child_process";
 import { readdir, lstat, stat } from "node:fs/promises";
 import path from "node:path";
@@ -80,7 +79,7 @@ async function dirty(run: typeof git, cwd: string) {
   const rows: { code: string; file: string }[] = [];
   let incomplete = false;
   for (let index = 0; index < entries.length; index++) {
-    const entry = readData(entries, index);
+    const entry = entries[index];
     if (entry.length < 4) continue;
     if (rows.length === ROWS) {
       incomplete = true;
@@ -265,8 +264,16 @@ export function createRepoProbe(run: typeof git = git): RepoProbe {
         if (hashes.length && (await run(cwd, ["rev-list", "--max-count=1", ...hashes, "--not", integrated, "--"])).trim())
           hazards.push("반영되지 않은 worktree HEAD reflog 커밋이 있습니다");
         // Git itself enters each initialized module, avoiding ambiguous path parsing.
-        const submodules = await run(cwd, ["submodule", "foreach", "--quiet", "--recursive",
-          'git -c core.fsmonitor=false status --porcelain --untracked-files=all && git log --branches --not --remotes --oneline -1 && git log HEAD --not --remotes --oneline -1']);
+        let submodules: string;
+        try {
+          submodules = await run(cwd, ["submodule", "foreach", "--quiet", "--recursive",
+            'git -c core.fsmonitor=false status --porcelain --untracked-files=all && git log --branches --not --remotes --oneline -1 && git log HEAD --not --remotes --oneline -1']);
+        } catch (error) {
+          const failure = error as { killed?: boolean; code?: unknown };
+          if (failure.code !== "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" && (failure.killed || failure.code === "ETIMEDOUT"))
+            throw new CleanupQueryLimitError("서브모듈(submodule) 조회가 5초 안에 끝나지 않았습니다. 계속되면 변경과 커밋을 확인한 뒤 Paseo에서 해당 작업 공간을 직접 보관하세요(커밋하지 않은 파일과 Git이 무시하는 파일은 지워집니다)");
+          throw error;
+        }
         if (submodules.trim()) hazards.push("초기화된 submodule에 미커밋 변경 또는 원격에 없는 커밋이 있습니다");
         return hazards;
       } catch (error) {

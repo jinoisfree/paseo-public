@@ -1,4 +1,3 @@
-import { readData, readOptionalData, writeData } from "./data-records";
 import { contextUsage, contextRatio } from "../shared/compression";
 import { timelineSelections, timelineMode } from "./executor-selection";
 import { asyncGeneralAnswers } from "./general-agent";
@@ -76,7 +75,7 @@ export function readTurn(
 ): History & { goal: string; request: string; maintenance: boolean } {
   const lastUser = items.findLastIndex((item) => item.type === "user_message");
   const turn = items.slice(lastUser + 1);
-  const user = readData(items, lastUser);
+  const user = items[lastUser];
   const messages = turn
     .filter((item) => item.type === "assistant_message")
     .map((item) => item.text);
@@ -92,9 +91,9 @@ export function readTurn(
   // that ended even after the user's own messages were folded into it.
   const messageTurns: Record<string, string> = {};
   items.forEach((item, index) => {
-    const turnId = readOptionalData(turnIds, index);
+    const turnId = turnIds?.[index];
     if (item.type !== "user_message" || !turnId) return;
-    for (const id of [item.clientMessageId, item.messageId]) if (id) writeData(messageTurns, id, turnId);
+    for (const id of [item.clientMessageId, item.messageId]) if (id) messageTurns[id] = turnId;
   });
   const turnId = turnIds?.at(-1);
   const identity =
@@ -149,7 +148,7 @@ export async function readCompletedTurn(
   }
   const turn = readTurn(items, cwd);
   const lastUser = items.findLastIndex((item) => item.type === "user_message");
-  if (lastUser < 0 || !isAsyncAnswerCandidate(readData(items, lastUser))) return turn;
+  if (lastUser < 0 || !isAsyncAnswerCandidate(items[lastUser])) return turn;
   // A stale/failed history query must not fall back to borrowing earlier push evidence.
   turn.evidence = turnEvidence(items.slice(lastUser + 1), cwd);
   try {
@@ -278,7 +277,7 @@ async function readHistoricalPush(
     historicalCheck(matches.length <= 1);
     source = matches[0] ?? -1;
     if (source > 0) {
-      historicalCheck(readData(entries, source - 1).turnId !== readData(entries, source).turnId);
+      historicalCheck(entries[source - 1].turnId !== entries[source].turnId);
       bounded = true;
       break;
     }
@@ -438,15 +437,12 @@ async function readProjectName(api: OperationalApi, projectId: string, cwd = "")
 
 export function createPort(
   getApi: () => OperationalApi,
-  lifecycle: Pick<WorkflowPort, "lifecycle" | "closeLifecycle"> = {},
 ): WorkflowPort {
   const usageRecoveryEnabled = false;
   let usageCheckedAt = -Infinity;
   let usage: ReturnType<PaseoApi["providers"]["listUsage"]> | undefined;
   return {
     syncProjectTitles: createProjectTitleSync(getApi),
-    ...(lifecycle.lifecycle ? { lifecycle: lifecycle.lifecycle } : {}),
-    ...(lifecycle.closeLifecycle ? { closeLifecycle: lifecycle.closeLifecycle } : {}),
     async quotaAccount(provider) {
       return quotaAccount(provider);
     },
@@ -553,7 +549,7 @@ export function createPort(
       const agent = await workspace.agents.create({
         agentId: member.id,
         idempotencyKey: `role-workflow-agent:${member.id}`,
-        title: beside ? `${readData(TAB_NAMES, base) ?? base} 실행` : title,
+        title: beside ? `${TAB_NAMES[base] ?? base} 실행` : title,
         config: member.config,
         env: { ...member.env, PASEO_ROLE_WORKFLOW_MANAGED: "1", PASEO_ROLE_WORKFLOW_ROLE: role },
         labels: {
@@ -764,7 +760,7 @@ export async function readArchiveInspection(
   const worker = async () => {
     while (next < agents.length) {
       const index = next++;
-      writeData(conversations, index, await archiveConversation(api, readData(agents, index), activityTimeoutMs));
+      conversations[index] = await archiveConversation(api, agents[index], activityTimeoutMs);
     }
   };
   await Promise.all(
@@ -925,7 +921,7 @@ export function withCallBudgets(
   for (const [name, ms] of Object.entries(budgets)) {
     const call = new Map(Object.entries(port)).get(name);
     if (typeof call !== "function" || !ms) continue;
-    writeData(bounded, name, (...args: unknown[]) => {
+    bounded[name] = (...args: unknown[]) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const expired = new Promise<never>((_, reject) => {
         timer = setTimeout(
@@ -936,7 +932,7 @@ export function withCallBudgets(
       return Promise.race([Promise.resolve(call.apply(port, args)), expired]).finally(() =>
         clearTimeout(timer),
       );
-    });
+    };
   }
   return bounded as unknown as WorkflowPort;
 }

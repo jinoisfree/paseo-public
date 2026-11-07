@@ -1,4 +1,3 @@
-import { installLifecycle } from "./lifecycle-fixture.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -7,7 +6,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rm, realpath, symlink, readdir } f
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { WorkflowEngine } from "../server/engine.ts";
+import { TestWorkflowEngine as WorkflowEngine } from "./lifecycle-fixture.mjs";
 import { createRepoProbe } from "../server/git.ts";
 import { managedPushSchema } from "../shared/managed-push.ts";
 import { withCallBudgets, createPort } from "../server/paseo-port.ts";
@@ -77,7 +76,7 @@ async function fixture(t, { defaultPins = false } = {}) {
   const file = path.join(state, "state.json"), probe = createRepoProbe();
   let record;
   const runner = { read: async () => structuredClone(record), history: async () => [], isRunning: () => false };
-  let engine = new WorkflowEngine(file, installLifecycle(port), undefined, probe, () => now, runner);
+  let engine = new WorkflowEngine(file, port, undefined, probe, () => now, runner);
   await engine.configure({ ...await engine.settings(), autoArchivePushed: false, ...(defaultPins ? {} : { autoPinPushed: false, autoPinStarted: false }), titleMarker: false, autoResumeQuota: false, autoResumeTransient: false });
   const id = await engine.enroll(agents.get("P"), config, {}, "federated", true, 5);
   await engine.selectExecutor(id, { provider: "codex", model: "test", thinking: "" });
@@ -98,7 +97,7 @@ async function fixture(t, { defaultPins = false } = {}) {
     get w() { return w; }, get engine() { return engine; },
     run: () => engine.worktreeCleanup.run(w),
     advance: (ms = CLEANUP_RETRY_MS + 1) => { now += ms; },
-    restart: async () => { await engine.save(); await engine.close(); engine = new WorkflowEngine(file, installLifecycle(port), undefined, probe, () => now, runner); await engine.tick(); w = engine.database.workflows[0]; },
+    restart: async () => { await engine.save(); await engine.close(); engine = new WorkflowEngine(file, port, undefined, probe, () => now, runner); await engine.tick(); w = engine.database.workflows[0]; },
   };
 }
 
@@ -757,5 +756,20 @@ test("AC-205 N-2: elapsed ten minutes alone is insufficient and legacy failures 
   await f.run();
   assert.equal(f.w.worktreeCleanup.stage, "failed");
   assert.equal(f.w.worktreeCleanup.permanentErrors, 3);
+  assert.deepEqual(f.calls, []);
+});
+
+test("AC-205 N-3: repeated submodule timeout stays pending with a direct archive explanation and no attempt consumption", async t => {
+  const f = await fixture(t);
+  const slow = createRepoProbe(async (cwd, args) => {
+    if (args[0] === "submodule" && args[1] === "foreach") throw Object.assign(Error("timeout"), { killed: true });
+    return "";
+  });
+  f.probe.cleanupHazards = slow.cleanupHazards;
+  for (let i = 0; i < 4; i++) { await f.run(); f.advance(); }
+  assert.equal(f.w.worktreeCleanup.stage, "pending");
+  assert.equal(f.w.worktreeCleanup.attempts, 0);
+  assert.match(f.w.worktreeCleanup.detail, /서브모듈.*5초/);
+  assert.match(f.w.worktreeCleanup.detail, /Paseo에서 해당 작업 공간을 직접 보관/);
   assert.deepEqual(f.calls, []);
 });

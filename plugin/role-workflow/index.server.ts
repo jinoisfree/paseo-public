@@ -48,7 +48,7 @@ export default function contribute(server: PluginServerContext) {
   let api: OperationalApi | null = null;
   let fatal: string | null = null;
   const access = createWorkspaceAccess(process.env.PASEO_HOME ?? path.join(homedir(), ".paseo"));
-  const port = withCallBudgets(createPort(access.api, access));
+  const port = withCallBudgets(createPort(access.api));
   const directory =
     process.env.PASEO_ROLE_WORKFLOW_STATE_DIR ??
     path.join(process.env.PASEO_HOME ?? path.join(homedir(), ".paseo"), "role-workflow");
@@ -59,6 +59,9 @@ export default function contribute(server: PluginServerContext) {
     port,
     (event) => notifier.send(event),
     createRepoProbe(),
+    undefined,
+    undefined,
+    access.createLifecycle(),
   );
   interface Seed {
     titled: boolean;
@@ -140,7 +143,7 @@ export default function contribute(server: PluginServerContext) {
               trailing: titles,
             })!;
       const config = { ...request.config, systemPrompt };
-      if (await hasClaudeStartMode(context.paseo, config, env, settings.claudeStartMode)) {
+      if (await hasClaudeStartMode(access.api(), config, env, settings.claudeStartMode)) {
         config.modeId = settings.claudeStartMode;
       }
       if (!mode || ready) return { config, env };
@@ -242,7 +245,7 @@ export default function contribute(server: PluginServerContext) {
         (await engine.settings().catch(() => null))?.shellPushGuard
       ) {
         // The shell guard already makes the push fail; refusing here saves a doomed approval prompt.
-        const denied = await context.paseo.agents
+        const denied = await access.api().agents
           .ref(agent.id)
           .respondToPermission({
             requestId: request.id,
@@ -288,7 +291,7 @@ export default function contribute(server: PluginServerContext) {
     try {
       // The dashboard edits global defaults; listModels accepts an omitted cwd.
       const catalog = await Promise.race([
-        context.paseo.providers.listModels(input.provider ?? "codex"),
+        access.api().providers.listModels(input.provider ?? "codex"),
         new Promise<never>((_, reject) => {
           timeout = setTimeout(
             () => reject(new Error("모델 목록 조회 시간이 초과되었습니다.")),
@@ -330,7 +333,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(folderList, async (_input, context) => {
     attach(context.paseo);
     // A catalog failure must not hide usable folders; null means unknown registration.
-    const projects = await context.paseo.projects.list().catch(() => null);
+    const projects = await access.api().projects.list().catch(() => null);
     return listFolders(
       (await engine.settings()).folderRoots,
       projects?.projects.map((project) => project.projectRootPath) ?? null,
@@ -429,7 +432,7 @@ export default function contribute(server: PluginServerContext) {
     removers.forEach((remove) => remove());
     await rulesReady;
     await engine.close();
-    await port.closeLifecycle?.();
+    await access.closeLifecycle();
   };
 }
 
@@ -457,7 +460,7 @@ function titlePrompts(title: boolean, progress: boolean): string {
 }
 
 async function hasClaudeStartMode(
-  paseo: PaseoApi,
+  paseo: OperationalApi,
   config: { provider: string; cwd: string; modeId?: string },
   env: Record<string, string>,
   modeId: string,

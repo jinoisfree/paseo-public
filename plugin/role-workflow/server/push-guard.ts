@@ -1,4 +1,3 @@
-import { readData } from "./data-records";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -67,12 +66,12 @@ export function runsGitPush(command: string) {
   for (const segment of unquoted.split(/[;&|\n()`]|\$\(/)) {
     const words = segment.trim().split(/\s+/).filter(Boolean);
     for (let i = 0; i < words.length; i++) {
-      if (readData(words, i) !== "git" && !readData(words, i).endsWith("/git")) continue;
+      if (words[i] !== "git" && !words[i].endsWith("/git")) continue;
       let j = i + 1;
-      while (j < words.length && readData(words, j).startsWith("-")) {
-        j += GIT_OPTIONS_WITH_VALUE.has(readData(words, j)) ? 2 : 1;
+      while (j < words.length && words[j].startsWith("-")) {
+        j += GIT_OPTIONS_WITH_VALUE.has(words[j]) ? 2 : 1;
       }
-      if (readData(words, j) === "push") return true;
+      if (words[j] === "push") return true;
     }
   }
   return false;
@@ -84,7 +83,7 @@ export function permissionCommands(input: unknown): string[] {
   const record = input as Record<string, unknown>;
   const commands: string[] = [];
   for (const key of ["command", "cmd"]) {
-    const value = readData(record, key);
+    const value = record[key];
     if (typeof value === "string") commands.push(value);
     if (Array.isArray(value) && value.every((part) => typeof part === "string"))
       commands.push(value.join(" "));

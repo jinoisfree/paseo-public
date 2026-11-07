@@ -1,4 +1,5 @@
-import { createWorkspaceAccess } from "../server/workspace-lifecycle.ts";
+import { archiveSdk } from "./lifecycle-fixture.mjs";
+import { createWorkspaceAccess, bindWorkspaceLifecycle } from "../server/workspace-lifecycle.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -211,11 +212,10 @@ test("AC-103: archive port verifies archive RPC success and preserves archived s
   assert.equal("archiveWorkspace" in port, false);
   assert.equal("pushReview" in port, false);
   const access = createWorkspaceAccess("/tmp");
-  access.attach(api);
-  const gate = access.lifecycle({ db: async () => ({ workflows: [] }), port: () => ({
-    archiveInspection: async () => ({ workspaces: [{ id: "ws", pinnedAt: null, cwd: "/tmp" }],
-      conversations: [{ id: "a", workspaceId: "ws", status: "idle", activeTurn: false, permission: false }] }),
-  }) });
+  const sdk = archiveSdk("ws", () => api.workspaces.ref("ws").archive());
+  access.attach(sdk);
+  const gate = access.createLifecycle();
+  bindWorkspaceLifecycle(gate, { db: async () => ({ workflows: [] }) });
   await gate.archive("ws");
   api.workspaces.ref = () => ({ archive: async () => ({ error: "blocked", archivedAt: null }) });
   await assert.rejects(gate.archive("ws"), /blocked/);

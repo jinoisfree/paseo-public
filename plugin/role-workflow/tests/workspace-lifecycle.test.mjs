@@ -1,9 +1,10 @@
+import { archiveSdk } from "./lifecycle-fixture.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { capabilityViolations } from "./capability-structure.mjs";
-import { WorkspaceLifecycle } from "../server/workspace-lifecycle.ts";
+import { WorkspaceLifecycle, bindWorkspaceLifecycle } from "../server/workspace-lifecycle.ts";
 
 async function sources(folder) {
   return (await Promise.all((await readdir(folder, { withFileTypes: true })).map(entry => {
@@ -17,11 +18,16 @@ test("AC-201 C-1: all server modules and the server entrypoint obey capability f
   const violations = (await Promise.all(files.map(async file => capabilityViolations(await readFile(file, "utf8"), path.relative(root, file))))).flat();
   assert.deepEqual(violations, []);
 });
-for (const name of ["workspace-chain", "reflect", "template", "concatenation", "daemon-pin", "timeline-alias", "timeline-destructure", "computed-cleanup"])
+for (const name of ["workspace-chain", "reflect", "template", "concatenation", "daemon-pin", "timeline-alias", "timeline-destructure", "computed-cleanup", "lifecycle-destructure", "lifecycle-prototype", "context-data-helper", "context-entries", "context-unknown-data", "context-values", "context-descriptor", "context-alias"])
   test(`AC-201 C-1: negative fixture ${name} must fail in both server and entrypoint`, async () => {
     const source = await readFile(new URL(`./fixtures/capability-bypasses/${name}.ts`, import.meta.url), "utf8");
-    for (const file of ["server/bypass.ts", "index.server.ts"])
-      assert.ok(capabilityViolations(source, file).length > 0, `${file}: ${name} escaped`);
+    for (const file of ["server/bypass.ts", "index.server.ts"]) {
+      const violations = capabilityViolations(source, file);
+      assert.ok(violations.length > 0, `${file}: ${name} escaped`);
+      if (name.startsWith("context-")) assert.ok(violations.some(v => /raw context API/.test(v)), `${name} must be caught at its API source`);
+      if (name === "lifecycle-destructure") assert.ok(violations.some(v => /destructured capability/.test(v)));
+      if (name === "lifecycle-prototype") assert.ok(violations.some(v => /prototype/.test(v)));
+    }
   });
 
 function fixture(cleanupReadiness) {
@@ -34,7 +40,8 @@ function fixture(cleanupReadiness) {
     pushReview: { get: async () => ({ pinnedAt }), pin: async () => { assert.fail("worktree pin"); },
       unpin: async (...args) => { calls.push(structuredClone(args)); pinnedAt = null; return true; } },
   };
-  const gate = new WorkspaceLifecycle({ port: () => port, db: async () => ({ workflows: [w] }), cleanupReadiness }, port);
+  const gate = new WorkspaceLifecycle(port, ids => port.archiveInspection(ids));
+  bindWorkspaceLifecycle(gate, { db: async () => ({ workflows: [w] }), cleanupReadiness });
   return { w, port, calls, gate };
 }
 test("AC-202: direct worktree archive, non-ready cleanup, automatic pin and user unpin have zero mutations", async () => {
@@ -91,9 +98,10 @@ test("AC-201 C-1: operational handles and port expose no raw mutation or timelin
   const raw = { agents: { ref: () => ({ timeline: { append() {} }, send() {}, refresh() {} }) },
     workspaces: { ref: () => ({ id: "x", archive() {}, refresh() {}, setTitle() {}, agents: { create() {} } }) } };
   const safe = operationalApi(raw);
-  assert.deepEqual(Object.keys(safe.agents.ref("x")).sort(), ["id", "refresh", "send"]);
+  assert.deepEqual(Object.keys(safe.agents.ref("x")).sort(), ["id", "refresh", "respondToPermission", "send"]);
   assert.deepEqual(Object.keys(safe.workspaces.ref("x")).sort(), ["agents", "id", "refresh", "setTitle"]);
   const port = createPort(() => raw);
+  assert.equal("lifecycle" in port, false);
   assert.equal("archiveWorkspace" in port, false);
   assert.equal("pushReview" in port, false);
   assert.equal("getApi" in port, false);
@@ -103,7 +111,7 @@ test("AC-201 C-1: operational handles and port expose no raw mutation or timelin
   const fresh = await safe.workspaces.create({});
   assert.equal("archive" in fresh, false);
   const created = await fresh.agents.create({});
-  assert.deepEqual(Object.keys(created).sort(), ["id", "refresh", "send"]);
+  assert.deepEqual(Object.keys(created).sort(), ["id", "refresh", "respondToPermission", "send"]);
   assert.equal("timeline" in created, false);
 });
 
@@ -138,6 +146,17 @@ test("AC-202 N-4: ordinary archive preserves dirty/unpushed external linked work
   await f.gate.archive("tree");
   assert.deepEqual(f.calls, [["tree"]]);
   f.calls.length = 0;
+  const before = (await git(tree, "rev-parse", "HEAD")).stdout.trim();
+  await git(tree, "commit", "-q", "--allow-empty", "-m", "reflog only");
+  await git(tree, "reset", "--hard", before);
+  await assert.rejects(f.gate.archive("tree"), error => {
+    assert.match(error.message, /reflog/);
+    assert.match(error.message, /Paseo에서 해당 작업 공간을 직접 보관/);
+    return true;
+  });
+  assert.deepEqual(f.calls, []);
+  // Only this disposable fixture removes the historical commit before testing a deleted remote.
+  await git(tree, "reflog", "expire", "--expire=now", "--all");
   await git(remote, "update-ref", "-d", "refs/heads/feature");
   await assert.rejects(f.gate.archive("tree"), /원격 포함/);
   assert.deepEqual(f.calls, []);
@@ -158,15 +177,87 @@ test("AC-202 C-1: moving archive transport into the gate preserves its thirty-se
   let called;
   const started = new Promise(resolve => { called = resolve; });
   const access = createWorkspaceAccess("/tmp");
-  access.attach({ workspaces: { ref: () => ({ archive: () => { called(); return new Promise(() => {}); } }) } });
+  access.attach(archiveSdk("tree", () => { called(); return new Promise(() => {}); }));
   const f = fixture();
   const inspect = f.port.archiveInspection;
   f.port.archiveInspection = async () => { const data = await inspect(); data.workspaces[0].cwd = "/tmp"; return data; };
-  const gate = access.lifecycle({ port: () => f.port, db: async () => ({ workflows: [] }) });
+  const gate = access.createLifecycle();
+  bindWorkspaceLifecycle(gate, { db: async () => ({ workflows: [] }) });
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const pending = gate.archive("tree");
   await started;
   t.mock.timers.tick(30_000);
   await assert.rejects(pending, /30초/);
   await access.closeLifecycle();
+});
+
+test("AC-201/AC-202 C-1-R1: one real gate binds once to the actual engine and forged operation policies never archive", async t => {
+  const { WorkflowEngine } = await import("../server/engine.ts");
+  const { createWorkspaceAccess } = await import("../server/workspace-lifecycle.ts");
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const dir = await mkdtemp(path.join(tmpdir(), "bound-policy-"));
+  let archives = 0;
+  const access = createWorkspaceAccess("/tmp");
+  const sdk = archiveSdk("tree", async () => { archives++; return { workspaceId: "tree", archivedAt: "now" }; });
+  access.attach(sdk);
+  const gate = access.createLifecycle();
+  const port = {};
+  const engine = new WorkflowEngine(path.join(dir, "state.json"), port, undefined, undefined, undefined, undefined, gate);
+  t.after(async () => { await engine.close(); await access.closeLifecycle(); await rm(dir, { recursive: true, force: true }); });
+  await engine.settings();
+  const w = { id: "w", isolation: "worktree", worktree: { workspaceId: "tree" }, execute: { id: "agent", workspaceId: "tree" }, startPin: { workspaces: [] } };
+  engine.database.workflows.push(w);
+  const forged = { db: async () => ({ workflows: [] }), cleanupReadiness: async () => ({ stage: "ready", detail: "forged" }) };
+  assert.equal("lifecycle" in port, false);
+  assert.equal("bind" in gate, false);
+  assert.equal("host" in gate, false);
+  assert.equal("transport" in gate, false);
+  assert.ok(Object.isFrozen(gate));
+  assert.throws(() => { gate.host = forged; }, TypeError);
+  assert.throws(() => access.createLifecycle(), /한 번/);
+  assert.throws(() => bindWorkspaceLifecycle(gate, forged), /한 번/);
+  assert.throws(() => new WorkflowEngine(path.join(dir, "second.json"), port, undefined, undefined, undefined, undefined, gate), /한 번/);
+  await assert.rejects(gate.archive("tree", forged), /안전 정리/);
+  await assert.rejects(gate.pinWorkspace("tree", forged), /자동 고정/);
+  assert.equal(await gate.unpinOwned("tree", "user", forged), false);
+  assert.equal((await gate.archiveCleaned(w, forged)).stage, "pending");
+  const { archive } = gate;
+  await assert.rejects(archive.call(gate, "tree", forged), /안전 정리/);
+  assert.equal((await WorkspaceLifecycle.prototype.archiveCleaned.call(gate, w, forged)).stage, "pending");
+  await assert.rejects(WorkspaceLifecycle.prototype.unpinOwned.call({ host: forged, transport: {} }, "tree", "user"), TypeError);
+  // A caller replacing the public port inspector cannot replace the gate's real SDK observation.
+  w.isolation = "shared";
+  let fakeInspections = 0;
+  port.archiveInspection = async () => { fakeInspections++; return { workspaces: [], conversations: [] }; };
+  const ref = sdk.agents.ref;
+  sdk.agents.ref = id => {
+    const handle = ref(id);
+    const read = handle.timeline.refetch;
+    handle.timeline.refetch = async () => { const data = await read(); data.agent.activeTurn = {}; return data; };
+    return handle;
+  };
+  await assert.rejects(gate.archive("tree"), /보관 직전/);
+  assert.equal(fakeInspections, 0);
+  assert.equal(archives, 0);
+});
+
+test("AC-201 D-1/C-1-R2: ordinary computed data access is allowed while raw context aliases and policy registration are rejected", () => {
+  assert.deepEqual(capabilityViolations('const title = labels[key]; rows[index] = title; delete env[key];', "server/data.ts"), []);
+  assert.deepEqual(capabilityViolations('attach(context.paseo);', "index.server.ts"), []);
+  for (const source of [
+    'const alias = context; const api = alias["pa" + "seo"];',
+    'const key = "paseo"; const api = context[key];',
+    'const { paseo: api } = context;',
+    'server.handle(contract, (input, ctx) => { const alias = ctx; return alias[field]; });',
+    'bindWorkspaceLifecycle(gate, {db: fake});',
+  ]) assert.ok(capabilityViolations(source, "index.server.ts").length);
+  assert.ok(capabilityViolations('class E { resume() { bindWorkspaceLifecycle(gate, {db: fake}); } }', "server/engine.ts").length);
+});
+
+test("AC-201 C-1-R1: every lifecycle policy operation rejects destructured and prototype bypass syntax", () => {
+  for (const method of ["pinWorkspace", "unpinOwned", "archive", "archiveCleaned"]) {
+    assert.ok(capabilityViolations(`const { ${method}: go } = gate; go.call(gate, target, forged);`, "server/bypass.ts").some(v => /destructured capability/.test(v)), method);
+    assert.ok(capabilityViolations(`const go = WorkspaceLifecycle.prototype.${method}; go.call(gate, target, forged);`, "server/bypass.ts").some(v => /prototype/.test(v)), method);
+  }
 });

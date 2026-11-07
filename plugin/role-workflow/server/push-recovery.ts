@@ -1,4 +1,3 @@
-import { readData } from "./data-records";
 import path from "node:path";
 import { proseArtifacts, pushTargetsSchema, type PushTarget } from "../shared/artifacts";
 import { resolvedPushTargets } from "./artifacts";
@@ -185,7 +184,7 @@ async function inspectCurrentPush(
   // Read again after slow Git checks. A new user message, response, or run cancels this result.
   const latest = await Promise.all(rows.map((row) => port.pushAuditHistory!(row.member.id)));
   if (
-    latest.some((turn, index) => JSON.stringify(turn) !== JSON.stringify(readData(rows, index).turn)) ||
+    latest.some((turn, index) => JSON.stringify(turn) !== JSON.stringify(rows[index].turn)) ||
     !(await idle(input, port))
   )
     return { state: "retry", reason: "조회 중 대화가 바뀌어 최신 기록을 다시 확인합니다." };

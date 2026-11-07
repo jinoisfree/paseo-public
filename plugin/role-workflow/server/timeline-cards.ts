@@ -21,6 +21,7 @@ export function operationalApi(source: PaseoApi) {
   const agent = (handle: ReturnType<PaseoApi["agents"]["ref"]>) => ({
     id: handle.id,
     refresh: (...args: Parameters<typeof handle.refresh>) => handle.refresh(...args),
+    respondToPermission: (...args: Parameters<typeof handle.respondToPermission>) => handle.respondToPermission(...args),
     send: (...args: Parameters<typeof handle.send>) => handle.send(...args),
   });
   const workspace = (handle: ReturnType<PaseoApi["workspaces"]["ref"]>) => ({

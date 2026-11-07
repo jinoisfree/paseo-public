@@ -1,4 +1,3 @@
-import { readData } from "./data-records";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { randomUUID } from "node:crypto";
@@ -220,8 +219,8 @@ export class ManagedPushRunner {
     if (result.exitCode !== 0) return false;
     const fields = result.stdout.split("\0");
     for (let index = 0; index + 1 < fields.length; index += 2) {
-      const scope = readData(fields, index);
-      const row = readData(fields, index + 1);
+      const scope = fields[index];
+      const row = fields[index + 1];
       const newline = row.indexOf("\n");
       const key = newline === -1 ? row : row.slice(0, newline);
       if (key.startsWith("remote.")) {

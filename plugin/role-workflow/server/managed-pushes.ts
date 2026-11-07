@@ -1,4 +1,3 @@
-import { readData } from "./data-records";
 import type { Settings } from "../shared/contracts";
 import type { ManagedPush } from "../shared/managed-push";
 import type { Snapshot, Workflow, WorkflowPort } from "./engine";
@@ -189,13 +188,13 @@ export class ManagedPushes {
       w.progress = "done";
       w.artifactNotice =
         record.error ||
-        readData({
+        ({
           prepared: "표시한 대상의 푸시 승인을 기다립니다.",
           running: "승인한 커밋을 푸시하고 있습니다.",
           checking: "실행은 끝났으며 원격 반영을 확인하고 있습니다.",
           failed: "푸시에 실패했습니다. 실행 기록을 확인하세요.",
           unknown: "실행 결과 확인이 필요합니다. 자동으로 다시 푸시하지 않습니다.",
-        }, record.state);
+        })[record.state];
     }
     await this.host.save();
     await this.host.renameWorkspaces(w, (await this.host.settings()).titleMarker);
