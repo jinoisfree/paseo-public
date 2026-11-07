@@ -92,16 +92,7 @@ async function fixture(
       // As the real port does: the executor opens as a tab in its planner's workspace.
       const workspaceId =
         role === "execute" && w.plan?.workspaceId ? w.plan.workspaceId : `workspace-${member.id}`;
-      created.push({
-        role,
-        marker,
-        id: member.id,
-        generation: member.generation,
-        projectId: w.projectId,
-        cwd: w.cwd,
-        config: member.config,
-        title: w.title,
-      });
+      created.push({ w, role, member, marker });
       agents.set(member.id, { ...agents.get("planner"), id: member.id, workspaceId, usage: 0 });
       return workspaceId;
     },
@@ -153,11 +144,11 @@ for (const provider of ["claude", "codex"])
   test(`${provider} plan -> execution -> review -> correction -> final completion stays in one project`, async (t) => {
     const f = await fixture(t, undefined, undefined, undefined, provider);
     await f.finish("planner", "p1", "plan");
-    const executor = f.created[0].id;
-    assert.equal(f.created[0].config.provider, provider === "claude" ? "codex" : "claude");
-    assert.equal(f.created[0].config.modeId, provider === "claude" ? "auto" : "acceptEdits");
+    const executor = f.created[0].member.id;
+    assert.equal(f.created[0].member.config.provider, provider === "claude" ? "codex" : "claude");
+    assert.equal(f.created[0].member.config.modeId, provider === "claude" ? "auto" : "acceptEdits");
     assert.equal(f.created.length, 1);
-    assert.equal(f.created[0].projectId, "project");
+    assert.equal(f.created[0].w.projectId, "project");
     assert.equal(f.sent[0].id, executor);
     assert.match(f.sent[0].prompt, /original goal/);
     await f.finish(executor, "e1", "result");
@@ -176,7 +167,7 @@ test("80% compacts both roles once per turn and preserves workspace and agent id
   f.agents.get("planner").usage = 0.79;
   await f.finish("planner", "p1", "plan");
   assert.equal(f.compacted.length, 0);
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   f.agents.get("planner").usage = 0.8;
   f.agents.get(executor).usage = 0.81;
   await f.finish(executor, "e1", "result");
@@ -291,7 +282,7 @@ test("uncertain delivery without an echo stops visibly; corrupt state is not ove
 test("repeated callbacks and a permission wait cannot create a second executor", async (t) => {
   const f = await fixture(t);
   await Promise.all([f.finish("planner", "p1", "plan"), f.finish("planner", "p1", "plan")]);
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   f.agents.get(executor).permission = true;
   await f.engine.tick();
   assert.equal(f.created.length, 1);
@@ -301,7 +292,7 @@ test("cycle limits preserve the pending plan until the limit is raised", async (
   const f = await fixture(t);
   await f.engine.configure({ ...(await f.engine.settings()), maxCycles: 1 });
   await f.finish("planner", "p1", "plan");
-  await f.finish(f.created[0].id, "e1", "result");
+  await f.finish(f.created[0].member.id, "e1", "result");
   await f.finish("planner", "p2", "plan");
   assert.equal((await f.view()).status, "paused");
   assert.equal(f.sent.length, 2);
@@ -314,14 +305,14 @@ test("resuming with a note after the cycle limit still dispatches the held plan"
   const f = await fixture(t);
   await f.engine.configure({ ...(await f.engine.settings()), maxCycles: 1 });
   await f.finish("planner", "p1", "plan");
-  await f.finish(f.created[0].id, "e1", "result");
+  await f.finish(f.created[0].member.id, "e1", "result");
   await f.finish("planner", "p2", "plan");
   assert.equal((await f.view()).status, "paused");
   assert.equal(f.sent.length, 2);
   await f.engine.control(f.id, "resume", "로그도 함께 확인하세요");
   assert.equal(f.sent.length, 3);
   const last = f.sent.at(-1);
-  assert.equal(last.id, f.created[0].id, "the held plan goes to the executor");
+  assert.equal(last.id, f.created[0].member.id, "the held plan goes to the executor");
   assert.match(last.prompt, /next task/);
   assert.match(last.prompt, /로그도 함께 확인하세요/);
   const w = await stored(f);
@@ -340,7 +331,7 @@ test("a direct reply after needs_input resumes and dispatches the new plan once"
   assert.equal((await f.view()).status, "active");
   assert.equal(f.created.length, 1);
   assert.equal(f.sent.length, 1);
-  assert.equal(f.sent[0].id, f.created[0].id);
+  assert.equal(f.sent[0].id, f.created[0].member.id);
   assert.match(f.sent[0].prompt, /latest direct reply/);
 });
 test("pause retains the latest result and resumes without dispatching superseded instructions", async (t) => {
@@ -395,7 +386,7 @@ test("notification transitions deduplicate, permission targets member, and pause
     ["permission", "stopped"],
   );
   await f.finish("planner", "p", "plan");
-  await f.finish(f.created[0].id, "e", "result");
+  await f.finish(f.created[0].member.id, "e", "result");
   await f.finish("planner", "done", "complete");
   await f.engine.tick();
   assert.deepEqual(
@@ -417,7 +408,7 @@ test("zero-cycle completion and disabled notifications are silent; rejection can
   });
   await f.engine.permission("planner", { id: "r", kind: "tool" });
   await f.finish("planner", "p", "plan");
-  await f.finish(f.created[0].id, "e", "result");
+  await f.finish(f.created[0].member.id, "e", "result");
   await f.finish("planner", "d2", "complete");
   assert.equal(events.length, 0);
   const g = await fixture(t, async () => {
@@ -431,7 +422,7 @@ test("completed planner resumes once in existing workspace; invalid and executor
   const events = [];
   const f = await fixture(t, async (e) => events.push(e));
   await f.finish("planner", "p", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   await f.finish(executor, "e", "result");
   await f.finish("planner", "done", "complete");
   await f.engine.ended("planner", "chat", "hello", null);
@@ -459,15 +450,15 @@ test("selected executor model overrides setting only before member exists", asyn
     '"status":"plan","executorModel":"codex/selected"',
   );
   await f.engine.ended("planner", "p", selected, null);
-  assert.equal(f.created[0].config.provider, "codex/selected");
-  await f.finish(f.created[0].id, "e", "result");
+  assert.equal(f.created[0].member.config.provider, "codex/selected");
+  await f.finish(f.created[0].member.id, "e", "result");
   await f.engine.ended("planner", "p2", selected.replace("codex/selected", "codex/other"), null);
   assert.equal(f.created.length, 1);
   assert.match(f.sent.at(-1).prompt, /codex\/selected.*다시 묻지 않음/);
   const g = await fixture(t);
   await g.engine.configure({ ...(await g.engine.settings()), executorModel: "codex/configured" });
   await g.finish("planner", "p", "plan");
-  assert.equal(g.created[0].config.provider, "codex/configured");
+  assert.equal(g.created[0].member.config.provider, "codex/configured");
 });
 test("model creation error is durable and resume repairs uncreated member model", async (t) => {
   const f = await fixture(t);
@@ -486,12 +477,12 @@ test("model creation error is durable and resume repairs uncreated member model"
   await f.engine.configure({ ...(await f.engine.settings()), executorModel: "codex/repaired" });
   f.port.create = create;
   await f.engine.control(f.id, "resume");
-  assert.equal(f.created[0].config.provider, "codex/repaired");
+  assert.equal(f.created[0].member.config.provider, "codex/repaired");
 });
 test("legacy state defaults settings and suppresses historical completed notification", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "p", "plan");
-  await f.finish(f.created[0].id, "e", "result");
+  await f.finish(f.created[0].member.id, "e", "result");
   await f.finish("planner", "done", "complete");
   await f.engine.close();
   const db = JSON.parse(await readFile(f.file, "utf8"));
@@ -592,7 +583,7 @@ test("archived preserves federated planner, executor and handoff", async (t) => 
   const before = await readFile(f.file, "utf8");
   const handoff = path.join(path.dirname(f.file), "handoffs", `${f.id}.json`);
   const artifact = await readFile(handoff, "utf8");
-  await f.engine.archived(f.created[0].id);
+  await f.engine.archived(f.created[0].member.id);
   await f.engine.archived("planner");
   assert.equal(await readFile(f.file, "utf8"), before);
   assert.equal(await readFile(handoff, "utf8"), artifact);
@@ -663,19 +654,19 @@ test("thinking choice overrides settings only for a new executor", async (t) => 
     '"status":"plan","executorThinking":"high"',
   );
   await f.engine.ended("planner", "p", withThinking, null);
-  assert.equal(f.created[0].config.thinkingOptionId, "high");
+  assert.equal(f.created[0].member.config.thinkingOptionId, "high");
   assert.match(f.sent[0].prompt, /추론: high/);
-  await f.finish(f.created[0].id, "e", "result");
+  await f.finish(f.created[0].member.id, "e", "result");
   await f.engine.ended("planner", "p2", withThinking.replace('"high"', '"low"'), null);
   assert.equal(f.created.length, 1);
   assert.match(f.sent.at(-1).prompt, /추론: high/);
   const g = await fixture(t);
   await g.engine.configure({ ...(await g.engine.settings()), executorThinking: "medium" });
   await g.finish("planner", "p", "plan");
-  assert.equal(g.created[0].config.thinkingOptionId, "medium");
+  assert.equal(g.created[0].member.config.thinkingOptionId, "medium");
   const h = await fixture(t);
   await h.finish("planner", "p", "plan");
-  assert.equal(Object.hasOwn(h.created[0].config, "thinkingOptionId"), false);
+  assert.equal(Object.hasOwn(h.created[0].member.config, "thinkingOptionId"), false);
   assert.match(h.sent[0].prompt, /모델 기본값/);
 });
 test("thinking creation errors persist and resume restores model and thinking settings", async (t) => {
@@ -698,8 +689,8 @@ test("thinking creation errors persist and resume restores model and thinking se
   });
   f.port.create = create;
   await f.engine.control(f.id, "resume");
-  assert.equal(f.created[0].config.provider, "codex/fixed");
-  assert.equal(f.created[0].config.thinkingOptionId, "medium");
+  assert.equal(f.created[0].member.config.provider, "codex/fixed");
+  assert.equal(f.created[0].member.config.thinkingOptionId, "medium");
 });
 test("completed uncreated executor resets thinking on a new plan", async (t) => {
   const f = await fixture(t);
@@ -719,8 +710,8 @@ test("completed uncreated executor resets thinking on a new plan", async (t) => 
   const restarted = new WorkflowEngine(f.file, f.port);
   t.after(() => restarted.close());
   await restarted.ended("planner", "new", decision("plan"), null);
-  assert.equal(f.created[0].config.provider, "codex/fixed");
-  assert.equal(Object.hasOwn(f.created[0].config, "thinkingOptionId"), false);
+  assert.equal(f.created[0].member.config.provider, "codex/fixed");
+  assert.equal(Object.hasOwn(f.created[0].member.config, "thinkingOptionId"), false);
 });
 test("undecided first title is saved and renamed once before mode parsing", async (t) => {
   const f = await fixture(t, undefined, "undecided", false);
@@ -739,7 +730,7 @@ test("rename failure cannot stop a plan and new execution uses the title", async
   };
   await f.engine.ended("planner", "p", "제목: 한글 작업\n" + decision("plan"), null);
   assert.equal((await f.view()).status, "active");
-  assert.equal(f.created[0].title, "한글 작업");
+  assert.equal(f.created[0].w.title, "한글 작업");
 });
 test("legacy titled default and failed turns do not rename", async (t) => {
   const f = await fixture(t, undefined, "undecided", false);
@@ -775,7 +766,7 @@ test("federated first response renames once and keeps flow and notifications und
   const f = await fixture(t, async (e) => events.push(e), "undecided", false);
   await f.engine.ended("planner", "first", "제목: 🟠 계획2: 새 작업\n" + decision("plan"), null);
   assert.deepEqual(f.renamed, [{ workspaceId: "initial", title: "🟠 C[project]-01 새 작업" }]);
-  assert.equal(f.created[0].title, "새 작업");
+  assert.equal(f.created[0].w.title, "새 작업");
   assert.equal(f.created[0].marker, true);
   assert.equal((await f.view()).mode, "federated");
   await f.engine.permission("planner", { id: "permission", kind: "tool" });
@@ -829,7 +820,7 @@ test("general conversation follows declared progress and ignores repeats", async
 test("a federation is one workspace whose title follows completion, push and a new plan", async (t) => {
   const f = await fixture(t, undefined, "federated", false, "claude", verifiedPushProbe);
   await f.engine.ended("planner", "p", "제목: 짝 작업\n" + decision("plan"), null);
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   assert.equal(
     f.agents.get(executor).workspaceId,
     "initial",
@@ -852,7 +843,7 @@ test("a federation is one workspace whose title follows completion, push and a n
   const g = await fixture(t, undefined, "federated", false);
   await g.engine.configure({ ...(await g.engine.settings()), titleMarker: false });
   await g.engine.ended("planner", "p", "제목: 표식 없음\n" + decision("plan"), null);
-  await g.finish(g.created[0].id, "r", "result");
+  await g.finish(g.created[0].member.id, "r", "result");
   await g.finish("planner", "c", "complete");
   assert.deepEqual(
     g.renamed.map((x) => x.title),
@@ -862,7 +853,7 @@ test("a federation is one workspace whose title follows completion, push and a n
 test("a federation from before shared workspaces keeps a title for each role", async (t) => {
   const f = await fixture(t, undefined, "federated", false);
   f.port.create = async (w, role, member) => {
-    f.created.push({ role, id: member.id });
+    f.created.push({ w, role, member });
     f.agents.set(member.id, {
       ...f.agents.get("planner"),
       id: member.id,
@@ -871,7 +862,7 @@ test("a federation from before shared workspaces keeps a title for each role", a
     return "separate";
   };
   await f.engine.ended("planner", "p", "제목: 옛 짝\n" + decision("plan"), null);
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   await f.finish(executor, "r", "result");
   await f.finish("planner", "c", "complete");
   assert.deepEqual(
@@ -900,7 +891,7 @@ test("user-typed progress line and direct setting recolour conversations without
 test("paused flow turns green on the planner's complete without resuming", async (t) => {
   const f = await fixture(t, undefined, "federated", false);
   await f.engine.ended("planner", "p", "제목: 멈춘 작업\n" + decision("plan"), null);
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   await f.engine.control(f.id, "pause");
   await f.finish(executor, "r", "complete");
   assert.equal(f.renamed.length, 1);
@@ -1097,7 +1088,7 @@ test("archive state-write failure rolls back and retries removal", async (t) => 
 test("review report occurs once; second-cycle and resume omit own context until compaction", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   assert.match(f.sent[0].prompt, /원래 목표:\noriginal goal/);
   assert.match(f.sent[0].prompt, /규칙 00-common 8절에 따라/);
   await f.finish(executor, "e1", "result");
@@ -1255,7 +1246,7 @@ test("remember accumulates normalized unique entries in handoff, sends once then
     null,
     "original goal",
   );
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   assert.equal(f.sent[0].prompt.split("지킬 규칙").length - 1, 1);
   const handoff = JSON.parse(
     await readFile(path.join(path.dirname(f.file), "handoffs", `${f.id}.json`), "utf8"),
@@ -1313,7 +1304,7 @@ test("automatic compaction through ended and recovery forces full context withou
       null,
       "original goal",
     );
-    const executor = f.created[0].id;
+    const executor = f.created[0].member.id;
     f.agents.get(executor).status = "idle";
     f.agents.get(executor).usage = 0.9;
     if (recovery) {
@@ -1391,8 +1382,8 @@ test("GPT planner uses and repairs only Claude settings then preserves assignmen
   });
   f.port.create = create;
   await f.engine.control(f.id, "resume");
-  const executor = f.created[0].id;
-  assert.deepEqual(f.created[0].config, {
+  const executor = f.created[0].member.id;
+  assert.deepEqual(f.created[0].member.config, {
     provider: "claude/fixed",
     thinkingOptionId: "medium",
     modeId: "acceptEdits",
@@ -1422,7 +1413,7 @@ test("GPT planner uses and repairs only Claude settings then preserves assignmen
 test("Claude executor cannot finalize a GPT-planned workflow", async (t) => {
   const f = await fixture(t, undefined, undefined, undefined, "codex");
   await f.finish("planner", "p", "plan");
-  await f.finish(f.created[0].id, "e", "complete");
+  await f.finish(f.created[0].member.id, "e", "complete");
   assert.equal((await f.view()).status, "needs_input");
 });
 
@@ -1452,7 +1443,7 @@ test("GPT general mode creates no counterpart and mode answer can select federat
   const g = await fixture(t, undefined, "undecided", false, "codex");
   await g.finish("planner", "p", "plan");
   assert.equal((await g.view()).mode, "federated");
-  assert.equal(g.created[0].config.provider, "claude");
+  assert.equal(g.created[0].member.config.provider, "claude");
   assert.match(g.renamed[0].title, /G\[project\]-01/);
 });
 
@@ -1481,8 +1472,8 @@ for (const provider of ["claude", "codex"]) {
         assert.equal(f.created.length, 0);
         await f.finish("planner", "plan-turn", "plan");
         assert.equal(f.created.length, 1);
-        assert.equal(f.created[0].config.provider, provider === "codex" ? "claude" : "codex");
-        await f.finish(f.created[0].id, "result-turn", "result");
+        assert.equal(f.created[0].member.config.provider, provider === "codex" ? "claude" : "codex");
+        await f.finish(f.created[0].member.id, "result-turn", "result");
         assert.equal(f.sent.at(-1).id, "planner");
         await f.finish("planner", "review-turn", "complete");
         assert.equal((await f.view()).status, "completed");
@@ -1635,8 +1626,8 @@ test("changing executor model does not carry the old model's saved thinking into
     null,
     "goal",
   );
-  assert.equal(f.created[0].config.provider, "codex/new");
-  assert.equal(f.created[0].config.thinkingOptionId, undefined);
+  assert.equal(f.created[0].member.config.provider, "codex/new");
+  assert.equal(f.created[0].member.config.thinkingOptionId, undefined);
 });
 
 for (const planner of ["claude", "codex"]) {
@@ -1672,7 +1663,7 @@ test("unchanged code, instruction and result trigger one reassessment, then requ
   };
   const f = await fixture(t, undefined, "federated", true, "claude", probe);
   await f.finish("planner", "p0", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   for (let i = 1; i <= 3; i++) {
     await f.finish(executor, `e${i}`, "result");
     await f.finish("planner", `p${i}`, "plan");
@@ -1695,7 +1686,7 @@ test("new repository evidence prevents the repetition guard from interrupting pr
   };
   const f = await fixture(t, undefined, "federated", true, "claude", probe);
   await f.finish("planner", "p0", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   for (let i = 1; i <= 3; i++) {
     await f.finish(executor, `e${i}`, "result");
     await f.finish("planner", `p${i}`, "plan");
@@ -1710,7 +1701,7 @@ for (const role of ["execute", "plan"]) {
       const f = await fixture(t);
       occupyNewExecutor(f);
       await f.finish("planner", "p1", "plan");
-      const executor = f.created[0].id;
+      const executor = f.created[0].member.id;
       const target = role === "execute" ? executor : "planner";
       if (role === "plan") {
         f.agents.get(executor).status = "idle";
@@ -1751,7 +1742,7 @@ test("an instruction the executor never received survives the planner's side tur
   const f = await fixture(t, async (e) => events.push(e));
   occupyNewExecutor(f);
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   assert.equal(f.sent.length, 0);
   assert.equal((await stored(f)).pending.stage, "queued");
 
@@ -1788,7 +1779,7 @@ test("a reissued plan replaces the undelivered one without counting another cycl
   const f = await fixture(t);
   occupyNewExecutor(f);
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   await f.engine.ended("planner", "p1b", decision("plan", "revised task"), null);
   assert.equal((await f.view()).cycles, 1);
   assert.equal(f.created.length, 1);
@@ -1806,7 +1797,7 @@ test("side turns beside running work neither stop the flow nor notify", async (t
   const events = [];
   const f = await fixture(t, async (e) => events.push(e));
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   await f.engine.ended("planner", "chat", "진행 상황을 설명드리면…", null);
   await f.engine.ended("planner", "stopped", "", "interrupted", "", false, "", true);
   assert.equal((await f.view()).status, "active");
@@ -1821,7 +1812,7 @@ test("side turns beside running work neither stop the flow nor notify", async (t
 test("a planner cannot finish on a result it has not been shown", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   // The user is talking to the planner when the result arrives, so the review waits.
   f.agents.get("planner").status = "running";
   f.agents.get(executor).status = "idle";
@@ -1856,11 +1847,11 @@ test("writers in one folder queue behind the named flow without rewriting state"
   await f.engine.tick();
   await f.engine.tick();
   assert.equal(await readFile(f.file, "utf8"), before);
-  await f.finish(f.created[0].id, "e1", "result");
+  await f.finish(f.created[0].member.id, "e1", "result");
   await f.engine.tick();
   assert.deepEqual(
     f.sent.map((message) => message.id),
-    [f.created[0].id, "planner", f.created[1].id],
+    [f.created[0].member.id, "planner", f.created[1].member.id],
   );
 });
 
@@ -1868,7 +1859,7 @@ test("a missing block is requested once per stretch before the flow stops", asyn
   const events = [];
   const f = await fixture(t, async (e) => events.push(e));
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   f.agents.get(executor).status = "idle";
   await f.engine.ended(executor, "e1", "구현을 마쳤습니다.", null);
   assert.equal((await f.view()).status, "active");
@@ -1910,7 +1901,7 @@ test("a missing block is requested once per stretch before the flow stops", asyn
 test("a stopped turn waits for the user and either a reply or a bare resume continues", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   f.agents.get(executor).status = "idle";
   await f.engine.ended(executor, "cut", "", "interrupted", "", false, "", true);
   let w = await stored(f);
@@ -1924,7 +1915,7 @@ test("a stopped turn waits for the user and either a reply or a bare resume cont
 
   const g = await fixture(t);
   await g.finish("planner", "p1", "plan");
-  const other = g.created[0].id;
+  const other = g.created[0].member.id;
   g.agents.get(other).status = "idle";
   await g.engine.ended(other, "cut", "", "interrupted", "", false, "", true);
   await g.finish(other, "direct", "result");
@@ -2038,7 +2029,7 @@ test("review carries git evidence and an unpushed claim stays green", async (t) 
   };
   const f = await fixture(t, undefined, "federated", false, "claude", probe);
   await f.engine.ended("planner", "p1", "제목: 증거 작업\n" + decision("plan"), null);
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   const cwd = f.agents.get("planner").cwd;
   assert.deepEqual(calls, [["snapshot", cwd]]);
   f.agents.get(executor).status = "idle";
@@ -2121,7 +2112,7 @@ test("delivered context states the mode and role and no longer lists unused ids"
     f.sent[0].prompt,
     /^작업 ID: .+\n진행 방식: 연합개발 · 이 대화의 역할: 구현·자체 시험 담당\n/,
   );
-  await f.finish(f.created[0].id, "e1", "result");
+  await f.finish(f.created[0].member.id, "e1", "result");
   assert.match(f.sent[1].prompt, /이 대화의 역할: 기획·설계·검증 담당/);
   for (const message of f.sent) assert.doesNotMatch(message.prompt, /이전 대화 ID/);
   for (let i = 0; i < 230; i++) await f.engine.ended("planner", `chat-${i}`, "잡담", null);
@@ -2135,7 +2126,7 @@ const userTurn = (f, agentId, key, text, failed = null, canceled = false) =>
 test("a planner repeating its plan beside running work never sends the instruction twice", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   await userTurn(f, "planner", "side", decision("plan"));
   await userTurn(f, "planner", "side-new", decision("plan", "a plan made without the result"));
   assert.equal((await f.view()).cycles, 1);
@@ -2151,7 +2142,7 @@ test("a planner repeating its plan beside running work never sends the instructi
 test("an executor repeating its result beside a running review does not drop the verdict", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   await f.finish(executor, "e1", "result");
   f.agents.get(executor).status = "idle";
   await userTurn(f, executor, "side", decision("result"));
@@ -2170,7 +2161,7 @@ test("a result that arrives while paused survives side turns and is reviewed on 
   ]) {
     const f = await fixture(t);
     await f.finish("planner", "p1", "plan");
-    const executor = f.created[0].id;
+    const executor = f.created[0].member.id;
     await f.engine.control(f.id, "pause");
     await f.finish(executor, "e1", "result");
     await side(f);
@@ -2183,7 +2174,7 @@ test("a result that arrives while paused survives side turns and is reviewed on 
   // The addressee's own newer decision replaces its unread answer and still ends the instruction.
   const g = await fixture(t);
   await g.finish("planner", "p1", "plan");
-  const executor = g.created[0].id;
+  const executor = g.created[0].member.id;
   await g.engine.control(g.id, "pause");
   await g.finish(executor, "e1", "result");
   await userTurn(g, executor, "e1b", decision("continue", "남은 일"));
@@ -2195,7 +2186,7 @@ test("a result that arrives while paused survives side turns and is reviewed on 
 test("a resume always leaves something queued, running or asked", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   f.agents.get(executor).status = "idle";
   await f.engine.ended(executor, "e1", "블록 없음", null);
   f.agents.get(executor).status = "idle";
@@ -2220,7 +2211,7 @@ test("a resume always leaves something queued, running or asked", async (t) => {
 test("an open question is not answered by a bare resume or by another conversation", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   f.agents.get(executor).status = "idle";
   await f.engine.ended(
     executor,
@@ -2248,7 +2239,7 @@ test("an open question is not answered by a bare resume or by another conversati
   // The planner asked; the executor chatting on the side does not get a turn out of it.
   const g = await fixture(t);
   await g.finish("planner", "p1", "plan");
-  const other = g.created[0].id;
+  const other = g.created[0].member.id;
   await g.finish(other, "e1", "result");
   g.agents.get("planner").status = "idle";
   await g.engine.ended("planner", "ask", decision("input", "A안과 B안 중 무엇입니까?"), null);
@@ -2264,7 +2255,7 @@ test("an open question is not answered by a bare resume or by another conversati
   // The executor was stopped, then the planner asked: the dashboard answer is the planner's.
   const h = await fixture(t);
   await h.finish("planner", "p1", "plan");
-  const stoppedExecutor = h.created[0].id;
+  const stoppedExecutor = h.created[0].member.id;
   h.agents.get(stoppedExecutor).status = "idle";
   await h.engine.ended(stoppedExecutor, "cut", "", "interrupted", "", false, "", true);
   await userTurn(h, "planner", "ask", decision("input", "A안과 B안 중 무엇으로 할까요?"));
@@ -2280,8 +2271,8 @@ test("an answer to the planner's question goes to the planner while the instruct
     occupyNewExecutor(f);
     await f.finish("planner", "p1", "plan");
     await userTurn(f, "planner", "ask", decision("input", "이 계획대로 할까요, 범위를 줄일까요?"));
-    f.agents.get(f.created[0].id).status = "idle";
-    return f.created[0].id;
+    f.agents.get(f.created[0].member.id).status = "idle";
+    return f.created[0].member.id;
   };
   const f = await fixture(t);
   const executor = await ask(f);
@@ -2330,7 +2321,7 @@ test("a note added while pausing rides with the instruction that has not gone ou
   const f = await fixture(t);
   occupyNewExecutor(f);
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   await f.engine.control(f.id, "pause");
   await f.engine.control(f.id, "resume", "테스트도 함께 고쳐주세요");
   f.agents.get(executor).status = "idle";
@@ -2346,7 +2337,7 @@ test("a note added while pausing rides with the instruction that has not gone ou
 test("a review waiting behind the user's chat goes out next whatever that chat decided", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   f.agents.get("planner").status = "running";
   f.agents.get(executor).status = "idle";
   await f.engine.ended(executor, "e1", decision("result"), null);
@@ -2425,7 +2416,7 @@ test("resolved question does not replace an explicit input decision", async (t) 
 test("flows stored before the new flags load as waiting questions and unread answers", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   await f.engine.control(f.id, "pause");
   f.agents.get(executor).status = "idle";
   await f.engine.ended(executor, "cut", "", "interrupted");
@@ -2460,7 +2451,7 @@ test("a side turn during a wait does not announce the stop a second time", async
   const events = [];
   const f = await fixture(t, async (e) => events.push(e));
   await f.finish("planner", "p1", "plan");
-  await f.finish(f.created[0].id, "ask", "input");
+  await f.finish(f.created[0].member.id, "ask", "input");
   await f.engine.tick();
   await userTurn(f, "planner", "side", "블록 없는 답");
   await userTurn(f, "planner", "cut", "", "interrupted", true);
@@ -2477,7 +2468,7 @@ test("an instruction whose turn already ended and was seen is over, on resume an
   // while paused, leaving a sent instruction that nothing will ever answer.
   const f = await fixture(t);
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   f.agents.get(executor).status = "idle";
   await f.engine.close();
   const db = JSON.parse(await readFile(f.file, "utf8"));
@@ -2500,7 +2491,7 @@ test("an instruction whose turn already ended and was seen is over, on resume an
   const events = [];
   const g = await fixture(t, async (e) => events.push(e));
   await g.finish("planner", "p1", "plan");
-  const other = g.created[0].id;
+  const other = g.created[0].member.id;
   g.agents.get(other).status = "idle";
   const state = await stored(g);
   g.histories.set(other, { text: "끝", key: "seen", messageIds: [state.pending.id], failed: null });
@@ -2519,7 +2510,7 @@ test("an instruction whose turn already ended and was seen is over, on resume an
   // A turn that has only just been delivered is not mistaken for one that ended.
   const h = await fixture(t);
   await h.finish("planner", "p1", "plan");
-  const fresh = h.created[0].id;
+  const fresh = h.created[0].member.id;
   h.agents.get(fresh).status = "idle";
   h.histories.set(fresh, {
     text: "",
@@ -2535,7 +2526,7 @@ test("an instruction whose turn already ended and was seen is over, on resume an
 test("a delivered turn the user steered still answers its instruction", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   f.agents.get(executor).status = "idle";
   // The user's message was folded into the running turn, so it is that turn's last request.
   await userTurn(f, executor, "steered", decision("result"));
@@ -2547,7 +2538,7 @@ test("a delivered turn the user steered still answers its instruction", async (t
 test("a steered turn whose event lost the delivery answers it when the delivery opened that turn", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   const delivery = (await stored(f)).pending.id;
   f.agents.get(executor).status = "idle";
   // The user steered the running turn and a compaction cut the delivery from the event.
@@ -2567,7 +2558,7 @@ test("a steered turn whose event lost the delivery answers it when the delivery 
   // A later turn of the user's own also lists the delivery, but it did not open that turn.
   const g = await fixture(t);
   await g.finish("planner", "p1", "plan");
-  const other = g.created[0].id;
+  const other = g.created[0].member.id;
   const sent = (await stored(g)).pending.id;
   g.agents.get(other).status = "idle";
   g.histories.set(other, {
@@ -2586,7 +2577,7 @@ test("a steered turn whose event lost the delivery answers it when the delivery 
 test("a failed instruction the user carried on in its conversation is answered, not resent", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   f.agents.get(executor).status = "idle";
   await f.engine.ended(executor, "fail", "", "Selected model is at capacity.", "", false,
     f.sent[0].prompt, false, [f.sent[0].messageId]);
@@ -2602,7 +2593,7 @@ test("a failed instruction the user carried on in its conversation is answered, 
   // Chat that decides nothing leaves the resend waiting.
   const g = await fixture(t);
   await g.finish("planner", "p1", "plan");
-  const other = g.created[0].id;
+  const other = g.created[0].member.id;
   g.agents.get(other).status = "idle";
   await g.engine.ended(other, "fail", "", "Selected model is at capacity.", "", false,
     g.sent[0].prompt, false, [g.sent[0].messageId]);
@@ -2614,7 +2605,7 @@ test("a failed instruction the user carried on in its conversation is answered, 
 test("a plan held back while executing is reviewed once the instruction ended unreviewed", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   await userTurn(f, "planner", "side-plan", decision("plan", "v7 plan"));
   assert.equal((await stored(f)).planConflict.stage, "executing");
   // As in an older history without turns: the steered result is kept only as a side turn,
@@ -2646,7 +2637,7 @@ test("a turn that ended before the delivery, or never received it, is not the an
   // of messages does not contain the delivery.
   const f = await fixture(t);
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   await f.finish(executor, "e1", "result");
   const review = (await stored(f)).pending.id;
   f.agents.get("planner").status = "idle";
@@ -2688,7 +2679,7 @@ test("a turn that ended before the delivery, or never received it, is not the an
   };
   await g.finish("planner", "p1", "plan");
   assert.equal((await g.view()).status, "error");
-  const other = g.created[0].id;
+  const other = g.created[0].member.id;
   await g.engine.ended(other, "chat", "블록 없는 잡담", null, "", false, "사용자 질문", false, [
     "u1",
   ]);
@@ -2712,7 +2703,7 @@ test("releasing a parked instruction clears the question it was parked for", asy
   const f = await fixture(t);
   occupyNewExecutor(f);
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   await userTurn(f, "planner", "ask", decision("input", "진행할까요?"));
   f.agents.get(executor).status = "idle";
   await userTurn(f, "planner", "go", decision("continue", "그대로 진행"));
@@ -2730,7 +2721,7 @@ test("releasing a parked instruction clears the question it was parked for", asy
   occupyNewExecutor(g);
   await g.finish("planner", "p1", "plan");
   await userTurn(g, "planner", "ask", decision("input", "진행할까요?"));
-  g.agents.get(g.created[0].id).status = "idle";
+  g.agents.get(g.created[0].member.id).status = "idle";
   await g.engine.control(g.id, "resume", "범위를 줄이세요");
   g.agents.get("planner").status = "idle";
   await g.engine.ended("planner", "n1", "블록 없음", null);
@@ -2925,7 +2916,7 @@ for (const role of ["plan", "execute"]) {
       const f = await fixture(t);
       await f.finish("planner", "p1", "plan");
       await f.engine.control(f.id, "pause");
-      const agentId = role === "plan" ? "planner" : f.created[0].id;
+      const agentId = role === "plan" ? "planner" : f.created[0].member.id;
       if (missing) f.agents.delete(agentId);
       else f.agents.get(agentId).archived = true;
       const before = await readFile(f.file, "utf8");
@@ -2947,7 +2938,7 @@ test("control returns the actual pause and immediately stopped resume result", a
   const paused = await f.engine.control(f.id, "pause");
   assert.equal(paused.status, "paused");
   assert.match(paused.detail, /일시정지/);
-  f.agents.get(f.created[0].id).status = "error";
+  f.agents.get(f.created[0].member.id).status = "error";
   const resumed = await f.engine.control(f.id, "resume");
   assert.equal(resumed.status, "error");
   assert.equal(resumed.detail, (await f.view()).detail);
@@ -2963,7 +2954,7 @@ for (const limit of ["cycles", "turns"]) {
       ...(limit === "cycles" ? { maxCycles: 1 } : { maxTurns: 2 }),
     });
     await f.finish("planner", "p1", "plan");
-    await f.finish(f.created[0].id, "e1", "result");
+    await f.finish(f.created[0].member.id, "e1", "result");
     await f.finish("planner", "p2", "plan");
     assert.equal((await f.view()).status, "paused");
     assert.match((await f.view()).detail, /한도/);
@@ -2991,7 +2982,7 @@ test("chat federation resume consumes a paused planner's valid plan once", async
   );
   assert.equal((await f.view()).status, "active");
   assert.equal(f.sent.length, 1);
-  assert.equal(f.sent[0].id, f.created[0].id);
+  assert.equal(f.sent[0].id, f.created[0].member.id);
   assert.match(f.sent[0].prompt, /이번 지시:\n새 실행 지시$/);
   await f.engine.ended(
     "planner",
@@ -3020,7 +3011,7 @@ test("chat federation resume accepts a reference to previously stopped work", as
   );
   assert.equal((await f.view()).status, "active");
   assert.equal(f.sent.length, 1);
-  assert.equal(f.sent[0].id, f.created[0].id);
+  assert.equal(f.sent[0].id, f.created[0].member.id);
   assert.match(f.sent[0].prompt, /이번 지시:\n재개한 실행 지시$/);
 });
 
@@ -3046,7 +3037,7 @@ for (const text of [
 test("chat federation resume settles an instruction ended by a blockless executor turn", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   const pending = (await stored(f)).pending;
   await f.engine.control(f.id, "pause");
   f.agents.get(executor).status = "idle";
@@ -3090,7 +3081,7 @@ for (const status of ["error", "needs_input"]) {
         f.port.create = create;
       } else {
         await f.finish("planner", "p1", "plan");
-        const executor = f.created[0].id;
+        const executor = f.created[0].member.id;
         f.agents.get(executor).status = "idle";
         await f.engine.ended(executor, "stopped", "", "interrupted", "", false, "", true);
       }
@@ -3107,7 +3098,7 @@ for (const status of ["error", "needs_input"]) {
       );
       assert.equal((await f.view()).status, "active");
       assert.equal(f.sent.length, before + 1);
-      assert.equal(f.sent.at(-1).id, f.created[0].id);
+      assert.equal(f.sent.at(-1).id, f.created[0].member.id);
       if (block) assert.match(f.sent.at(-1).prompt, /복구한 지시$/);
       await f.engine.tick();
       assert.equal(f.sent.length, before + 1);
@@ -3124,7 +3115,7 @@ for (const request of [
     const f = await fixture(t, undefined, "federated");
     await f.finish("planner", "p1", "plan");
     await f.engine.control(f.id, "pause");
-    await f.engine.ended(f.created[0].id, "not-resume", "알겠습니다", null, "", false, request);
+    await f.engine.ended(f.created[0].member.id, "not-resume", "알겠습니다", null, "", false, request);
     assert.equal((await f.view()).status, "paused");
     assert.equal(f.sent.length, 1);
     assert.doesNotMatch((await f.view()).detail, /채팅의 연합개발 요청/);
@@ -3155,7 +3146,7 @@ for (const role of ["plan", "execute"]) {
     const f = await fixture(t, undefined, "federated");
     if (role === "execute") await f.finish("planner", "p1", "plan");
     await f.engine.control(f.id, "pause");
-    f.agents.get(role === "plan" ? "planner" : f.created[0].id).archived = true;
+    f.agents.get(role === "plan" ? "planner" : f.created[0].member.id).archived = true;
     const before = f.sent.length;
     await f.engine.ended("planner", "archived-chat", "계속합니다", null, "", false, "연합개발");
     assert.equal((await f.view()).status, "paused");
@@ -3169,7 +3160,7 @@ test("chat federation resume treats a planner's reply as the decision after an o
   occupyNewExecutor(f);
   await f.finish("planner", "p1", "plan");
   await userTurn(f, "planner", "question", decision("input", "그대로 진행할까요?"));
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   f.agents.get(executor).status = "idle";
   assert.equal((await stored(f)).asker, "plan");
   await f.engine.ended(
@@ -3223,7 +3214,7 @@ for (const block of [false, true]) {
 test("chat federation resume uses the executor's valid result after cancellation", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   f.agents.get(executor).status = "idle";
   await f.engine.ended(executor, "cut", "", "interrupted", "", false, "", true);
   await f.engine.ended(
@@ -3289,7 +3280,7 @@ test("chat federation stop preserves the planner's existing general-mode switch"
 test("chat federation resume accepts an executor but preserves the planner's floor", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   await f.finish(executor, "e1", "result");
   f.agents.get("planner").status = "idle";
   await f.engine.ended("planner", "question", decision("input"), null);
@@ -3449,7 +3440,7 @@ for (const stage of ["queued", "sent"]) {
       execute: { ...before.execute, usage: progressed.execute.usage },
     });
     if (stage === "queued") {
-      f.agents.get(f.created[0].id).status = "idle";
+      f.agents.get(f.created[0].member.id).status = "idle";
       await f.engine.tick();
       assert.equal(f.sent.length, 1);
       assert.equal(f.sent[0].messageId, before.pending.id);
@@ -3481,7 +3472,7 @@ for (const held of [false, true]) {
 test("note as the answer to a delivered instruction stops for input", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "p1", "plan");
-  await f.finish(f.created[0].id, "e1", "note");
+  await f.finish(f.created[0].member.id, "e1", "note");
   const w = await stored(f);
   assert.equal(w.status, "needs_input");
   assert.match(w.detail, /note로 답할 수 없습니다/);
@@ -3533,7 +3524,7 @@ test("old baseline state loads with optional repository fields defaulted", async
 test("side note preserves an unread delivered result while paused", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   await f.engine.control(f.id, "pause");
   await f.finish(executor, "e1", "result");
   const before = await stored(f);
@@ -3550,7 +3541,7 @@ test("note preserves an unread user plan paused at the cycle limit", async (t) =
   const f = await fixture(t);
   await f.engine.configure({ ...(await f.engine.settings()), maxCycles: 1 });
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   await f.finish(executor, "e1", "result");
   await f.finish("planner", "ask", "input");
   await userTurn(f, "planner", "p2", decision("plan", "preserved second user plan"));
@@ -3625,7 +3616,7 @@ async function quotaFixture(t, notify) {
     return available;
   };
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   return {
     ...f,
     executor,
@@ -4633,7 +4624,7 @@ async function federationWithLoggedPush(t) {
   };
   await f.engine.setRepositories(f.id, ["/repo", "/worktree"]);
   await f.finish("planner", "plan", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   assert.match(f.sent[0].prompt, /에이전트는 git push를 직접 실행하지 않는다/);
   assert.doesNotMatch(f.sent[0].prompt, /단독 셸 명령 git -C <저장소> push/);
   assert.doesNotMatch(f.sent[0].prompt, /전용 실행 경로를 사용한다/);
@@ -5601,7 +5592,7 @@ test("evidence and repetition guard use all selected repositories outside the st
   await f.engine.setRepositories(f.id, roots);
   await f.finish("planner", "start", "plan");
   for (let i = 0; i < 5; i++) {
-    await f.finish(f.created[0].id, `result-${i}`, "result");
+    await f.finish(f.created[0].member.id, `result-${i}`, "result");
     await f.finish("planner", `plan-${i}`, "plan");
   }
   assert.deepEqual([...new Set(changes)], roots);
@@ -5755,7 +5746,7 @@ test("writer wait respects disabled stop notifications while still showing the s
 test("a running executor finishes into the general handoff; reload and late results never resend", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "plan", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   await f.engine.control(f.id, "general");
   assert.equal((await stored(f)).generalTransition, true);
   await assert.rejects(f.engine.control(f.id, "resume"), /전환/);
@@ -5780,7 +5771,7 @@ test("a running executor finishes into the general handoff; reload and late resu
 test("general transition preserves unread paused results and queued work; permission and compaction must settle", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "plan", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   await f.engine.control(f.id, "pause");
   await f.finish(executor, "unread", "result");
   f.agents.get(executor).permission = true;
@@ -5804,8 +5795,8 @@ for (const receipt of [true, false])
   test(`general transition send ambiguity is resolved from history (${receipt}) without retry`, async (t) => {
     const f = await fixture(t);
     await f.finish("planner", "plan", "plan");
-    f.agents.get(f.created[0].id).status = "idle";
-    f.histories.set(f.created[0].id, {
+    f.agents.get(f.created[0].member.id).status = "idle";
+    f.histories.set(f.created[0].member.id, {
       key: "final-before-event",
       text: decision("result"),
       failed: null,
@@ -5868,7 +5859,7 @@ test("structured checks are tied to the commit and existing log, without executi
   const f = await fixture(t, undefined, "federated", undefined, "claude", scopedProbe());
   await writeFile(path.join(path.dirname(f.file), "check.log"), "test passed");
   await f.finish("planner", "p", "plan");
-  f.agents.get(f.created[0].id).status = "idle";
+  f.agents.get(f.created[0].member.id).status = "idle";
   const item = {
     command: "never execute this report",
     cwd: ".",
@@ -5878,7 +5869,7 @@ test("structured checks are tied to the commit and existing log, without executi
     criterion: "regression",
   };
   await f.engine.ended(
-    f.created[0].id,
+    f.created[0].member.id,
     "r",
     withArtifacts("result", { verification: [item] }),
     null,
@@ -5891,7 +5882,7 @@ test("structured checks are tied to the commit and existing log, without executi
 test("a transition waits for missing final history and recovers it before retiring an executor", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "plan", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   f.agents.get(executor).status = "idle";
   await f.engine.control(f.id, "general");
   assert.equal((await stored(f)).generalTransition, true);
@@ -5928,7 +5919,7 @@ test("a truncated snapshot cannot trigger the unchanged-plan stop", async (t) =>
   await f.engine.configure({ ...(await f.engine.settings()), maxCycles: 10 });
   await f.finish("planner", "plan", "plan");
   for (let i = 0; i < 5; i++) {
-    await f.finish(f.created[0].id, `result-${i}`, "result");
+    await f.finish(f.created[0].member.id, `result-${i}`, "result");
     await f.finish("planner", `plan-${i}`, "plan");
   }
   assert.equal((await stored(f)).status, "active");
@@ -6396,7 +6387,7 @@ test("automatic push audit restores exact latest evidence and refreshes the pers
 test("automatic push audit supports completed federation without replaying its handoffs", async (t) => {
   const f = await fixture(t, undefined, "federated", true, "codex", verifiedPushProbe);
   await f.finish("planner", "plan", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   await f.finish(executor, "result", "result");
   await f.finish("planner", "review", "complete");
   const sent = f.sent.length;
@@ -6788,7 +6779,7 @@ test("a single failed daemon read in a tick is retried; a persistent one stops t
 test("a general switch stuck on an unreadable executor can be finished by asking again", async (t) => {
   const f = await fixture(t);
   await f.finish("planner", "p1", "plan");
-  const executor = f.created[0].id;
+  const executor = f.created[0].member.id;
   await f.engine.control(f.id, "general");
   assert.equal((await stored(f)).generalTransition, true);
   const agent = f.agents.get(executor);
@@ -6919,7 +6910,7 @@ test("review delivery references verification documents and displays actual plan
   await f.engine.configure({ ...(await f.engine.settings()), maxCycles: 3, maxTurns: 9 });
   await f.finish("planner", "p1", "plan");
   assert.doesNotMatch(f.sent[0].prompt, /王復|왕복: /);
-  await f.finish(f.created[0].id, "e1", "result");
+  await f.finish(f.created[0].member.id, "e1", "result");
   const review = f.sent.at(-1).prompt;
   assert.match(review, /왕복: 1\/3 · 응답: 2\/9/);
   assert.match(
@@ -6943,7 +6934,7 @@ for (const limit of ["cycles", "turns"]) {
     const report = (status, summary) =>
       `<paseo-workflow>${JSON.stringify({ status, summary, next: "do work", handoff: "handoff", checks: [] })}</paseo-workflow>`;
     await f.engine.ended("planner", "p1", report("plan", "계".repeat(350)), null, "goal");
-    const executor = f.created[0].id;
+    const executor = f.created[0].member.id;
     f.agents.get(executor).status = "idle";
     await f.engine.ended(executor, "e1", report("result", "실".repeat(350)), null, "goal");
     f.agents.get("planner").status = "idle";

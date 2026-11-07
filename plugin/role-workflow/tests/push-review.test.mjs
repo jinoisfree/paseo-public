@@ -23,7 +23,7 @@ test("pin once, acknowledge manual unpin and never recreate it after reload", as
   };
   const port = {
     get: async () => ({ pinnedAt: pinned ? "automatic" : null }),
-    pin: async () => {
+    pinWorkspace: async () => {
       assert.equal(JSON.parse(saved).workspaces[0].phase, "sent");
       calls++;
       pinned = true;
@@ -52,7 +52,7 @@ test("unavailable workspace reads never count as an acknowledgement", async () =
     },
   ]) {
     assert.equal(
-      await syncPushReview(state, { get, pin: async () => assert.fail() }, async () => {}),
+      await syncPushReview(state, { get, pinWorkspace: async () => assert.fail() }, async () => {}),
       false,
     );
     assert.equal(state.workspaces[0].phase, "pinned");
@@ -64,7 +64,7 @@ test("lost pin response is reconciled without re-pinning a manually released wor
   let calls = 0;
   const port = {
     get: async () => ({ pinnedAt: null }),
-    pin: async () => {
+    pinWorkspace: async () => {
       calls++;
       throw Error("lost response");
     },
@@ -87,7 +87,7 @@ test("pre-existing pins and separate workspaces are acknowledged independently",
   const calls = [];
   const port = {
     get: async (id) => ({ pinnedAt: pinned.has(id) ? id : null }),
-    pin: async (id) => {
+    pinWorkspace: async (id) => {
       calls.push(id);
       pinned.add(id);
       return id;
@@ -120,8 +120,8 @@ test("new work withdraws only its own automatic pin, preserving manual and repla
     const calls = [];
     const port = {
       get: async () => ({ pinnedAt }),
-      pin: async () => (pinnedAt = "automatic"),
-      unpin: async (id, expected) => {
+      pinWorkspace: async () => (pinnedAt = "automatic"),
+      unpinOwned: async (id, expected) => {
         assert.equal(expected, pinnedAt);
         calls.push(id);
         pinnedAt = null;
@@ -151,11 +151,11 @@ test("failed withdrawal is retried after reload and never removes a replacement 
     pinnedAt = "auto";
   const port = {
     get: async () => ({ pinnedAt }),
-    unpin: async () => {
+    unpinOwned: async () => {
       if (fail) throw Error("offline");
       return false;
     },
-    pin: async () => assert.fail(),
+    pinWorkspace: async () => assert.fail(),
   };
   await assert.rejects(
     syncPushReview(state, port, async () => {}, false),
@@ -450,8 +450,8 @@ test("AC-101/R-1: legacy executor pin rows retain ownership but never get pinned
     const ids = [];
     const port = {
       get: async id => { ids.push(id); return { pinnedAt: null }; },
-      pin: async id => { assert.equal(id, "plan"); return "plan pin"; },
-      unpin: async () => assert.fail("cleanup owns legacy executor unpin"),
+      pinWorkspace: async id => { assert.equal(id, "plan"); return "plan pin"; },
+      unpinOwned: async () => assert.fail("cleanup owns legacy executor unpin"),
     };
     await syncPushReview(state, port, async () => {}, active, "tree");
     assert.deepEqual(ids, ["plan"]);

@@ -27,7 +27,7 @@ async function fixture(t, { choice = { provider: "codex", model: "builder", thin
     quotaAccount: async () => null, quotaAvailable: async () => null,
     history: async (id) => histories.get(id) ?? { text: "", key: "", messageIds: [], failed: null },
     create: async (w, role, member) => {
-      created.push({ id: member.id, role, config: { ...member.config } });
+      created.push({ w, role, member });
       if (failCreate) throw Error("creation failed");
       agents.set(member.id, { ...agents.get("A"), id: member.id, config: member.config });
       return "workspace";
@@ -77,8 +77,8 @@ for (const choice of [
   await f.finish("A", "plan");
   const b = (await f.view()).executeAgentId;
   assert.notEqual(b, "A");
-  assert.equal(f.created[0].config.provider, `${choice.provider}/${choice.model}`);
-  assert.equal(f.created[0].config.thinkingOptionId, choice.thinking);
+  assert.equal(f.created[0].member.config.provider, `${choice.provider}/${choice.model}`);
+  assert.equal(f.created[0].member.config.thinkingOptionId, choice.thinking);
   assert.match(f.sent.find((row) => row.id === b).prompt, /진행 방식: 일반개발.*구현·자체 시험/);
   await f.finish(b, "result");
   assert.equal(f.sent.at(-1).id, "A");
@@ -115,8 +115,8 @@ test("explicit implementation model works with questions disabled and keeps A un
   await f.engine.configure({ ...await f.engine.settings(), askExecutorModel: false });
   await f.engine.ended("A", "explicit-choice", block("plan"), null,
     "일반개발\ncodex/explicit-builder 추론 low\n구현 요청");
-  assert.equal(f.created[0].config.provider, "codex/explicit-builder");
-  assert.equal(f.created[0].config.thinkingOptionId, "low");
+  assert.equal(f.created[0].member.config.provider, "codex/explicit-builder");
+  assert.equal(f.created[0].member.config.thinkingOptionId, "low");
   assert.deepEqual((await f.state()).plan.config, f.original);
 });
 
@@ -126,8 +126,8 @@ test("a plain explicit choice after the initial request can unblock an unanswere
   assert.equal((await f.view()).status, "needs_input");
   await f.engine.ended("A", "plain-answer", block("plan"), null, "Original goal", false,
     "codex/plain-builder 추론 low");
-  assert.equal(f.created[0].config.provider, "codex/plain-builder");
-  assert.equal(f.created[0].config.thinkingOptionId, "low");
+  assert.equal(f.created[0].member.config.provider, "codex/plain-builder");
+  assert.equal(f.created[0].member.config.thinkingOptionId, "low");
   assert.equal((await f.view()).planAgentId, "A");
 });
 
@@ -140,7 +140,7 @@ test("a remembered general preference supplies only the implementation model", a
   await writeFile(f.file, JSON.stringify(db));
   await f.restart();
   await f.finish("A", "plan");
-  assert.equal(f.created[0].config.provider, "codex/remembered");
+  assert.equal(f.created[0].member.config.provider, "codex/remembered");
   assert.deepEqual((await f.state()).plan.config, f.original);
 });
 
@@ -255,8 +255,8 @@ test("creation retry after restart preserves the chosen provider, model and iden
   await f.restart(); f.failCreate(false);
   await f.engine.control(f.id, "resume");
   assert.equal((await f.state()).execute.id, target);
-  assert.equal(f.created.at(-1).config.provider, "codex/builder");
-  assert.equal(f.created.at(-1).config.thinkingOptionId, "high");
+  assert.equal(f.created.at(-1).member.config.provider, "codex/builder");
+  assert.equal(f.created.at(-1).member.config.thinkingOptionId, "high");
 });
 
 test("general controls pause/resume the automatic flow without replacing its roles", async (t) => {

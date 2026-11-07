@@ -45,15 +45,15 @@ async function fixture(t, { placement = "worktree", overlap = true, foreign = fa
     placementPicker: async (agentId, workflowId, blocker) => cards.push({ agentId, workflowId, blocker }),
     // Stands in for Paseo: a branch-off worktree from the named branch.
     createWorktree: async (w, baseBranch) => {
-      worktrees.push({ baseBranch, id: w.id });
+      worktrees.push({ w, baseBranch });
       const folder = path.join(dir, "wt");
       if (foreign) return { workspaceId: "wks_foreign", path: other };
       if (worktrees.length === 1) await git(repo, "worktree", "add", "-q", "-b", `role-workflow/${w.number}-x`, folder, baseBranch);
       return { workspaceId: "wks_worktree", path: folder };
     },
     create: async (w, role, m) => {
-      created.push({ role, id: m.id, isolation: w.isolation, workspace: w.isolation === "worktree" ? w.worktree.workspaceId : "ws" });
-      agents.set(m.id, { ...agents.get("A"), id: m.id, status: "idle", config: m.config, cwd: w.isolation === "worktree" ? w.worktree.path : repo });
+      created.push({ w, role, m });
+      agents.set(m.id, { ...agents.get("A"), id: m.id, workspaceId: w.isolation === "worktree" ? w.worktree.workspaceId : "ws", status: "idle", config: m.config, cwd: w.isolation === "worktree" ? w.worktree.path : repo });
       return w.isolation === "worktree" ? w.worktree.workspaceId : "ws";
     },
     send: async (id, prompt, messageId) => {
@@ -123,7 +123,11 @@ test("AC-03/AC-05: overlapping worktree placement preserves repository, branch a
     { path: path.join(f.dir, "wt"), base: f.base, workspaceId: "wks_worktree" },
   );
   assert.match(w.worktree.branch, /^role-workflow\//);
-  assert.deepEqual(f.created, [{ role: "execute", id: w.execute.id, isolation: "worktree", workspace: "wks_worktree" }]);
+  assert.equal(f.created.length, 1);
+  assert.equal(f.created[0].role, "execute");
+  assert.equal(f.created[0].m.id, w.execute.id);
+  assert.equal(f.created[0].w.isolation, "worktree");
+  assert.equal(f.created[0].m.workspaceId, "wks_worktree");
   const prompt = f.sent.findLast((x) => x.id === w.execute.id).prompt;
   assert.match(prompt, new RegExp(`구현 worktree: ${w.worktree.path.replaceAll("/", "\\/")}`));
   assert.match(prompt, /작업 문서\(handoff·impl-report·verdict\)는 계획 담당 폴더 .*의 절대 경로/);
@@ -143,7 +147,7 @@ test("AC-01: without overlap the executor opens beside its planner", async (t) =
   assert.equal(w.isolation, "shared");
   assert.equal(w.worktree, null);
   assert.deepEqual(f.worktrees, []);
-  assert.equal(f.created[0].workspace, "ws");
+  assert.equal(f.created[0].m.workspaceId, "ws");
   assert.doesNotMatch(f.sent.at(-1).prompt, /구현 worktree:/);
 });
 
@@ -232,7 +236,7 @@ test(`AC-01: ${placement} without overlap creates a shared tab without a card`, 
   const f = await fixture(t, { placement, overlap: false });
   await f.start();
   assert.equal((await f.state()).isolation, "shared");
-  assert.equal(f.created[0].workspace, "ws");
+  assert.equal(f.created[0].m.workspaceId, "ws");
   assert.equal(f.worktrees.length, 0);
   assert.equal(f.cards.length, 0);
 });
@@ -292,7 +296,7 @@ test(`AC-04: wait keeps instructions queued until the blocker is ${release}`, as
   w = await f.state();
   assert.equal(w.placement, null);
   assert.equal(f.created.length, 1);
-  assert.equal(f.created[0].workspace, "ws");
+  assert.equal(f.created[0].m.workspaceId, "ws");
   assert.equal(w.pending.stage, "sent");
   assert.equal(f.worktrees.length, 0);
 });
@@ -498,11 +502,11 @@ test(`AC-14: ${mode} bypasses the worktree gate and retains the existing approva
 });
 
 for (const missing of ["identity", "detached", "upstream", "unconfigured tracking", "graph", "probe"])
-test(`AC-14: unreadable ${missing} blocks approval without guessing`, async t => {
+test(`AC-14/AC-205: unreadable ${missing === "detached" ? "legacy detached" : missing} blocks approval without guessing`, async t => {
   const f = await fixture(t);
   const { w } = await readyWorktreePush(f);
   if (missing === "identity") f.probe.identity = async () => null;
-  else if (missing === "detached") await git(f.repo, "checkout", "--detach", "-q");
+  else if (missing === "detached") { delete w.worktree.baseBranch; await git(f.repo, "checkout", "--detach", "-q"); }
   else if (missing === "upstream") await git(f.repo, "update-ref", "-d", "refs/remotes/origin/main");
   else if (missing === "unconfigured tracking") {
     await git(f.repo, "config", "--remove-section", "branch.main");
@@ -608,4 +612,16 @@ test("AC-02/AC-10 F-8: writers without a workspace are never inspected by either
   const w = f.engine.database.workflows[0];
   assert.equal(await f.engine.placementBlocker(w), null);
   assert.equal(await f.engine.busyWriter(w), null);
+});
+
+
+test("AC-205 F-4: stored baseBranch survives another planner checkout while legacy records follow the current branch", async t => {
+  const f = await fixture(t);
+  const { w } = await readyWorktreePush(f);
+  assert.equal(w.worktree.baseBranch, "main");
+  await git(f.repo, "checkout", "-q", "-b", "another");
+  await git(f.repo, "commit", "-q", "--allow-empty", "-m", "other checkout advances");
+  assert.equal((await checkWorktreeBase(w, f.probe, w.pushTargets)).ok, true);
+  delete w.worktree.baseBranch;
+  assert.equal((await checkWorktreeBase(w, f.probe, w.pushTargets)).ok, false);
 });

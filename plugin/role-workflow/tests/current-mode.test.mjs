@@ -17,7 +17,7 @@ async function fixture(t,{mode="federated",provider="codex",ask=false,options=[{
   const port={inspect:async id=>agents.get(id)??null,history:async id=>histories.get(id)??{text:"",key:"",failed:null,messageIds:[]},
     models:async()=>{modelCalls++;if(catalogFailure)throw Error("catalog offline");return models;},
     projectName:async()=>"Project",workspaceName:async()=>"Task",rename:async()=>{},quotaAccount:async()=>null,quotaAvailable:async()=>null,
-    create:async(w,role,m)=>{created.push({...m.config,id:m.id});agents.set(m.id,{...agents.get("A"),id:m.id,config:m.config});return "ws";},
+    create:async(w,role,m)=>{created.push({w,role,m});agents.set(m.id,{...agents.get("A"),id:m.id,config:m.config});return "ws";},
     executorPicker:async(agentId,workflowId)=>{pickers.push([agentId,workflowId]);},
     send:async(id,prompt,messageId)=>{sent.push({id,prompt,messageId});agents.get(id).status="running";}};
   let engine=new WorkflowEngine(file,port);
@@ -103,7 +103,7 @@ test("contract4 mode change requests are safely refused and current mode is reta
 });
 test("explicit first request is validated as answered choices and uses the selected same-provider model",async t=>{
   const f=await fixture(t);await f.engine.ended("A","explicit",block("plan"),null,"연합개발\ncodex/builder 추론 high\n작업");
-  assert.equal(f.created[0].provider,"codex/builder");assert.equal(f.created[0].thinkingOptionId,"high");
+  assert.equal(f.created[0].m.config.provider,"codex/builder");assert.equal(f.created[0].m.config.thinkingOptionId,"high");
 });
 test("undecided prompts gate roles to federation and leave the executor to the screen",()=>{
   const prompt=composeCurrentPrompt("codex","caller","undecided",null,SCREEN_SELECTION_PROMPT,"");
@@ -155,12 +155,12 @@ test('creation failure and provider reselection restore the same intended execut
  await f.answer('provider','claude');await f.answer('model','builder');await f.answer('thinking','low');
  f.port.create=create;await f.engine.control(f.id,'resume');
  const w=await f.state();assert.equal(w.execute.id,id);assert.equal(f.created.length,1);
- assert.equal(f.created[0].provider,'claude/builder');assert.equal(f.created[0].thinkingOptionId,'low');assert.deepEqual(w.plan.config,f.original);
+ assert.equal(f.created[0].m.config.provider,'claude/builder');assert.equal(f.created[0].m.config.thinkingOptionId,'low');assert.deepEqual(w.plan.config,f.original);
 });
 test('explicit catalog model identifiers may include provider-supported context suffixes',async t=>{
  const f=await fixture(t);f.setModels([{id:'model[1m]',label:'Long context',thinkingOptions:[{id:'low',label:'Low'}]}]);
  await f.engine.ended('A','explicit-context',block('plan'),null,'연합개발\nclaude/model[1m] 추론 low\n작업');
- assert.equal(f.created[0].provider,'claude/model[1m]');
+ assert.equal(f.created[0].m.config.provider,'claude/model[1m]');
 });
 
 for(const order of [["provider","model","thinking"],["thinking","model","provider"],["model","provider","thinking"]])

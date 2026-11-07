@@ -39,12 +39,7 @@ async function fixture(t, options = {}) {
   const port = {
     inspect: async () => live,
     createGeneral: async (w, transfer, mode) => {
-      calls.push({
-        transfer: structuredClone(transfer),
-        workspace: w.plan.workspaceId,
-        request: w.goal,
-        mode,
-      });
+      calls.push({ w, transfer, mode });
       if (options.fail) throw Error("creation unavailable");
       agents.set(transfer.id, transfer.agentId);
     },
@@ -153,10 +148,10 @@ for (const [provider, mode] of [
     await f.finish();
     await f.finish();
     assert.equal(f.calls.length, 1);
-    assert.equal(f.calls[0].workspace, "same-workspace");
+    assert.equal(f.calls[0].w.plan.workspaceId, "same-workspace");
     assert.equal(f.calls[0].mode, mode);
-    assert.equal(f.calls[0].request, "Original request\nKeep this exact line.");
-    assert.ok(!f.calls[0].request.startsWith("작업 ID:"));
+    assert.equal(f.calls[0].w.goal, "Original request\nKeep this exact line.");
+    assert.ok(!f.calls[0].w.goal.startsWith("작업 ID:"));
     assert.equal((await f.view()).planAgentId, f.calls[0].transfer.agentId);
     assert.match((await f.view()).detail, /선택한 담당 대화로 넘겼습니다/);
     assert.equal(f.notices[0][0], "source");
@@ -241,7 +236,7 @@ test("explicit first-request selection needs no question answers", async (t) => 
   const request = "Codex 모델 chosen 추론 high\nKeep the original request";
   await f.finish(request);
   assert.equal(f.calls.length, 1);
-  assert.equal(f.calls[0].request, request);
+  assert.equal(f.calls[0].w.goal, request);
 });
 
 test("old workflow and project state read without new general fields", async (t) => {

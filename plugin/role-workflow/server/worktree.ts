@@ -54,7 +54,7 @@ export async function placeExecutor(
     throw new Error(
       `구현 worktree(${made.path})가 작업 저장소와 다른 Git 저장소입니다. worktree를 확인한 뒤 재개하세요.`,
     );
-  w.worktree = { path: placed.root, branch: placed.branch, base: placed.head, workspaceId: made.workspaceId };
+  w.worktree = { path: placed.root, branch: placed.branch, base: placed.head, baseBranch: origin!.branch, workspaceId: made.workspaceId };
   w.isolation = "worktree";
   w.placement = null;
   return true;
@@ -95,17 +95,18 @@ export async function checkWorktreeBase(w: Workflow, probe: RepoProbe | null, ta
     if (!w.worktree || !probe?.identity || !probe.branchTips || !probe.isAncestor || !targets.length) return unreadable;
     const origin = await probe.identity(w.cwd);
     const tree = await probe.identity(w.worktree.path);
-    if (!origin?.branch || !tree || tree.common !== origin.common) return unreadable;
+    const baseBranch = w.worktree.baseBranch ?? origin?.branch;
+    if (!origin || !baseBranch || !tree || tree.common !== origin.common) return unreadable;
     for (const target of targets) {
       const repository = await probe.identity(target.repository);
       if (!repository || repository.common !== origin.common) return unreadable;
-      const tips = await probe.branchTips(w.cwd, origin.branch, target.remote);
+      const tips = await probe.branchTips(w.cwd, baseBranch, target.remote);
       if (!tips?.head || !tips.tracking) return unreadable;
       for (const tip of [tips.head, tips.tracking]) {
         const included = await probe.isAncestor(w.cwd, tip, target.commit);
         if (included === null) return unreadable;
         if (!included)
-          return { ok: false, needsMerge: true, detail: `기준 브랜치 ${origin.branch}가 ${tip.slice(0, 12)}로 앞서 있어 먼저 합쳐야 합니다.` };
+          return { ok: false, needsMerge: true, detail: `기준 브랜치 ${baseBranch}가 ${tip.slice(0, 12)}로 앞서 있어 먼저 합쳐야 합니다.` };
       }
     }
     return { ok: true, detail: "", needsMerge: false };

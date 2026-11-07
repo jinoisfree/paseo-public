@@ -5,4 +5,4 @@ export const workflowCardSchema = z.object({
   decision: decisionSchema,
   raw: z.string(),
   prose: z.string(),
-});
+}).strict();

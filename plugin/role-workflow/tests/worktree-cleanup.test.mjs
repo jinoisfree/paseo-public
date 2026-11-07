@@ -9,8 +9,8 @@ import { randomUUID } from "node:crypto";
 import { WorkflowEngine } from "../server/engine.ts";
 import { createRepoProbe } from "../server/git.ts";
 import { managedPushSchema } from "../shared/managed-push.ts";
-import { withCallBudgets } from "../server/paseo-port.ts";
-import { CLEANUP_RETRY_MS } from "../server/worktree-cleanup.ts";
+import { withCallBudgets, createPort } from "../server/paseo-port.ts";
+import { CLEANUP_RETRY_MS, preserveEvidence } from "../server/worktree-cleanup.ts";
 
 const execute = promisify(execFile);
 const git = (cwd, ...args) => execute("git", ["-c", "user.email=cleanup@example.invalid", "-c", "user.name=cleanup", ...args], { cwd }).then(r => r.stdout.trim());
@@ -137,7 +137,7 @@ test(`AC-102: ${reason} preserves the workspace`, async t => {
 });
 
 for (const failure of ["missing", "throw", "timeout", "archivedAt missing", "workspaceId mismatch", "unconfirmed"])
-test(`AC-103: ${failure} preserves state and stops after three spaced attempts`, async t => {
+test(`AC-103/AC-205 D-4: ${failure === "missing" || failure === "unconfirmed" ? failure : `injected transport error (${failure}); raw response checks are in paseo-port`} preserves state and stops after three spaced attempts`, async t => {
   const f = await fixture(t);
   let attempts = 0;
   if (failure === "missing") f.port.archiveWorkspace = undefined;
@@ -540,4 +540,189 @@ test("AC-101/AC-104/R-1: legacy queued executor pins stay excluded and retire af
   await newPlan(f);
   await f.engine.syncStartPin(f.w);
   assert.deepEqual(f.pinCalls, ["plan"]);
+});
+
+
+for (const failure of ["missing directory", "identity mismatch"])
+test(`AC-205 R-3: three consecutive permanent ${failure} errors stop cleanup durably`, async t => {
+  const f = await fixture(t);
+  if (failure === "missing directory") await rm(f.tree, { recursive: true });
+  else { const identify = f.probe.identity; f.probe.identity = async cwd => ({ ...await identify(cwd), common: cwd }); }
+  for (let i = 1; i <= 3; i++) {
+    await f.run();
+    assert.equal(f.w.worktreeCleanup.permanentErrors, i);
+    assert.equal(f.w.worktreeCleanup.stage, i === 3 ? "failed" : "pending");
+    assert.equal(f.w.worktreeCleanup.attempts, 0);
+  }
+  assert.match(f.w.detail, /직접 보관하세요/);
+  await f.restart();
+  assert.equal(f.w.worktreeCleanup.permanentErrors, 3);
+  assert.deepEqual(f.calls, []);
+});
+
+for (const progress of ["done", "pushed", "no_push"])
+test(`AC-205 R-4: tick recognizes a manually archived missing worktree for finished ${progress} work`, async t => {
+  const f = await fixture(t);
+  f.w.progress = progress;
+  f.agents.get("E").archived = true;
+  f.spaces.delete("tree");
+  await rm(f.tree, { recursive: true });
+  await f.restart();
+  assert.equal(f.w.worktreeCleanup.stage, "done");
+  assert.notEqual(f.w.status, "paused");
+  assert.deepEqual(f.calls, []);
+  const at = f.w.worktreeCleanup.at;
+  f.advance(); await f.restart();
+  assert.equal(f.w.worktreeCleanup.at, at);
+});
+
+for (const hazard of ["assume-unchanged", "skip-worktree", "reflog only", "submodule"])
+test(`AC-205 D-1: real Git ${hazard} hazards preserve the directory using read-only probes`, async t => {
+  const f = await fixture(t);
+  if (hazard === "assume-unchanged" || hazard === "skip-worktree") {
+    await git(f.tree, "update-index", `--${hazard}`, "feature.txt");
+    await writeFile(path.join(f.tree, "feature.txt"), "hidden change");
+  }
+  if (hazard === "reflog only") {
+    await git(f.tree, "commit", "--allow-empty", "-q", "-m", "reflog only");
+    await git(f.tree, "reset", "--hard", f.commit);
+  }
+  if (hazard === "submodule") {
+    const sub = path.join(f.dir, "sub");
+    await git(f.dir, "init", "-q", sub);
+    await git(sub, "commit", "--allow-empty", "-q", "-m", "sub base");
+    await git(f.tree, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "module");
+    await git(f.tree, "commit", "-q", "-am", "add submodule");
+    const integrated = await git(f.tree, "rev-parse", "HEAD");
+    f.w.integration.commit = integrated;
+    f.w.managedPush.targets[0].commit = integrated;
+    f.w.pushCheck.targets[0].commit = integrated;
+    await git(path.join(f.tree, "module"), "commit", "--allow-empty", "-q", "-m", "module changed");
+  }
+  if (hazard === "submodule") assert.match((await f.probe.cleanupHazards(f.tree, f.w.integration.commit)).join(" "), /submodule/);
+  const before = await git(f.tree, "show-ref");
+  await f.run();
+  assert.equal(f.w.worktreeCleanup.stage, "skipped");
+  assert.deepEqual(f.calls, []);
+  assert.equal(await git(f.tree, "show-ref"), before);
+  assert.match(f.w.worktreeCleanup.detail, hazard === "reflog only" ? /reflog/ : hazard === "submodule" ? /submodule|커밋하지 않은/ : /assume-unchanged|skip-worktree/);
+});
+
+for (const excess of ["files", "bytes"])
+test(`AC-205 D-3: evidence ${excess} over the limit stays pending with zero archive attempts`, async t => {
+  const f = await fixture(t);
+  const folder = path.join(f.tree, "evidence");
+  if (excess === "files") await Promise.all(Array.from({ length: 1000 }, (_, i) => writeFile(path.join(folder, String(i)), "")));
+  else {
+    const { open } = await import("node:fs/promises");
+    const file = await open(path.join(folder, "huge"), "w");
+    await file.truncate(200 * 1024 * 1024 + 1); await file.close();
+  }
+  await f.run();
+  assert.equal(f.w.worktreeCleanup.stage, "pending");
+  assert.equal(f.w.worktreeCleanup.attempts, 0);
+  assert.match(f.w.detail, /1000.*200MB/);
+  assert.deepEqual(f.calls, []);
+});
+
+test("AC-205 D-3: a swapped source symlink after enumeration never copies outside contents", async t => {
+  const f = await fixture(t);
+  const source = path.join(f.tree, "evidence");
+  const target = path.join(f.state, "swapped-copy");
+  const outside = path.join(f.dir, "outside");
+  await writeFile(outside, "PRIVATE OUTSIDE CONTENT");
+  // Swap the second file while the first file's bounded copy is running.
+  const { open, access } = await import("node:fs/promises");
+  const large = await open(path.join(source, "00-large"), "w"); await large.truncate(64 * 1024 * 1024); await large.close();
+  const swap = (async () => {
+    for (;;) {
+      try { await access(path.join(target, "00-large")); break; } catch { await new Promise(r => setTimeout(r, 1)); }
+    }
+    await rm(path.join(source, "test.log"));
+    await symlink(outside, path.join(source, "test.log"));
+  })();
+  await assert.rejects(preserveEvidence(source, target));
+  await swap;
+  const copied = await readFile(path.join(target, "test.log"), "utf8").catch(error => { if (error.code === "ENOENT") return ""; throw error; });
+  assert.doesNotMatch(copied, /PRIVATE|OUTSIDE/);
+});
+
+test("AC-205 D-4: engine recreates generation 2 through the real port with a stable :2 key after a lost workspace reply", async t => {
+  const f = await fixture(t);
+  await f.run();
+  const other = { ...f.agents.get("P"), id: "other", workspaceId: "other" };
+  f.agents.set("other", other); await f.engine.enroll(other, other.config, {}, "general", true, 5);
+  await f.engine.configure({ ...await f.engine.settings(), executorPlacement: "worktree" });
+  const requests = [];
+  let made = false;
+  const folder = path.join(f.dir, "generation-2");
+  const native = createPort(() => ({ workspaces: { create: async input => {
+    requests.push(input);
+    if (!made) {
+      made = true;
+      await git(f.repo, "worktree", "add", "-q", "-b", input.source.branchName, folder, input.source.baseBranch);
+      throw Error("workspace reply lost");
+    }
+    return { id: "second-tree", refresh: async () => ({ workspaceDirectory: folder }) };
+  } } }));
+  f.port.createWorktree = native.createWorktree;
+  f.port.create = async (w, role, member) => {
+    f.agents.set(member.id, { ...f.agents.get("P"), id: member.id, workspaceId: "second-tree", cwd: folder });
+    return "second-tree";
+  };
+  await newPlan(f);
+  assert.equal(f.w.status, "error");
+  await f.engine.control(f.id, "resume");
+  assert.equal(f.w.execute.generation, 2);
+  assert.equal(f.w.execute.workspaceId, "second-tree");
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].idempotencyKey, `role-workflow:${f.id}:worktree:2`);
+  assert.deepEqual(requests[0], requests[1]);
+  assert.match(requests[0].source.branchName, /-2$/);
+});
+
+
+test("AC-205 D-3: exactly 1000 evidence files are preserved at the inclusive limit", async t => {
+  const f = await fixture(t);
+  const source = path.join(f.tree, "evidence");
+  await Promise.all(Array.from({ length: 999 }, (_, i) => writeFile(path.join(source, String(i)), "")));
+  assert.equal(await preserveEvidence(source, path.join(f.state, "limit-copy")), 1000);
+});
+
+test("AC-205 D-3: a pre-existing destination symlink cannot overwrite an outside file", async t => {
+  const f = await fixture(t);
+  const destination = path.join(f.state, "target-copy");
+  await mkdir(destination);
+  const outside = path.join(f.dir, "outside");
+  await writeFile(outside, "outside must survive");
+  await symlink(outside, path.join(destination, "test.log"));
+  await assert.rejects(preserveEvidence(path.join(f.tree, "evidence"), destination));
+  assert.equal(await readFile(outside, "utf8"), "outside must survive");
+});
+
+
+test("AC-205 D-3: growth beyond 200MB during copy stays pending without consuming archive attempts", async t => {
+  const f = await fixture(t);
+  const { open, access } = await import("node:fs/promises");
+  const source = path.join(f.tree, "evidence");
+  const large = await open(path.join(source, "00-large"), "w"); await large.truncate(64 * 1024 * 1024); await large.close();
+  const grow = (async () => {
+    for (;;) { try { await access(path.join(f.state, "evidence", f.id, "worktree", "tree", "00-large")); break; } catch { await new Promise(r => setTimeout(r, 1)); } }
+    const file = await open(path.join(source, "test.log"), "r+"); await file.truncate(200 * 1024 * 1024 + 1); await file.close();
+  })();
+  await f.run(); await grow;
+  assert.equal(f.w.worktreeCleanup.stage, "pending");
+  assert.equal(f.w.worktreeCleanup.attempts, 0);
+  assert.deepEqual(f.calls, []);
+});
+
+
+test("AC-202: the real engine gate rejects archive requests without this cleanup call's copied-evidence proof", async t => {
+  const f = await fixture(t);
+  assert.equal((await f.engine.lifecycle.archiveCleaned(f.w)).stage, "pending");
+  assert.equal((await f.engine.worktreeCleanup.verifyForArchive(f.w)).stage, "pending");
+  assert.deepEqual(f.calls, []);
+  await f.run();
+  assert.equal(f.w.worktreeCleanup.stage, "done");
+  assert.equal((await f.engine.worktreeCleanup.verifyForArchive(f.w)).stage, "pending", "proof cannot be reused after archive");
 });

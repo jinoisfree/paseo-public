@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import type { WorkspaceLifecycle } from "./workspace-lifecycle";
 import type { PushTarget } from "../shared/artifacts";
 
 export const pushReviewSchema = z.object({
@@ -28,7 +29,7 @@ export function pushReviewKey(targets: readonly PushTarget[]) {
 /** Persist before the pin RPC; a restart must never re-pin something the user released. */
 export async function syncPushReview(
   review: PushReview,
-  port: PushReviewPort,
+  port: Pick<WorkspaceLifecycle, "get" | "pinWorkspace" | "unpinOwned">,
   save: () => Promise<void>,
   active = true,
   excludedWorkspaceId: string | null = null,
@@ -42,8 +43,8 @@ export async function syncPushReview(
     const pinned = !!current.pinnedAt;
     if (!active) {
       if (workspace.phase === "withdrawn") continue;
-      if (pinned && workspace.ownedPinAt === current.pinnedAt)
-        await port.unpin(workspace.id, workspace.ownedPinAt!);
+      if (pinned && workspace.ownedPinAt === current.pinnedAt &&
+        !await port.unpinOwned(workspace.id, workspace.ownedPinAt!)) continue;
       workspace.phase =
         !pinned && ["pinned", "sent"].includes(workspace.phase) ? "acknowledged" : "withdrawn";
       workspace.ownedPinAt = null;
@@ -71,7 +72,7 @@ export async function syncPushReview(
     await save();
     if (!pinned) {
       // Even if the acknowledgement is lost, the next read observes the user's choice.
-      workspace.ownedPinAt = await port.pin(workspace.id);
+      workspace.ownedPinAt = await port.pinWorkspace(workspace.id);
       workspace.phase = "pinned";
       await save();
     }

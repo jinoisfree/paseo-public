@@ -26,7 +26,7 @@ function fixture() {
       },
     },
     async send(text, options) {
-      sent.push({ text, ...options });
+      sent.push({ text, options });
     },
   };
   const port = createPort(() => ({ agents: { ref: () => agent } }));
@@ -227,7 +227,7 @@ test("native compaction waits for a completion event rather than command accepta
     return undefined;
   });
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(f.sent, [{ text: "/compact", messageId: "compact-id" }]);
+  assert.deepEqual(f.sent, [{ text: "/compact", options: { messageId: "compact-id" } }]);
   assert.equal(done, false);
   f.emit({ type: "timeline", item: { type: "compaction", status: "loading" } });
   await new Promise((resolve) => setImmediate(resolve));

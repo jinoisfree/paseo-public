@@ -34,6 +34,8 @@ export interface RepoProbe {
   branchTips?(cwd: string, branch: string, remote: string): Promise<{ head: string; tracking: string } | null>;
   /** null distinguishes an unreadable commit/graph from a known non-ancestor. */
   isAncestor?(cwd: string, ancestor: string, commit: string): Promise<boolean | null>;
+  /** Extra read-only hazards before deleting a worktree directory. null means unreadable. */
+  cleanupHazards?(cwd: string, integrated: string): Promise<string[] | null>;
   /** Moves the checked-out branch to `commit` only as a fast-forward. Never merges or resets. */
   fastForward?(cwd: string, commit: string): Promise<{ ok: boolean; detail: string }>;
 }
@@ -243,6 +245,26 @@ export function createRepoProbe(run: typeof git = git): RepoProbe {
       } catch {
         return null;
       }
+    },
+    async cleanupHazards(cwd, integrated) {
+      try {
+        const [flags, modules, reflog] = await Promise.all([
+          run(cwd, ["ls-files", "-v", "-z"]),
+          run(cwd, ["submodule", "status", "--recursive"]),
+          run(cwd, ["reflog", "show", "--format=%H", "HEAD"]),
+        ]);
+        const hazards: string[] = [];
+        if (flags.split("\0").some(row => /^[a-zS]/.test(row))) hazards.push("assume-unchanged 또는 skip-worktree 파일이 있습니다");
+        if (modules.split("\n").some(row => /^[+\-U]/.test(row))) hazards.push("submodule 상태가 기준과 다릅니다");
+        const hashes = [...new Set(reflog.split(/\s+/).filter(Boolean))];
+        if (hashes.length > 1000) return null;
+        for (const hash of hashes) {
+          const included = await this.isAncestor!(cwd, hash, integrated);
+          if (included === null) return null;
+          if (!included) { hazards.push("반영되지 않은 worktree HEAD reflog 커밋이 있습니다"); break; }
+        }
+        return hazards;
+      } catch { return null; }
     },
     async fastForward(cwd, commit) {
       if (!/^[a-f0-9]{40,64}$/.test(commit)) return { ok: false, detail: "전체 커밋 해시가 아닙니다." };

@@ -4,7 +4,8 @@ import { useRpc, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { z } from "zod";
 import { selectMode } from "../shared/contracts";
 
-export const modePickerCardSchema = z.object({ workflowId: z.string() });
+import { modePickerCardSchema } from "../shared/timeline-cards";
+export { modePickerCardSchema };
 
 /** Posted when a request names a mode without choosing it; one press records the choice. */
 export function ModePickerCard({ item, theme }: PluginTimelineItemProps<z.infer<typeof modePickerCardSchema>>) {

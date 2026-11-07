@@ -34,10 +34,10 @@ export const generalStateSchema = z.object({
     .default(null),
 });
 export const generalCardSchema = z.object({
-  choice: generalAgentSchema,
-  planner: generalAgentSchema.optional(),
+  choice: generalAgentSchema.strict(),
+  planner: generalAgentSchema.strict().optional(),
   message: z.string(),
-});
+}).strict();
 export function generalAgentLabel(
   choice: Pick<GeneralAgent, "provider" | "model"> & { thinking?: string },
 ): string {

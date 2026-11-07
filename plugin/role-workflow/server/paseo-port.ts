@@ -13,6 +13,8 @@ import type { WorkflowPort, History } from "./engine";
 import type { ArchiveInspection, ArchiveConversation } from "./archive";
 import type { PushReviewPort } from "./push-review";
 import { turnEvidence } from "./push-evidence";
+import { appendTimelineCard } from "./timeline-cards";
+import { lifecycleTransport } from "./workspace-lifecycle";
 import { createProjectTitleSync } from "./project-titles";
 
 const ASYNC_ANSWER_PREFIX = "Answers to your questions:\n\n";
@@ -449,23 +451,7 @@ export function createPort(
   let usage: ReturnType<PaseoApi["providers"]["listUsage"]> | undefined;
   return {
     syncProjectTitles: createProjectTitleSync(getApi),
-    ...(pins
-      ? {
-          pushReview: {
-            pin: pins.pin,
-            async get(workspaceId: string) {
-              const workspace = await getApi().workspaces.ref(workspaceId).refresh();
-              return workspace ? { pinnedAt: workspace.pinnedAt ?? null } : null;
-            },
-            async unpin(workspaceId: string, expectedPinAt: string) {
-              const workspace = await getApi().workspaces.ref(workspaceId).refresh();
-              if (!workspace || workspace.pinnedAt !== expectedPinAt) return false;
-              await pins.unpin(workspaceId);
-              return true;
-            },
-          },
-        }
-      : {}),
+    ...lifecycleTransport(getApi, pins),
     async quotaAccount(provider) {
       return quotaAccount(provider);
     },
@@ -488,11 +474,6 @@ export function createPort(
     },
     async archiveInspection(workspaceIds) {
       return readArchiveInspection(getApi(), workspaceIds);
-    },
-    async archiveWorkspace(workspaceId) {
-      const result = await getApi().workspaces.ref(workspaceId).archive();
-      if (result.error || !result.archivedAt || result.workspaceId !== workspaceId)
-        throw new Error(result.error || "워크스페이스 보관을 확인하지 못했습니다.");
     },
     async workspaceName(workspaceId) {
       return (await getApi().workspaces.ref(workspaceId).refresh())?.name ?? null;
@@ -644,44 +625,16 @@ export function createPort(
         throw new Error("생성된 일반개발 대화 ID가 선택 대상과 다릅니다.");
     },
     async generalNotice(id, choice, message, noticeId, planner) {
-      await getApi()
-        .agents.ref(id)
-        .timeline.append({
-          id: `role-workflow-general-notice:${noticeId}`,
-          type: "plugin",
-          kind: "general-agent",
-          version: 1,
-          data: { choice, message, ...(planner ? { planner } : {}) },
-        });
+      await appendTimelineCard(getApi(), id, `role-workflow-general-notice:${noticeId}`, "general-agent", { choice, message, ...(planner ? { planner } : {}) });
     },
     async executorPicker(agentId, workflowId) {
-      await getApi()
-        .agents.ref(agentId)
-        .timeline.append({
-          id: `role-workflow-executor-picker:${workflowId}`,
-          type: "plugin",
-          kind: "executor-picker",
-          version: 1,
-          data: { workflowId },
-        });
+      await appendTimelineCard(getApi(), agentId, `role-workflow-executor-picker:${workflowId}`, "executor-picker", { workflowId });
     },
     async placementPicker(agentId, workflowId, blocker, generation) {
-      await getApi().agents.ref(agentId).timeline.append({
-        id: `role-workflow-placement-picker:${workflowId}${generation === undefined ? "" : `:${generation}`}`,
-        type: "plugin", kind: "placement-picker", version: 1,
-        data: { workflowId, number: blocker.number, title: blocker.title },
-      });
+      await appendTimelineCard(getApi(), agentId, `role-workflow-placement-picker:${workflowId}${generation === undefined ? "" : `:${generation}`}`, "placement-picker", { workflowId, ...blocker });
     },
     async modePicker(agentId, workflowId) {
-      await getApi()
-        .agents.ref(agentId)
-        .timeline.append({
-          id: `role-workflow-mode-picker:${workflowId}`,
-          type: "plugin",
-          kind: "mode-picker",
-          version: 1,
-          data: { workflowId },
-        });
+      await appendTimelineCard(getApi(), agentId, `role-workflow-mode-picker:${workflowId}`, "mode-picker", { workflowId });
     },
     async compact(id, messageId) {
       const agent = getApi().agents.ref(id);

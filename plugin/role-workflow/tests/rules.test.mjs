@@ -200,3 +200,9 @@ test("AC-15: workflow rules require merge, retest and review before approval, di
   assert.ok(push.includes("푸시 거절 뒤 pull·rebase·merge로 우회하지 않고 사용자 결정을 받는다. 이는 푸시 승인 전에 계획된 merge 보완과 구별한다."));
   assert.ok(push.includes("플러그인은 merge·rebase·force를 직접 실행하지 않는다"));
 });
+
+
+test("AC-206: design records automatic interactions and verification checks defaults and unprocessed fake arguments", () => {
+  assert.ok(RULES["10-planning.md"].includes("새 기능이 기존 자동 동작(보관·고정·푸시·압축·알림 등)과 같은 자원을 다루면, 그 상호작용과 단일 책임 위치를 설계에 적는다"));
+  assert.ok(RULES["30-verification.md"].includes("기본 설정 시나리오 검증 여부를 확인하고, 시험 대역의 인자 가공 여부를 확인한다"));
+});

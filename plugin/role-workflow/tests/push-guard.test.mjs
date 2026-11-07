@@ -106,7 +106,7 @@ async function hooks(t, settings) {
     paseo: {
       agents: {
         ref: (id) => ({
-          respondToPermission: async (input) => responses.push({ id, ...input }),
+          respondToPermission: async (input) => responses.push({ id, input }),
           refresh: async () => null,
         }),
       },
@@ -154,7 +154,7 @@ test("a git push permission request is denied while other commands are left to t
   const on = await hooks(t, {});
   await on.permission({ command: "git -C /repo push origin abc:refs/heads/main" });
   assert.deepEqual(on.responses, [
-    { id: "A", requestId: "perm-1", response: { behavior: "deny", message: PUSH_DENIED_MESSAGE } },
+    { id: "A", input: { requestId: "perm-1", response: { behavior: "deny", message: PUSH_DENIED_MESSAGE } } },
   ]);
   await on.permission({ command: "git status" });
   assert.equal(on.responses.length, 1);

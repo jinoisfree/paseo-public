@@ -62,7 +62,11 @@
 
 ### worktree 자동 정리
 
+`WorkspaceLifecycle`만 archive·pin·unpin의 실제 호출을 수행합니다. 일반 보관 요청은 실행 worktree를 거부하며, cleanup이 증거 복사를 마친 같은 호출의 private 일회용 증표를 발급하고, 엔진에 고정 연결된 검증기가 이를 소비해 ready를 재확인한 경우만 보관합니다. 요청자가 ready 객체나 검증 콜백을 넘길 수 없습니다. 마지막 단계에서 activeTurn·permission을 다시 조회합니다. 고정 상태 기계는 의도·소유 행을 저장하고 이 관문을 사용합니다.
+
 `WorktreeCleanup.run`은 승인된 푸시·ff 반영 뒤와 tick 복구에서 같은 판단을 사용합니다. `worktreeCleanup`은 pending → done/skipped/failed이며 failed는 60초 이상 간격으로 최대 3회 시도합니다. 상태 조회 오류와 사용자 pinned는 pending을 유지하고 attempts를 소모하지 않습니다. worktree 실행 공간은 startPin·pushReview의 자동 고정 대상에서 제외하며, 과거 행의 ownedPinAt은 cleanup의 소유 확인을 위해 유지합니다. 소유 기록과 일치하는 고정만 증거 복사·직전 검사를 통과한 뒤 기존 unpin으로 해제하고 결과와 상태를 재조회합니다. 해제를 확인하지 못하면 pending으로 보존합니다. evidenceFiles는 보관 전에 상태 폴더 복사가 끝났음을 나타내는 복구 체크포인트입니다. 보관 응답이 유실돼도 재조회로 완료를 확인하며 done/skipped는 재실행하지 않습니다. 새 구현 주기는 cleanup을 초기화합니다. 새 plan에서 done인 worktree 또는 실행 대화가 보관되고 디렉터리가 없는 worktree는 worktreeHistory에 남기고 generation+1 실행 담당의 배치를 다시 결정합니다. 미정리 worktree 작업은 archiveCandidate에서 제외해 기존 자동·수동 보관으로 우회하지 못하게 합니다.
+
+정리의 영구 오류는 permanentError·permanentErrors로 저장하고 같은 오류 3회면 failed로 멈춥니다. 일시 오류와 증거 상한(1000개·200MB) 초과는 pending입니다. 증거는 O_NOFOLLOW로 연 원본 inode·크기·mtime를 확인하며 제한된 버퍼로 복사합니다. Git 숨김 표시·submodule 상태·미반영 HEAD reflog도 보존 조건입니다. finished 작업의 수동 보관은 tick에서도 확인하되 이전 증거 복사를 추정하지 않습니다. 새 worktree.baseBranch는 생성 기준 이름이며 옛 기록은 현재 checkout으로 호환합니다.
 
 ## 5. 진입점
 
@@ -85,7 +89,8 @@
 | Recovery | `server/recovery.ts` | 사용 한도·일시 오류 기록, 예산 안의 자동 재개와 중단 안내 | 없음(workflow 필드) |
 | Compaction | `server/compaction.ts` | 유휴 대화 압축, 결과 기록, 재시도 | 엔진(`compacting`, `compressionReasons`) |
 | ExecutorChoice | `server/executor-choice.ts` | 구현 제품·모델·추론 선택, 카탈로그 검증, 실행 설정 적용 | 없음 |
-| WorktreeCleanup | `server/worktree-cleanup.ts` | 안전 조건 재확인·증거 복사·구현 작업 공간 보관·재시작 복구 | workflow.worktreeCleanup |
+| WorkspaceLifecycle | `server/workspace-lifecycle.ts` | 모든 보관·고정·해제의 실제 호출과 불변식 검사 | 없음(ready 증표는 같은 호출에서 소비) |
+| WorktreeCleanup | `server/worktree-cleanup.ts` | 안전 조건 재확인·증거 복사·관문 정리 요청·재시작 복구 | workflow.worktreeCleanup |
 | ManagedPushes | `server/managed-pushes.ts` | 승인된 푸시의 준비·실행·재확인과 결과 적용 | 엔진(실행 기록기, 진행 맵) |
 | GeneralMode | `server/general-mode.ts` | 일반개발 담당 선택, 연합 → 일반 전환과 결과 전달 | 없음 |
 | PushAudit | `server/push-audit.ts` | 응답 뒤 셸 푸시 감사(직렬 큐 밖, 1건씩) | 모듈(진행 중 감사) |

@@ -232,3 +232,30 @@ test("child scan is bounded to eight directories and discloses the incomplete ra
   assert.match(text, /조사 범위 제한/);
   assert.doesNotMatch(text, /감지되지 않았다/);
 });
+
+
+for (const [name, flags, modules, expected] of [
+  ["assume-unchanged", "h file\0", "", /assume-unchanged/],
+  ["skip-worktree", "S file\0", "", /skip-worktree/],
+  ["submodule advanced", "", "+abc module\n", /submodule/],
+  ["submodule uninitialized", "", "-abc module\n", /submodule/],
+  ["submodule conflicted", "", "Uabc module\n", /submodule/],
+  ["ordinary tracked file", "H file\0", "", null],
+]) test(`AC-205 D-1: ${name} cleanup probe uses only the specified read commands`, async () => {
+  const calls = [];
+  const probe = createRepoProbe(async (cwd, args) => {
+    calls.push({ cwd, args });
+    if (args[0] === "ls-files") return flags;
+    if (args[0] === "submodule") return modules;
+    if (args[0] === "reflog") return "";
+    throw Error("unexpected Git command");
+  });
+  const hazards = await probe.cleanupHazards("/repo", "a".repeat(40));
+  if (expected) assert.match(hazards.join(" "), expected);
+  else assert.deepEqual(hazards, []);
+  assert.deepEqual(calls, [
+    { cwd: "/repo", args: ["ls-files", "-v", "-z"] },
+    { cwd: "/repo", args: ["submodule", "status", "--recursive"] },
+    { cwd: "/repo", args: ["reflog", "show", "--format=%H", "HEAD"] },
+  ]);
+});

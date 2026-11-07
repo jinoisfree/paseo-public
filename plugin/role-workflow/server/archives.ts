@@ -3,11 +3,13 @@ import path from "node:path";
 import { capabilities } from "../shared/capabilities";
 import type { ArchiveCandidate, ArchiveEntry, Settings } from "../shared/contracts";
 import { archiveBlockReason, archiveCandidates, isFinished } from "./archive";
+import type { WorkspaceLifecycle } from "./workspace-lifecycle";
 import type { Database, Workflow, WorkflowPort } from "./engine";
 
 /** What archiving finished tasks needs from the engine. */
 export interface ArchivesHost {
   port(): WorkflowPort;
+  lifecycle(): WorkspaceLifecycle;
   db(): Promise<Database>;
   save(): Promise<void>;
   serial<T>(work: () => Promise<T>): Promise<T>;
@@ -133,7 +135,7 @@ export class Archives {
           const fresh = (await this.archiveRows(progress, [row.id]))[0];
           if (!fresh?.workspaceIds.includes(workspaceId))
             throw new Error("보관 조건이 변경되어 남은 워크스페이스를 보존했습니다.");
-          await this.host.port().archiveWorkspace(workspaceId);
+          await this.host.lifecycle().archive(workspaceId);
         }
         // The archive RPC confirmed every workspace; queued archive events can now no-op.
         await this.removeUndecided(w, this.archiveEntry(w));

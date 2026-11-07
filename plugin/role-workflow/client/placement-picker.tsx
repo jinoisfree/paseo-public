@@ -4,7 +4,8 @@ import { useRpc, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { z } from "zod";
 import { selectPlacement } from "../shared/contracts";
 
-export const placementPickerCardSchema = z.object({ workflowId: z.string(), number: z.number(), title: z.string() });
+import { placementPickerCardSchema } from "../shared/timeline-cards";
+export { placementPickerCardSchema };
 
 export function PlacementPickerCard({ item, theme }: PluginTimelineItemProps<z.infer<typeof placementPickerCardSchema>>) {
   const choose = useRpc(selectPlacement);

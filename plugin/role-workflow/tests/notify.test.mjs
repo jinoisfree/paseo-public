@@ -32,13 +32,13 @@ test("notifier filters expiration, preserves token file and uses attention paylo
     home,
     now: () => Date.parse("2026-01-01"),
     fetch: async (url, init) => {
-      requests.push({ url, ...init });
+      requests.push({ url, init });
       return new Response(JSON.stringify({ data: [{ status: "ok" }] }), { status: 200 });
     },
   });
   assert.equal(await notifier.activeCount(), 1);
   assert.deepEqual(await notifier.send(event), { tokens: 1, status: 200, ok: true, error: null });
-  const payload = JSON.parse(requests[0].body);
+  const payload = JSON.parse(requests[0].init.body);
   assert.equal(payload.length, 1);
   assert.equal(payload[0].to, "SECRET");
   assert.equal(payload[0].title, "title line");

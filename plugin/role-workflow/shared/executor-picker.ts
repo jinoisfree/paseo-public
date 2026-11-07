@@ -29,4 +29,4 @@ export function picksExecutor(w: {
 }
 
 /** The in-chat picker card posted when a contract 5 flow becomes federated. */
-export const executorPickerCardSchema = z.object({ workflowId: z.string() });
+export const executorPickerCardSchema = z.object({ workflowId: z.string() }).strict();

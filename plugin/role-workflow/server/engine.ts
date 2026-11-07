@@ -9,7 +9,7 @@ import { verdictProblem, verdictView, VERDICT_REPAIR } from "./verdict";
 import { generalAnswers, configChoice, type GeneralQuestion } from "./general-agent";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
-import { lstat } from "node:fs/promises";
+import { WorkspaceLifecycle } from "./workspace-lifecycle";
 import { z } from "zod";
 import type { AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import type { PaseoAgentConfig } from "@getpaseo/client";
@@ -157,13 +157,14 @@ const workflowSchema = z.object({
     stage: z.enum(["choice", "waiting"]), number: z.number(), title: z.string(), reason: z.string(), cardPosted: z.boolean().default(false),
   }).nullable().default(null),
   worktree: z
-    .object({ path: z.string(), branch: z.string(), base: z.string(), workspaceId: z.string() })
+    .object({ path: z.string(), branch: z.string(), base: z.string(), baseBranch: z.string().optional(), workspaceId: z.string() })
     .nullable()
     .default(null),
-  worktreeHistory: z.array(z.object({ path: z.string(), branch: z.string(), base: z.string(), workspaceId: z.string() })).default([]),
+  worktreeHistory: z.array(z.object({ path: z.string(), branch: z.string(), base: z.string(), baseBranch: z.string().optional(), workspaceId: z.string() })).default([]),
   worktreeCleanup: z.object({
     stage: z.enum(["pending", "done", "skipped", "failed"]), attempts: z.number().int().nonnegative(),
     detail: z.string(), at: z.string(), evidenceFiles: z.number().int().nonnegative().nullable().default(null),
+    permanentError: z.string().default(""), permanentErrors: z.number().int().nonnegative().default(0),
   }).nullable().default(null),
   /** Commit sets already notified about a required base merge; survives restart and retargeting. */
   worktreeMergeNotices: z.array(z.string()).default([]),
@@ -556,7 +557,12 @@ export class WorkflowEngine {
   private readonly scopeCache = new Map<string, Promise<string>>();
   private readonly managedRunner: ManagedPushRunner;
   private readonly managedExecutions = new Map<string, ManagedPush>();
+  private readonly lifecycle = new WorkspaceLifecycle({
+    port: () => this.port, db: () => this.db(),
+    cleanupReadiness: w => this.worktreeCleanup.verifyForArchive(w),
+  });
   private readonly archives = new Archives({
+    lifecycle: () => this.lifecycle,
     port: () => this.port,
     db: () => this.db(),
     save: () => this.save(),
@@ -597,6 +603,7 @@ export class WorkflowEngine {
     busyWriter: (w) => this.busyWriter(w),
   });
   private readonly worktreeCleanup = new WorktreeCleanup({
+    lifecycle: () => this.lifecycle,
     port: () => this.port, probe: () => this.probe, db: () => this.db(), save: () => this.save(),
     settings: () => this.settings(), now: () => this.now(), stateFolder: () => path.dirname(this.store.file),
     touch: (w, detail) => this.touch(w, detail),
@@ -1932,7 +1939,7 @@ export class WorkflowEngine {
     if (!w.startPin || !this.port.pushReview) return;
     try {
       // Always active: starting a new phase never withdraws a workflow's start pin.
-      await syncPushReview(w.startPin, this.port.pushReview, () => this.save(), true, w.isolation === "worktree" ? w.execute?.workspaceId ?? null : null);
+      await syncPushReview(w.startPin, this.lifecycle, () => this.save(), true, w.isolation === "worktree" ? w.execute?.workspaceId ?? null : null);
     } catch {
       w.artifactNotice =
         "새 작업 상단 고정 응답을 확인하지 못했습니다. 목록의 고정 상태를 다시 확인합니다.";
@@ -1947,7 +1954,7 @@ export class WorkflowEngine {
       !!w.pushCheck?.targets.length &&
       w.pushCheck.targets.every((target) => target.result === "pushed");
     try {
-      return await syncPushReview(w.pushReview, this.port.pushReview, () => this.save(), active, w.isolation === "worktree" ? w.execute?.workspaceId ?? null : null);
+      return await syncPushReview(w.pushReview, this.lifecycle, () => this.save(), active, w.isolation === "worktree" ? w.execute?.workspaceId ?? null : null);
     } catch {
       w.artifactNotice =
         "상단 고정 변경 응답을 확인하지 못했습니다. 목록의 고정 상태를 다시 확인합니다.";
@@ -2866,7 +2873,10 @@ export class WorkflowEngine {
       // Finished work is being collected, possibly with only one legacy half archived.
       // It must neither resume nor produce a stopped notification because of that archive.
       if (member === w.execute && w.worktreeCleanup?.stage === "done") continue;
-      if (snapshot?.archived && isFinished(w)) return false;
+      if (snapshot?.archived && isFinished(w)) {
+        if (member === w.execute) await this.worktreeCleanup.manuallyArchived(w);
+        return false;
+      }
       if (!snapshot || snapshot.archived) {
         member.usage = null;
         this.compressionReasons.set(member.id, compressionDecision(member.config.provider, await this.settings(), null).reason);
@@ -3784,13 +3794,7 @@ export class WorkflowEngine {
       let generation = 1;
       // A user may have archived the executor directly; only a confirmed missing path
       // permits replacing that worktree. Unknown filesystem/API state preserves it.
-      let manuallyCleaned = false;
-      if (w.worktree && w.execute && w.worktreeCleanup?.stage !== "done") {
-        const snapshot = await this.port.inspect(w.execute.id).catch(() => null);
-        if (snapshot?.archived === true && snapshot.workspaceId === w.worktree.workspaceId) {
-          manuallyCleaned = await lstat(w.worktree.path).then(() => false, error => (error as NodeJS.ErrnoException).code === "ENOENT");
-        }
-      }
+      const manuallyCleaned = await this.worktreeCleanup.manuallyArchived(w);
       if ((w.worktreeCleanup?.stage === "done" || manuallyCleaned) && w.worktree) {
         generation = (w.execute?.generation ?? 0) + 1;
         w.worktreeHistory.push(w.worktree);
