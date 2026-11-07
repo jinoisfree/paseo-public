@@ -124,12 +124,10 @@ test('lightweight reading and record policy remains consistent in injected promp
  const {SCREEN_SELECTION_PROMPT}=await import('../server/executor-selection.ts');
  const prompt=composeCurrentPrompt('codex','','undecided',readme,SCREEN_SELECTION_PROMPT, '');
  assert.match(prompt,/질문·설명 요청에는 note로 답/);
- // Questions are answered directly; the mode is asked only before a real change starts.
- assert.match(prompt,/질문·설명·읽기 전용 조사 요청에는 진행 방식을 묻지 않고 바로 답한다\. 파일 수정·구현·커밋 같은 실제 변경을 시작하기 전에 질문 도구로 진행 방식을 단독 질문한다/);
- assert.doesNotMatch(prompt,/조사 요청이어도 생략하지 않는다/);
- assert.match(RULES['README.md'],/실제 변경을 시작하기 전에 진행 방식을 묻는다/);
- assert.match(RULES['00-common.md'],/실제 변경을 시작하기 전에 \*\*연합개발/);
- assert.match(RULES['40-paseo-role-workflow.md'],/조사 요청에는 묻지 않고 답한다/);
+ // The mode question is never skipped while undecided, even for questions.
+ assert.match(prompt,/첫 응답 전에 질문 도구로 진행 방식을 단독 질문한다\. 질문·설명·읽기 전용 조사 요청이어도 생략하지 않는다/);
+ assert.match(RULES['README.md'],/요청 종류와 관계없이 첫 응답 전에 진행 방식을 묻는다/);
+ assert.match(RULES['00-common.md'],/요청 종류와 관계없이 첫 응답 전에/);
  assert.match(prompt,/현재 단계 상세/);assert.match(prompt,/무변경 상세 문서 전체 재독은 강제하지/);
  assert.doesNotMatch(prompt,/진행 방식·구현 담당 선택 없이|plan: 00-common.md, 10-planning.md, 30-verification.md/);
  assert.match(RULES['README.md'],/기획·설계.*10-planning.md/);
@@ -154,13 +152,13 @@ test('screen selection prompt carries no questions while contract4 titles stay e
  }
 });
 
-// The agent accepts a mode only in the forms the plugin itself recognizes (shared/mode-request.ts).
-test('an undecided conversation confirms a loosely named mode with the question tool', async () => {
+// The agent treats a mode as answered only in the forms the plugin recognizes (shared/mode-request.ts).
+test('the first-reply mode question is skipped only for exact choices the plugin recognizes', async () => {
  const {composeCurrentPrompt}=await import('../server/roles.ts');
  const {requestedMode}=await import('../shared/mode-request.ts');
  const prompt=composeCurrentPrompt('claude','','undecided',null,'','');
- assert.match(prompt,/'연합개발 테스트'처럼 방식 이름이 들어간 그 밖의 요청은 실제 작업 전에 질문 도구로 진행 방식을 확인/);
- assert.doesNotMatch(prompt,/사용자 요청에 방식을 명시했으면 이미 답한 것으로 인정한다/);
+ assert.match(prompt,/'연합개발 테스트'처럼 방식 이름이 들어간 그 밖의 요청도 질문 도구로 묻는다/);
+ assert.doesNotMatch(prompt,/첫 사용자 요청에 방식을 명시한 경우만 이미 답한 것으로 인정한다/);
  for (const text of ['연합개발','연합개발로 진행해줘','일반개발로 해줘']) assert.notEqual(requestedMode(text),null,text);
  assert.equal(requestedMode('연합개발 테스트'),null);
 });

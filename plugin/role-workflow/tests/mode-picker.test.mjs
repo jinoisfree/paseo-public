@@ -44,7 +44,7 @@ async function fixture(t) {
   return { engine, id, cards, sent, pickers, say, state };
 }
 
-test("a request that names a mode without choosing it gets the mode card once", async (t) => {
+test("a first turn that ends with the mode undecided gets the mode card once", async (t) => {
   const f = await fixture(t);
   await f.say("연합개발 테스트");
   assert.deepEqual(f.cards, [{ agentId: "A", workflowId: f.id }]);
@@ -53,14 +53,15 @@ test("a request that names a mode without choosing it gets the mode card once", 
   assert.equal(f.cards.length, 1, "the card is posted only once per task");
 });
 
-test("an exact choice sets the mode by text and needs no card; unrelated requests get none", async (t) => {
+test("an exact choice sets the mode by text and needs no card; other requests get it", async (t) => {
   const exact = await fixture(t);
   await exact.say("연합개발로 진행해줘");
   assert.equal((await exact.state()).mode, "federated");
   assert.deepEqual(exact.cards, []);
+  // Any request, question or not, gets the card when the turn ends undecided.
   const plain = await fixture(t);
   await plain.say("1+1은?");
-  assert.deepEqual(plain.cards, []);
+  assert.equal(plain.cards.length, 1);
   assert.equal((await plain.state()).mode, "undecided");
 });
 

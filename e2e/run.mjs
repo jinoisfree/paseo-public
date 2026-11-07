@@ -203,7 +203,7 @@ try {
     questionAgent = await runAgent("1+1은? 숫자만 답하세요.");
     const saved = readFileSync(agentFile(questionAgent), "utf8");
     assert(saved.includes("paseo-work-mode-v4"), "work-mode block missing from the system prompt");
-    assert(saved.includes("실제 변경을 시작하기 전에"), "mode question is not limited to real changes");
+    assert(saved.includes("첫 응답 전에 질문 도구로 진행 방식을 단독 질문한다"), "the first-reply mode question is missing");
     const flow = await waitFor("enrollment", async () => state().workflows.find((w) => w.plan?.id === questionAgent));
     assert(flow.mode === "undecided", `expected undecided, got ${flow.mode}`);
     assert(readFileSync(modelLog, "utf8").includes("1+1은"), "the fake model never saw the prompt");

@@ -212,7 +212,7 @@ const workflowSchema = z.object({
   selectionPlan: z.string().default(""),
   // The in-chat executor picker was posted once the flow became federated (contract 5).
   pickerPosted: z.boolean().default(false),
-  /** The in-chat mode card was offered once, for a request that named a mode without choosing it. */
+  /** The in-chat mode card was offered once, after a turn that ended with the mode undecided. */
   modePickerPosted: z.boolean().default(false),
   resumeNote: z.string().default(""),
   generalHandoff: z.string().default(""),
@@ -1350,15 +1350,14 @@ export class WorkflowEngine {
         resumed: false,
         answers: true,
       };
-      // A request that names a mode without choosing it ("연합개발 테스트") gets a one-click card,
-      // whatever the model did with the question; only exact choices set the mode by text.
+      // The prompt asks for the mode before the first reply. When a turn ends with the mode still
+      // undecided (the model skipped the question), the conversation gets a one-click card instead.
       if (
         capabilities(w).current &&
         w.mode === "undecided" &&
         w.plan?.id === agentId &&
         !w.modePickerPosted &&
-        !requestedMode(userText(request || goal)) &&
-        /연합개발|일반개발/.test(userText(request || goal))
+        !requestedMode(userText(request || goal))
       ) {
         w.modePickerPosted = true;
         void this.port.modePicker?.(agentId, w.id).catch(() => {});
