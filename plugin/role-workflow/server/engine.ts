@@ -212,6 +212,8 @@ const workflowSchema = z.object({
   selectionPlan: z.string().default(""),
   // The in-chat executor picker was posted once the flow became federated (contract 5).
   pickerPosted: z.boolean().default(false),
+  /** The in-chat mode card was offered once, for a request that named a mode without choosing it. */
+  modePickerPosted: z.boolean().default(false),
   resumeNote: z.string().default(""),
   generalHandoff: z.string().default(""),
   generalDelivery: z
@@ -384,6 +386,8 @@ export interface WorkflowPort {
   ): Promise<void>;
   /** Posts the executor picker card into the planner conversation. */
   executorPicker?(agentId: string, workflowId: string): Promise<void>;
+  /** Posts the work-mode card into an undecided conversation. */
+  modePicker?(agentId: string, workflowId: string): Promise<void>;
   send(id: string, prompt: string, messageId: string): Promise<void>;
   /** Reads the latest turn. `through` is a message id the search must reach back to. */
   history(id: string, through?: string): Promise<History>;
@@ -1284,6 +1288,7 @@ export class WorkflowEngine {
         limitPlan: "",
         selectionPlan: "",
         pickerPosted: false,
+        modePickerPosted: false,
         resumeNote: "",
         generalHandoff: "",
         generalDelivery: null,
@@ -1345,6 +1350,19 @@ export class WorkflowEngine {
         resumed: false,
         answers: true,
       };
+      // A request that names a mode without choosing it ("연합개발 테스트") gets a one-click card,
+      // whatever the model did with the question; only exact choices set the mode by text.
+      if (
+        capabilities(w).current &&
+        w.mode === "undecided" &&
+        w.plan?.id === agentId &&
+        !w.modePickerPosted &&
+        !requestedMode(userText(request || goal)) &&
+        /연합개발|일반개발/.test(userText(request || goal))
+      ) {
+        w.modePickerPosted = true;
+        void this.port.modePicker?.(agentId, w.id).catch(() => {});
+      }
       // An informational turn with no outstanding work must not consume the initial
       // selection or trigger recovery/continuation. Live deliveries keep their existing
       // receipt and side-turn rules, including rejection of note as an instruction answer.
@@ -2469,26 +2487,53 @@ export class WorkflowEngine {
       );
       const mode = answer === "일반개발" ? "general" : "federated";
       if (!w || !w.plan || w.mode === mode) return;
-      if (capabilities(w).current && w.mode !== "undecided") {
-        this.touch(w, "진행 중인 작업의 방식은 바꿀 수 없습니다. 다른 방식은 새 작업으로 시작하세요.");
-        await this.save();
-        return;
-      }
-      // Clear stale questions before queuing a transition as well as before an immediate choice.
-      for (const pending of this.modeQuestions.keys())
-        if (pending.startsWith(`${agentId}:`)) this.modeQuestions.delete(pending);
-      if (mode === "general" && w.execute && w.contract < 3) {
-        await this.generalMode.returnToGeneral(w);
-        return;
-      }
-      const established = w.mode !== "undecided";
-      if (mode === "general" && !(w.contract >= 3 && automates(w))) this.generalMode.generalize(w);
-      else w.mode = mode;
-      w.wantsFederation = false;
-      await this.rememberProject(w);
+      await this.applyModeChoice(w, agentId, mode);
+    });
+  }
+  /** Records a work-mode choice from the question tool or the in-chat card. */
+  private async applyModeChoice(w: Workflow, agentId: string, mode: "general" | "federated") {
+    if (capabilities(w).current && w.mode !== "undecided") {
+      this.touch(w, "진행 중인 작업의 방식은 바꿀 수 없습니다. 다른 방식은 새 작업으로 시작하세요.");
       await this.save();
-      if ((mode === "federated" || established) && w.titled)
-        await this.renameWorkspaces(w, (await this.settings()).titleMarker);
+      return;
+    }
+    // Clear stale questions before queuing a transition as well as before an immediate choice.
+    for (const pending of this.modeQuestions.keys())
+      if (pending.startsWith(`${agentId}:`)) this.modeQuestions.delete(pending);
+    if (mode === "general" && w.execute && w.contract < 3) {
+      await this.generalMode.returnToGeneral(w);
+      return;
+    }
+    const established = w.mode !== "undecided";
+    if (mode === "general" && !(w.contract >= 3 && automates(w))) this.generalMode.generalize(w);
+    else w.mode = mode;
+    w.wantsFederation = false;
+    await this.rememberProject(w);
+    await this.save();
+    if ((mode === "federated" || established) && w.titled)
+      await this.renameWorkspaces(w, (await this.settings()).titleMarker);
+  }
+  /** The mode card: chooses the mode, then tells the planner so the request continues. */
+  selectMode(id: string, mode: "general" | "federated") {
+    return this.serial(async () => {
+      const w = (await this.db()).workflows.find((candidate) => candidate.id === id);
+      if (!w?.plan) return { ok: false, detail: "작업을 찾을 수 없습니다." };
+      if (w.mode !== "undecided")
+        return { ok: w.mode === mode, detail: `진행 방식은 이미 ${w.mode === "general" ? "일반개발" : "연합개발"}입니다.` };
+      await this.applyModeChoice(w, w.plan.id, mode);
+      // applyModeChoice may refuse; read the mode again after it.
+      if ((w.mode as Workflow["mode"]) !== mode) return { ok: false, detail: w.detail };
+      const label = mode === "general" ? "일반개발" : "연합개발";
+      const snapshot = await this.port.inspect(w.plan.id).catch(() => null);
+      if (snapshot && this.quiet(snapshot))
+        await this.port
+          .send(
+            w.plan.id,
+            `작업 ID: ${w.id}\n진행 방식: ${label} (사용자가 화면에서 선택). 진행 방식을 다시 묻지 않고, 직전 요청을 이 방식으로 이어서 진행한다.`,
+            `role-workflow-mode:${w.id}`,
+          )
+          .catch(() => {});
+      return { ok: true, detail: `${label}로 진행합니다.` };
     });
   }
   generalTimeline(...args: Parameters<GeneralMode["generalTimeline"]>) {

@@ -25,6 +25,7 @@ import {
   forgetProject,
   control,
   selectExecutor,
+  selectMode,
   testNotification,
   settingsSchema,
   type Settings,
@@ -371,6 +372,10 @@ export default function contribute(server: PluginServerContext) {
   server.handle(adoptReviewPins, async (input, context) => {
     attach(context.paseo);
     return engine.adoptReviewPins(input.id, input.key, input.pins);
+  });
+  server.handle(selectMode, async (input, context) => {
+    attach(context.paseo);
+    return engine.selectMode(input.id, input.mode);
   });
   server.handle(selectExecutor, async (input, context) => {
     attach(context.paseo);

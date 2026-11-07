@@ -16,6 +16,7 @@ import { executorPickerCardSchema } from "./shared/executor-picker";
 import { focusManagedPush } from "./client/managed-push-panel";
 import { preparePush } from "./shared/managed-push";
 import { registerFolderOpen } from "./client/folder-open";
+import { ModePickerCard, modePickerCardSchema } from "./client/mode-picker";
 
 function WorkflowSidebarItem({ currentScreen, openScreen }: PluginSidebarItemProps) {
   return (
@@ -46,6 +47,12 @@ export default function contribute(client: PluginClientContext) {
       version: 1,
       schema: workflowCardSchema,
       Component: WorkflowCard,
+    }),
+    client.addTimelineRenderer({
+      kind: "mode-picker",
+      version: 1,
+      schema: modePickerCardSchema,
+      Component: ModePickerCard,
     }),
     client.addTimelineRenderer({
       kind: "executor-picker",

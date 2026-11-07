@@ -664,6 +664,17 @@ export function createPort(
           data: { workflowId },
         });
     },
+    async modePicker(agentId, workflowId) {
+      await getApi()
+        .agents.ref(agentId)
+        .timeline.append({
+          id: `role-workflow-mode-picker:${workflowId}`,
+          type: "plugin",
+          kind: "mode-picker",
+          version: 1,
+          data: { workflowId },
+        });
+    },
     async compact(id, messageId) {
       const agent = getApi().agents.ref(id);
       let finish!: (error: Error | null) => void;
@@ -937,6 +948,7 @@ export const CALL_BUDGETS_MS: Partial<Record<keyof WorkflowPort, number>> = {
   projectName: 20_000,
   generalNotice: 20_000,
   executorPicker: 20_000,
+  modePicker: 20_000,
   quotaAccount: 20_000,
   quotaAvailable: 20_000,
   archiveWorkspace: 30_000,

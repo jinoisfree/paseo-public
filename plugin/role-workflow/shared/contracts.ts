@@ -178,6 +178,11 @@ export const setRepositories = defineRpc({
   input: z.object({ id: z.string(), paths: repositoryPathsSchema }),
   output: z.object({ repositories: repositoryPathsSchema }),
 });
+export const selectMode = defineRpc({
+  name: "workflow.select-mode",
+  input: z.object({ id: z.string(), mode: z.enum(["general", "federated"]) }),
+  output: z.object({ ok: z.boolean(), detail: z.string() }),
+});
 export const selectExecutor = defineRpc({
   name: "workflow.select-executor",
   input: z.object({

@@ -153,3 +153,14 @@ test('screen selection prompt carries no questions while contract4 titles stay e
   assert.deepEqual(selectionQuestions({questions:[{title:q.question+' (설명)'}]}),[]);
  }
 });
+
+// The agent accepts a mode only in the forms the plugin itself recognizes (shared/mode-request.ts).
+test('an undecided conversation confirms a loosely named mode with the question tool', async () => {
+ const {composeCurrentPrompt}=await import('../server/roles.ts');
+ const {requestedMode}=await import('../shared/mode-request.ts');
+ const prompt=composeCurrentPrompt('claude','','undecided',null,'','');
+ assert.match(prompt,/'연합개발 테스트'처럼 방식 이름이 들어간 그 밖의 요청은 실제 작업 전에 질문 도구로 진행 방식을 확인/);
+ assert.doesNotMatch(prompt,/사용자 요청에 방식을 명시했으면 이미 답한 것으로 인정한다/);
+ for (const text of ['연합개발','연합개발로 진행해줘','일반개발로 해줘']) assert.notEqual(requestedMode(text),null,text);
+ assert.equal(requestedMode('연합개발 테스트'),null);
+});

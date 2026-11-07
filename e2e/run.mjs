@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import { createPaseoApi } from "@getpaseo/client";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pluginDir = resolve(here, "../plugin/role-workflow");
@@ -278,6 +279,40 @@ try {
         // The executor's result was processed and the planner answered the review.
         return found?.lastResult && found.status === "needs_input" ? found : null;
       }, 120_000);
+    } finally {
+      writeFileSync(control, JSON.stringify({ mode: "text", text: "2" }));
+    }
+  });
+
+  await step("a loosely named mode gets the card; choosing it continues the request as federated", async () => {
+    writeFileSync(
+      control,
+      JSON.stringify({
+        mode: "role",
+        plan: ["무엇을 테스트할지 알려 주세요.", workflowBlock("plan", "더미 작업으로 흐름을 점검한다")],
+      }),
+    );
+    try {
+      const planner = await runAgent("연합개발 테스트");
+      const flow = await waitFor("mode card", async () => {
+        const found = state().workflows.find((w) => w.plan?.id === planner);
+        return found?.modePickerPosted ? found : null;
+      });
+      assert(flow.mode === "undecided", `mode ${flow.mode} before the card`);
+      await rpc("workflow.status", {});
+      const card = await waitFor("mode card in the timeline", async () => {
+        const page = await createPaseoApi(client).agents.ref(planner).timeline.refetch({ direction: "tail", limit: 20 });
+        return (page.entries ?? page.items ?? []).map((entry) => entry.item ?? entry).find((item) => item.type === "plugin" && item.kind === "mode-picker");
+      });
+      assert(card.data?.workflowId === flow.id, `card for ${card.data?.workflowId}`);
+      const chosen = await rpc("workflow.select-mode", { id: flow.id, mode: "federated" });
+      assert(chosen.ok, `select-mode failed: ${chosen.detail}`);
+      await waitFor("plan after the mode notice", async () => {
+        const found = state().workflows.find((w) => w.id === flow.id);
+        return found?.mode === "federated" && found.selectionPlan ? found : null;
+      }, 120_000);
+      const calls = readFileSync(modelLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      assert(calls.some((call) => call.last.includes("진행 방식: 연합개발 (사용자가 화면에서 선택)")), "the planner never got the mode notice");
     } finally {
       writeFileSync(control, JSON.stringify({ mode: "text", text: "2" }));
     }
