@@ -137,6 +137,13 @@ test('lightweight reading and record policy remains consistent in injected promp
  // PARALLEL-SUBAGENTS AC-7: preserve the planning, execution and review boundaries.
  assert.match(RULES['10-planning.md'],/갈래별로 담당 파일\(갈래끼리 겹치지 않음\), 선행 관계, 난이도\(단순\/보통\/어려움\), 완료 조건을 적는다/);
  assert.match(RULES['10-planning.md'],/계획에는 모델 이름을 적지 않는다/);
+ // Additional handoff 2, AC-11: require an explicit parallelism decision and criteria.
+ assert.match(RULES['10-planning.md'],/작업 분할 때 병렬 후보 여부를 반드시 판단하고/);
+ assert.match(RULES['10-planning.md'],/인계서 9번에 `병렬 갈래: 있음` 또는 `병렬 갈래: 없음\(이유\)` 중 하나를 적는다/);
+ assert.match(RULES['10-planning.md'],/경미 변경도 생략하지 않는다/);
+ assert.match(RULES['10-planning.md'],/`있음`은 갈래가 3개 이상이고, 갈래끼리 담당 파일이 겹치지 않으며, 각 갈래를 따로 시험하고 완료를 확인할 수 있을 때만 적는다/);
+ assert.match(RULES['10-planning.md'],/한 갈래의 결과를 다른 갈래가 쓰면 선행 관계로 적는다/);
+ assert.match(RULES['10-planning.md'],/^9\. 작업 범위·금지 범위·선행 작업·병렬 갈래\(있음\/없음과 이유, STEP 6\)$/m);
  assert.match(RULES['20-implementation.md'],/계획에 독립 갈래가 있고 실행 도구가 하위 에이전트 병렬 실행을 지원할 때만/);
  assert.match(RULES['20-implementation.md'],/갈래가 2개 이하이거나, 변경이 작거나, 한 파일에 몰리면 직접 구현한다/);
  assert.match(RULES['20-implementation.md'],/지원하지 않는 도구에서는 차례대로 직접 구현한다/);
