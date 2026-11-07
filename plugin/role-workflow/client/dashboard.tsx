@@ -303,6 +303,10 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
           () => setDraft({ ...draft, autoStart: !draft.autoStart }),
           "workflow-auto-start",
         )}
+        <Text style={s.muted}>같은 폴더에 다른 작업이 있을 때</Text>
+        {([["ask", "매번 묻기"], ["worktree", "항상 따로 작업 공간"], ["wait", "항상 기다리기"]] as const).map(([value, label]) => (
+          <View key={value}>{button(`${draft.executorPlacement === value ? "✓ " : ""}${label}`, () => setDraft({ ...draft, executorPlacement: value }))}</View>
+        ))}
         {(
           [
             ["notifyPermission", "권한 요청 알림"],
@@ -310,7 +314,6 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
             ["autoResumeQuota", "사용 한도 해소 시 자동 재개"],
             ["autoResumeTransient", "일시 오류 자동 재개"],
             ["shellPushGuard", "에이전트 셸 git push 차단"],
-            ["executorWorktree", "연합개발 구현 담당 별도 worktree"],
             ["notifyCompleted", "작업 완료 알림"],
             ["koreanTitle", "한글 제목"],
             ["titleMarker", "제목 상태 색 표식"],

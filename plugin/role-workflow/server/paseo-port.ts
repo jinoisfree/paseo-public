@@ -664,6 +664,13 @@ export function createPort(
           data: { workflowId },
         });
     },
+    async placementPicker(agentId, workflowId, blocker) {
+      await getApi().agents.ref(agentId).timeline.append({
+        id: `role-workflow-placement-picker:${workflowId}`,
+        type: "plugin", kind: "placement-picker", version: 1,
+        data: { workflowId, ...blocker },
+      });
+    },
     async modePicker(agentId, workflowId) {
       await getApi()
         .agents.ref(agentId)
@@ -949,6 +956,7 @@ export const CALL_BUDGETS_MS: Partial<Record<keyof WorkflowPort, number>> = {
   generalNotice: 20_000,
   executorPicker: 20_000,
   modePicker: 20_000,
+  placementPicker: 20_000,
   quotaAccount: 20_000,
   quotaAvailable: 20_000,
   archiveWorkspace: 30_000,

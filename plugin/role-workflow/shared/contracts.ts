@@ -40,7 +40,7 @@ export const settingsSchema = z.object({
   autoResumeQuota: z.boolean().default(true),
   autoResumeTransient: z.boolean().default(true),
   shellPushGuard: z.boolean().default(true),
-  executorWorktree: z.boolean().default(true),
+  executorPlacement: z.enum(["ask", "worktree", "wait"]).catch("ask").default("ask"),
   threshold: z.number().min(0.05).max(0.9).default(0.8),
   claudeCompression: claudeCompressionSchema,
   codexCompression: z.enum(["threshold", "native"]).default("threshold"),
@@ -181,6 +181,11 @@ export const setRepositories = defineRpc({
 export const selectMode = defineRpc({
   name: "workflow.select-mode",
   input: z.object({ id: z.string(), mode: z.enum(["general", "federated"]) }),
+  output: z.object({ ok: z.boolean(), detail: z.string() }),
+});
+export const selectPlacement = defineRpc({
+  name: "workflow.select-placement",
+  input: z.object({ id: z.string(), placement: z.enum(["worktree", "wait"]) }),
   output: z.object({ ok: z.boolean(), detail: z.string() }),
 });
 export const selectExecutor = defineRpc({

@@ -1,3 +1,4 @@
+import { PlacementPickerCard, placementPickerCardSchema } from "./client/placement-picker";
 import { GeneralAgentCard } from "./client/general-agent-card";
 import { generalCardSchema } from "./shared/general-agent";
 import type { PluginClientContext, PluginSidebarItemProps } from "@getpaseo/plugin/client";
@@ -47,6 +48,9 @@ export default function contribute(client: PluginClientContext) {
       version: 1,
       schema: workflowCardSchema,
       Component: WorkflowCard,
+    }),
+    client.addTimelineRenderer({
+      kind: "placement-picker", version: 1, schema: placementPickerCardSchema, Component: PlacementPickerCard,
     }),
     client.addTimelineRenderer({
       kind: "mode-picker",

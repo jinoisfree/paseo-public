@@ -4,15 +4,22 @@
 // "tool" asks the agent to run `command` with its Bash tool once, then replies with `text`.
 // "role" replies with the next entry of `plan` or `execute` (by the role in the system prompt) on
 // each main-loop request, repeating the last entry when the list runs out.
+// A new `scenario` resets role reply counters so independent cases do not consume each other.
 // usage: node fake-models.mjs <port> <controlFile> <logFile>
 import { createServer } from "node:http";
 import { appendFileSync, readFileSync } from "node:fs";
 
 const [port, controlFile, logFile] = process.argv.slice(2);
 const turns = { plan: 0, execute: 0 };
+let scenario;
 const control = () => {
   try {
-    return JSON.parse(readFileSync(controlFile, "utf8"));
+    const settings = JSON.parse(readFileSync(controlFile, "utf8"));
+    if (settings.scenario !== scenario) {
+      scenario = settings.scenario;
+      turns.plan = turns.execute = 0;
+    }
+    return settings;
   } catch {
     return {};
   }

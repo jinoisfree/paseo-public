@@ -199,6 +199,35 @@ try {
     assert(/role-workflow\s+running/.test((await cli("plugin", "ls")).stdout), "plugin is not running");
   });
 
+  await step("without overlap a federated executor opens in the planner workspace tab", async () => {
+    writeFileSync(control, JSON.stringify({ mode: "role", scenario: "shared-tab",
+      plan: [workflowBlock("plan", "탭에서 더미 구현"), workflowBlock("input", "e2e 확인 끝")],
+      execute: [workflowBlock("result", "탭 구현 완료")],
+    }));
+    try {
+      const planner = await runAgent("연합개발로 진행해줘. 탭 배치 계획을 세워줘.");
+      let flow = await waitFor("federated tab workflow", async () => state().workflows.find(w => w.plan?.id === planner && w.mode === "federated"));
+      if (!flow.selectionPlan) {
+        await cli("send", planner, "계획을 확정해줘.", "--wait", "--wait-timeout", "120s");
+        flow = await waitFor("held tab plan", async () => state().workflows.find(w => w.id === flow.id && w.selectionPlan));
+      }
+      const { models } = await rpc("workflow.models", { provider: "claude" });
+      const model = models.find(m => m.isDefault) ?? models[0];
+      const thinking = model.thinkingOptions.find(o => o.isDefault)?.id ?? model.thinkingOptions[0]?.id ?? "";
+      const selected = await rpc("workflow.select-executor", { id: flow.id, provider: "claude", model: model.id, thinking });
+      assert(selected.ok, selected.detail);
+      flow = await waitFor("shared executor tab", async () => state().workflows.find(w => w.id === flow.id && w.execute?.workspaceId), 60_000);
+      assert(flow.isolation === "shared", `isolation ${flow.isolation}`);
+      assert(flow.execute.workspaceId === flow.plan.workspaceId, "the executor opened in a separate workspace");
+      assert(flow.worktree === null && flow.placement === null, "unexpected placement choice/worktree");
+      const executorFile = await waitFor("tab executor agent file", async () => agentFile(flow.execute.id));
+      assert(JSON.parse(readFileSync(executorFile, "utf8")).cwd === work, "tab executor cwd changed");
+      await waitFor("tab review back to planner", async () => state().workflows.find(w => w.id === flow.id && w.lastResult && w.status === "needs_input"), 120_000);
+    } finally {
+      writeFileSync(control, JSON.stringify({ mode: "text", text: "2" }));
+    }
+  });
+
   await step("a question is answered and the conversation is enrolled with the injected prompt", async () => {
     questionAgent = await runAgent("1+1은? 숫자만 답하세요.");
     const saved = readFileSync(agentFile(questionAgent), "utf8");
@@ -235,7 +264,7 @@ try {
     writeFileSync(
       control,
       JSON.stringify({
-        mode: "role",
+        mode: "role", scenario: "overlap-worktree",
         plan: [workflowBlock("plan", "feature.txt를 추가한다"), workflowBlock("input", "e2e 확인 끝")],
         execute: [workflowBlock("result", "구현 완료")],
       }),
@@ -260,6 +289,15 @@ try {
       const thinking = model.thinkingOptions.find((o) => o.isDefault)?.id ?? model.thinkingOptions[0]?.id ?? "";
       const selected = await rpc("workflow.select-executor", { id: flow.id, provider: "claude", model: model.id, thinking });
       assert(selected.ok, `executor selection failed: ${selected.detail}`);
+      flow = await waitFor("overlapping placement choice", async () => state().workflows.find(w => w.id === flow.id && w.placement?.stage === "choice"));
+      assert(flow.isolation === "undecided" && !flow.execute.workspaceId, "executor started before the choice");
+      const card = await waitFor("placement card in the timeline", async () => {
+        const page = await createPaseoApi(client).agents.ref(planner).timeline.refetch({ direction: "tail", limit: 30 });
+        return (page.entries ?? page.items ?? []).map(entry => entry.item ?? entry).find(item => item.type === "plugin" && item.kind === "placement-picker");
+      });
+      assert(card.data?.workflowId === flow.id, "placement card belongs to another task");
+      const placement = await rpc("workflow.select-placement", { id: flow.id, placement: "worktree" });
+      assert(placement.ok, `placement failed: ${placement.detail}`);
       flow = await waitFor("executor in a worktree", async () => {
         const found = state().workflows.find((w) => w.id === flow.id);
         return found?.worktree && found.execute?.workspaceId ? found : null;
@@ -288,7 +326,7 @@ try {
     writeFileSync(
       control,
       JSON.stringify({
-        mode: "role",
+        mode: "role", scenario: "mode-card",
         plan: ["무엇을 테스트할지 알려 주세요.", workflowBlock("plan", "더미 작업으로 흐름을 점검한다")],
       }),
     );

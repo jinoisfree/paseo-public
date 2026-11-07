@@ -151,6 +151,9 @@ const workflowSchema = z.object({
   repositories: repositoryPathsSchema.default([]),
   /** Decided once, when the first executor is created; a replacement never moves its work. */
   isolation: z.enum(["undecided", "worktree", "shared"]).default("undecided"),
+  placement: z.object({
+    stage: z.enum(["choice", "waiting"]), number: z.number(), title: z.string(), reason: z.string(),
+  }).nullable().default(null),
   worktree: z
     .object({ path: z.string(), branch: z.string(), base: z.string(), workspaceId: z.string() })
     .nullable()
@@ -388,6 +391,7 @@ export interface WorkflowPort {
   executorPicker?(agentId: string, workflowId: string): Promise<void>;
   /** Posts the work-mode card into an undecided conversation. */
   modePicker?(agentId: string, workflowId: string): Promise<void>;
+  placementPicker?(agentId: string, workflowId: string, blocker: { number: number; title: string }): Promise<void>;
   send(id: string, prompt: string, messageId: string): Promise<void>;
   /** Reads the latest turn. `through` is a message id the search must reach back to. */
   history(id: string, through?: string): Promise<History>;
@@ -1254,6 +1258,7 @@ export class WorkflowEngine {
         detail: "첫 작업을 기다리고 있습니다.",
         repositories: [],
         isolation: "undecided",
+        placement: null,
         worktree: null,
         integration: null,
         pushTargets: [],
@@ -2535,6 +2540,32 @@ export class WorkflowEngine {
       return { ok: true, detail: `${label}로 진행합니다.` };
     });
   }
+  /** A placement choice is valid only while this task is awaiting its first placement. */
+  selectPlacement(id: string, placement: "worktree" | "wait") {
+    return this.serial(async () => {
+      const w = (await this.db()).workflows.find((candidate) => candidate.id === id);
+      if (!w?.plan) return { ok: false, detail: "작업을 찾을 수 없습니다." };
+      if (!capabilities(w).executorSelection) return { ok: false, detail: "연합개발 작업이 아닙니다." };
+      if (w.isolation !== "undecided") return { ok: false, detail: "구현 시작 방법이 이미 정해졌습니다." };
+      if (w.placement?.stage !== "choice" || w.status !== "active" || !w.execute || w.execute.workspaceId)
+        return { ok: false, detail: "구현 시작 방법 선택을 기다리는 상태가 아닙니다." };
+      try {
+        await placeExecutor(w, this.probe, this.port, await this.settings(), await this.placementBlocker(w), placement);
+      } catch (error) {
+        w.status = "error";
+        this.touch(w, String(error));
+        await this.save();
+        return { ok: false, detail: w.detail };
+      }
+      await this.save();
+      const detail = (w.isolation as Workflow["isolation"]) === "worktree" ? "따로 작업 공간에서 시작합니다." : "앞 작업이 끝나면 자동으로 시작합니다.";
+      const snapshot = await this.port.inspect(w.plan.id).catch(() => null);
+      if (snapshot && this.quiet(snapshot))
+        await this.port.send(w.plan.id, `작업 ID: ${w.id}\n${detail}`, `role-workflow-placement:${w.id}`).catch(() => {});
+      await this.advance(w);
+      return { ok: true, detail };
+    });
+  }
   generalTimeline(...args: Parameters<GeneralMode["generalTimeline"]>) {
     return this.generalMode.generalTimeline(...args);
   }
@@ -3000,8 +3031,30 @@ export class WorkflowEngine {
         if (w.status !== "active") return;
       }
       await this.ensureNumber(w);
-      if (role === "execute" && (await placeExecutor(w, this.probe, this.port, await this.settings())))
-        await this.save();
+      if (role === "execute") {
+        const blocker = w.placement || (w.isolation === "undecided" && capabilities(w).executorSelection && current.generation === 1)
+          ? await this.placementBlocker(w) : null;
+        if (await placeExecutor(w, this.probe, this.port, await this.settings(), blocker)) await this.save();
+        if (w.placement) {
+          if (blocker) {
+            w.placement.number = blocker.number;
+            w.placement.title = blocker.title;
+            const detail = w.placement.stage === "choice"
+              ? `구현 시작 방법 선택을 기다립니다: 같은 폴더에서 #${blocker.number} 작업이 진행 중입니다.`
+              : `같은 폴더의 #${blocker.number} ${blocker.title} 작업이 끝나면 #${w.number} 구현을 자동으로 시작합니다.`;
+            if (w.detail !== detail + (w.placement.reason ? ` ${w.placement.reason}` : ""))
+              this.touch(w, detail + (w.placement.reason ? ` ${w.placement.reason}` : ""));
+            await this.save();
+            if (w.placement.stage === "choice" && w.plan && !this.placementCards.has(w.id) && this.port.placementPicker) {
+              await this.port.placementPicker(w.plan.id, w.id, blocker);
+              this.placementCards.add(w.id);
+            }
+            return;
+          }
+          w.placement = null;
+          await this.save();
+        }
+      }
       current.workspaceId = await this.port.create(
         w,
         role,
@@ -3023,6 +3076,7 @@ export class WorkflowEngine {
     if (!pending || pending.stage === "sent" || w.status !== "active") return;
     const member = w[pending.role];
     if (!member) throw new Error("다음 담당 대화가 없습니다.");
+    if (!member.workspaceId) return;
     const snapshot = await this.port.inspect(member.id);
     if (!snapshot || snapshot.archived) throw new Error("다음 담당 대화를 사용할 수 없습니다.");
     if (pending.stage === "sending") return this.confirmDelivery(pending, member);
@@ -3132,6 +3186,20 @@ export class WorkflowEngine {
             .parse((await this.probe?.snapshot(workFolder(w)).catch(() => null)) ?? null);
     }
     return true;
+  }
+  private placementCards = new Set<string>();
+  /** Unlike busyWriter, an unfinished writer between turns still owns this folder. */
+  private async placementBlocker(w: Workflow): Promise<Workflow | null> {
+    const scopes = await this.scopes(w);
+    for (const other of (await this.db()).workflows) {
+      const writer = this.writer(other);
+      if (other.id === w.id || !writer || other.status === "completed" || isFinished(other)) continue;
+      const snapshot = await this.port.inspect(writer.id);
+      if (!snapshot || snapshot.archived) continue;
+      const others = await this.scopes(other);
+      if (scopes.some(left => others.some(right => pathsOverlap(left, right)))) return other;
+    }
+    return null;
   }
   private async busyWriter(w: Workflow): Promise<Workflow | null> {
     const scopes = await this.scopes(w);

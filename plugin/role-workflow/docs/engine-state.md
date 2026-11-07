@@ -56,6 +56,10 @@
 | `asker` | `act`(input), `overrule`, `selectionReady`, `complete` 등 | `record`, `answered`, `redirect`, `chatResume`, 선택 완료. 남아 있으면 메시지 없는 재개를 거부 |
 | `planIssue` | `beside` | `answered`, `prepareResume`(수신 확인) |
 
+### 구현 담당 배치 대기
+
+`placeExecutor`는 첫 배치에서 겹치는 미완료 쓰기 작업이 없으면 `isolation: shared`를 저장합니다. 겹치면 `executorPlacement` 설정에 따라 worktree를 만들거나, 선택 대기(`placement.stage: choice`, isolation undecided), 기다리기(`placement.stage: waiting`, isolation shared)로 남깁니다. worktree를 만들 수 없으면 사유와 함께 기다립니다. `prepareMember`는 대기 중 실행 대화 생성을 보류하고 매번 writer/scopes로 미완료 겹침을 다시 계산합니다. `selectPlacement` RPC는 선택 대기에서만 결정을 저장하고 진행합니다. 겹침이 사라지면 탭을 생성·전달하며, 기존 `clearToExecute`의 실행 중 충돌 보호도 이어서 적용합니다. 기존 shared/worktree 결정과 교체 실행 담당은 다시 선택하지 않습니다.
+
 ## 5. 진입점
 
 | 진입점 | 연결 | 주요 전이 |
@@ -66,7 +70,7 @@
 | `agent.permission.before/after` | `permission`, `permissionResolved` | 선택·모드 질문 |
 | `agent.archive.after` | `archived` | 보관 처리 |
 | 3초 주기 | `tick` → `tidyWorkflow`(푸시 재시도, 일반 전환, quota·transient) → `stepWorkflow`(`observe`/`recover`/`advance`) | |
-| RPC | `control`, `selectExecutor`, `configure`, 관리형 푸시 3종, `setProgress`, `setRepositories`, `archiveFinished`, `list` | |
+| RPC | `control`, `selectExecutor`, `selectPlacement`, `configure`, 관리형 푸시 3종, `setProgress`, `setRepositories`, `archiveFinished`, `list` | |
 
 ## 6. 모듈 구성
 

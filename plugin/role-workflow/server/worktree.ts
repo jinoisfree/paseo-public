@@ -10,44 +10,52 @@ export function workFolder(w: Workflow) {
   return w.isolation === "worktree" && w.worktree ? w.worktree.path : w.cwd;
 }
 
-/**
- * The first executor of a federated task works in its own worktree, cut from the planner's
- * checked-out branch, when the task has a single repository at its folder. The worktree must
- * share the planner's Git directory (the same repository), or nothing is created on it.
- * Returns true when the decision changed and must be saved.
- */
+/** Decide once at the first executor; the engine supplies its existing scope/writer overlap. */
 export async function placeExecutor(
   w: Workflow,
   probe: RepoProbe | null,
   port: WorkflowPort,
   settings: Settings,
+  blocker: { number: number; title: string } | null = null,
+  choice?: "worktree" | "wait",
 ): Promise<boolean> {
   if (w.isolation === "worktree") {
     await checkWorktree(w, probe);
     return false;
   }
   if (w.isolation === "shared") return false;
-  const origin =
-    settings.executorWorktree &&
-    capabilities(w).executorSelection &&
-    !w.repositories.length &&
-    w.execute?.generation === 1 &&
-    port.createWorktree &&
-    probe?.identity
-      ? await probe.identity(w.cwd)
-      : null;
-  if (!origin || !origin.branch || origin.root !== (await resolvedFolder(w.cwd))) {
+  if (!capabilities(w).executorSelection || w.execute?.generation !== 1 || (!blocker && !choice)) {
     w.isolation = "shared";
+    w.placement = null;
     return true;
   }
-  const made = await port.createWorktree!(w, origin.branch, settings.titleMarker);
+  let reason = "";
+  const origin = !w.repositories.length && port.createWorktree && probe?.identity
+    ? await probe.identity(w.cwd) : null;
+  if (w.repositories.length) reason = "여러 저장소를 지정한 작업은 따로 작업 공간을 만들 수 없어 기다립니다.";
+  else if (!port.createWorktree) reason = "현재 연결은 따로 작업 공간 만들기를 지원하지 않아 기다립니다.";
+  else if (!origin) reason = "Git 저장소를 확인할 수 없어 기다립니다.";
+  else if (!origin.branch) reason = "현재 Git 브랜치가 없어 기다립니다.";
+  else if (origin.root !== await resolvedFolder(w.cwd)) reason = "저장소 안의 하위 폴더에서는 따로 작업 공간을 만들 수 없어 기다립니다.";
+  const decision = reason ? "wait" : choice ?? settings.executorPlacement;
+  if (decision === "ask") {
+    w.placement = { stage: "choice", number: blocker!.number, title: blocker!.title, reason: "" };
+    return true;
+  }
+  if (decision === "wait") {
+    w.isolation = "shared";
+    w.placement = { stage: "waiting", number: blocker?.number ?? 0, title: blocker?.title ?? "", reason };
+    return true;
+  }
+  const made = await port.createWorktree!(w, origin!.branch, settings.titleMarker);
   const placed = await probe!.identity!(made.path);
-  if (!placed || placed.common !== origin.common)
+  if (!placed || placed.common !== origin!.common)
     throw new Error(
       `구현 worktree(${made.path})가 작업 저장소와 다른 Git 저장소입니다. worktree를 확인한 뒤 재개하세요.`,
     );
   w.worktree = { path: placed.root, branch: placed.branch, base: placed.head, workspaceId: made.workspaceId };
   w.isolation = "worktree";
+  w.placement = null;
   return true;
 }
 
