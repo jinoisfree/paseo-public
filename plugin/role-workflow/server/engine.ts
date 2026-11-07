@@ -75,6 +75,7 @@ import {
   inspectVerification,
 } from "./artifacts";
 import { resolvedFolder, pathsOverlap } from "./workspaces";
+import { integrateWorktree, placeExecutor, workFolder, worktreeContext } from "./worktree";
 import {
   recordQuotaFailure,
   quotaPauseSchema,
@@ -1209,31 +1210,8 @@ export class WorkflowEngine {
     };
     w.progress = "pushed";
     w.artifactNotice = "";
-    await this.integrateWorktree(w, record);
+    await integrateWorktree(w, this.probe, record);
     await this.queuePushReview(w);
-  }
-  /** After a verified push, the planner's checkout follows only as a fast-forward. */
-  private async integrateWorktree(w: Workflow, record: ManagedPush) {
-    if (w.isolation !== "worktree" || !w.worktree || !this.probe?.identity || !this.probe.fastForward) return;
-    const origin = await this.probe.identity(w.cwd);
-    const target = record.targets.find((t) => origin && t.branch.replace(/^refs\/heads\//, "") === origin.branch);
-    if (!origin || !target) {
-      w.integration = {
-        commit: record.targets[0]?.commit ?? "",
-        ok: false,
-        detail: "작업 폴더의 현재 브랜치와 푸시한 브랜치가 달라 로컬 반영을 건너뛰었습니다.",
-      };
-      return;
-    }
-    if (w.integration?.commit === target.commit && w.integration.ok) return;
-    const result = origin.head === target.commit ? { ok: true, detail: "" } : await this.probe.fastForward(w.cwd, target.commit);
-    w.integration = {
-      commit: target.commit,
-      ok: result.ok,
-      detail: result.ok
-        ? `작업 폴더의 ${origin.branch}를 푸시한 커밋 ${target.commit.slice(0, 12)}로 빨리 감기했습니다.`
-        : `작업 폴더 반영 실패(직접 반영 필요): ${result.detail}`,
-    };
   }
   private async syncManagedPush(w: Workflow) {
     const current = w.managedPush;
@@ -4104,13 +4082,7 @@ export class WorkflowEngine {
         ? `반드시 지킬 사항:\n${remembered.map((text) => `- ${text}`).join("\n")}\n충돌하면 최신 사용자 지시를 우선하세요.\n`
         : "") +
       (w.repositories.length ? `작업 저장소: ${w.repositories.join(", ")}\n` : "") +
-      (w.isolation === "worktree" && w.worktree
-        ? `구현 worktree: ${w.worktree.path} (브랜치 ${w.worktree.branch}, 기준 커밋 ${w.worktree.base}). ` +
-          "구현 담당은 이 폴더에서만 변경하고 이 브랜치에 커밋한다. " +
-          `작업 문서(handoff·impl-report·verdict)는 계획 담당 폴더 ${w.cwd}의 절대 경로를 쓴다. ` +
-          "계획·검증 담당은 이 worktree에서 변경·커밋·시험을 확인하고, 푸시대상 commit에는 이 브랜치의 검증된 전체 커밋을 쓴다. " +
-          "푸시가 끝나면 플러그인이 계획 담당 checkout을 그 커밋으로 빨리 감기(ff-only)한다.\n"
-        : "") +
+      worktreeContext(w) +
       (w.pushTargets.length
         ? `기록된 푸시 대상 (승인 자체가 아님): ${JSON.stringify(w.pushTargets)}\n`
         : "") +
@@ -4154,7 +4126,8 @@ export class WorkflowEngine {
         if (w.status !== "active") return;
       }
       await this.ensureNumber(w);
-      if (role === "execute") await this.placeExecutor(w);
+      if (role === "execute" && (await placeExecutor(w, this.probe, this.port, await this.settings())))
+        await this.save();
       current.workspaceId = await this.port.create(
         w,
         role,
@@ -4388,56 +4361,9 @@ export class WorkflowEngine {
         ? null
         : baselineSchema
             .nullable()
-            .parse((await this.probe?.snapshot(this.workFolder(w)).catch(() => null)) ?? null);
+            .parse((await this.probe?.snapshot(workFolder(w)).catch(() => null)) ?? null);
     }
     return true;
-  }
-  /** Where the executor changes files: its own worktree, or the shared task folder. */
-  private workFolder(w: Workflow) {
-    return w.isolation === "worktree" && w.worktree ? w.worktree.path : w.cwd;
-  }
-  /**
-   * The first executor of a federated task works in its own worktree, cut from the planner's
-   * checked-out branch, when the task has a single repository at its folder. The worktree must
-   * share the planner's Git directory (the same repository), or nothing is created on it.
-   */
-  private async placeExecutor(w: Workflow) {
-    if (w.isolation === "worktree") return this.checkWorktree(w);
-    if (w.isolation === "shared") return;
-    const settings = await this.settings();
-    const origin =
-      settings.executorWorktree &&
-      capabilities(w).executorSelection &&
-      !w.repositories.length &&
-      w.execute?.generation === 1 &&
-      this.port.createWorktree &&
-      this.probe?.identity
-        ? await this.probe.identity(w.cwd)
-        : null;
-    if (!origin || !origin.branch || origin.root !== (await resolvedFolder(w.cwd))) {
-      w.isolation = "shared";
-      await this.save();
-      return;
-    }
-    const made = await this.port.createWorktree!(w, origin.branch, settings.titleMarker);
-    const placed = await this.probe!.identity!(made.path);
-    if (!placed || placed.common !== origin.common)
-      throw new Error(
-        `구현 worktree(${made.path})가 작업 저장소와 다른 Git 저장소입니다. worktree를 확인한 뒤 재개하세요.`,
-      );
-    w.worktree = { path: placed.root, branch: placed.branch, base: placed.head, workspaceId: made.workspaceId };
-    w.isolation = "worktree";
-    await this.save();
-  }
-  private async checkWorktree(w: Workflow) {
-    const tree = w.worktree;
-    const [placed, origin] = tree
-      ? await Promise.all([this.probe?.identity?.(tree.path), this.probe?.identity?.(w.cwd)])
-      : [null, null];
-    if (!tree || !placed || !origin || placed.common !== origin.common)
-      throw new Error(
-        `구현 worktree(${tree?.path ?? "기록 없음"})를 찾을 수 없거나 작업 저장소와 다릅니다. worktree를 복구한 뒤 재개하세요.`,
-      );
   }
   private async busyWriter(w: Workflow): Promise<Workflow | null> {
     const scopes = await this.scopes(w);
@@ -4550,7 +4476,7 @@ export class WorkflowEngine {
     }
     if (!w.baseline) return "";
     try {
-      const text = await this.probe.changes(this.workFolder(w), w.baseline);
+      const text = await this.probe.changes(workFolder(w), w.baseline);
       return text ? `\n\n${text}` : "";
     } catch {
       return "";

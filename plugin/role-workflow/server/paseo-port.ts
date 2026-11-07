@@ -922,3 +922,53 @@ async function limitedUsage(api: PaseoApi) {
     clearTimeout(timer);
   }
 }
+
+/**
+ * Upper bounds for each daemon call. The engine awaits these inside its serial queue, so one
+ * unanswered request used to hold every lifecycle hook for the client's full timeout. A call
+ * that runs out of budget rejects; the engine already treats a failed send as uncertain and
+ * confirms it from history instead of sending again. Calls with their own bounds are omitted.
+ */
+export const CALL_BUDGETS_MS: Partial<Record<keyof WorkflowPort, number>> = {
+  inspect: 20_000,
+  send: 20_000,
+  rename: 20_000,
+  workspaceName: 20_000,
+  projectName: 20_000,
+  generalNotice: 20_000,
+  executorPicker: 20_000,
+  quotaAccount: 20_000,
+  quotaAvailable: 20_000,
+  archiveWorkspace: 30_000,
+  history: 60_000,
+  historicalPush: 60_000,
+  pushAuditHistory: 60_000,
+  archiveInspection: 60_000,
+  create: 120_000,
+  createWorktree: 120_000,
+  createGeneral: 120_000,
+};
+
+export function withCallBudgets(
+  port: WorkflowPort,
+  budgets: Partial<Record<keyof WorkflowPort, number>> = CALL_BUDGETS_MS,
+): WorkflowPort {
+  const bounded: Record<string, unknown> = { ...port };
+  for (const [name, ms] of Object.entries(budgets)) {
+    const call = Reflect.get(port, name);
+    if (typeof call !== "function" || !ms) continue;
+    bounded[name] = (...args: unknown[]) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const expired = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Paseo 응답 시간 초과(${name}, ${Math.round(ms / 1000)}초)`)),
+          ms,
+        );
+      });
+      return Promise.race([Promise.resolve(call.apply(port, args)), expired]).finally(() =>
+        clearTimeout(timer),
+      );
+    };
+  }
+  return bounded as unknown as WorkflowPort;
+}

@@ -7,6 +7,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { WorkflowEngine } from "../server/engine.ts";
 import { createRepoProbe } from "../server/git.ts";
+import { integrateWorktree } from "../server/worktree.ts";
 
 const run = promisify(execFile);
 const git = (cwd, ...args) =>
@@ -177,7 +178,7 @@ test("after a verified push the planner's checkout fast-forwards only when it is
   await git(w.worktree.path, "commit", "-q", "-m", "feature");
   const commit = await git(w.worktree.path, "rev-parse", "HEAD");
   const record = { targets: [{ repository: w.worktree.path, remote: "origin", branch: "main", commit }] };
-  await f.engine["integrateWorktree"](w, record);
+  await integrateWorktree(w, createRepoProbe(), record);
   assert.equal(w.integration.ok, true, w.integration.detail);
   assert.equal(await git(f.repo, "rev-parse", "HEAD"), commit);
   assert.match(w.integration.detail, /빨리 감기/);
@@ -187,13 +188,13 @@ test("after a verified push the planner's checkout fast-forwards only when it is
   const local = await git(f.repo, "rev-parse", "HEAD");
   await git(w.worktree.path, "commit", "-q", "--allow-empty", "-m", "second");
   const second = await git(w.worktree.path, "rev-parse", "HEAD");
-  await f.engine["integrateWorktree"](w, { targets: [{ ...record.targets[0], commit: second }] });
+  await integrateWorktree(w, createRepoProbe(), { targets: [{ ...record.targets[0], commit: second }] });
   assert.equal(w.integration.ok, false);
   assert.match(w.integration.detail, /직접 반영 필요/);
   assert.equal(await git(f.repo, "rev-parse", "HEAD"), local);
 
   // A push to another branch leaves the checkout alone.
-  await f.engine["integrateWorktree"](w, { targets: [{ ...record.targets[0], branch: "release", commit: second }] });
+  await integrateWorktree(w, createRepoProbe(), { targets: [{ ...record.targets[0], branch: "release", commit: second }] });
   assert.match(w.integration.detail, /브랜치와 푸시한 브랜치가 달라/);
   assert.equal(await git(f.repo, "rev-parse", "HEAD"), local);
 });

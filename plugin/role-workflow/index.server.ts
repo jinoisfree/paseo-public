@@ -18,7 +18,7 @@ import { WorkflowEngine } from "./server/engine";
 import { permissionCommands, PUSH_DENIED_MESSAGE, pushGuardEnv, runsGitPush } from "./server/push-guard";
 import { createRepoProbe } from "./server/git";
 import { createWorkspacePins } from "./server/workspace-pins";
-import { createPort, readCompletedTurn } from "./server/paseo-port";
+import { createPort, readCompletedTurn, withCallBudgets } from "./server/paseo-port";
 import {
   status,
   configure,
@@ -45,10 +45,10 @@ export default function contribute(server: PluginServerContext) {
   let api: PaseoApi | null = null;
   let fatal: string | null = null;
   const pins = createWorkspacePins(process.env.PASEO_HOME ?? path.join(homedir(), ".paseo"));
-  const port = createPort(() => {
+  const port = withCallBudgets(createPort(() => {
     if (!api) throw new Error("Paseo 연결을 기다리고 있습니다.");
     return api;
-  }, pins);
+  }, pins));
   const directory =
     process.env.PASEO_ROLE_WORKFLOW_STATE_DIR ??
     path.join(process.env.PASEO_HOME ?? path.join(homedir(), ".paseo"), "role-workflow");
