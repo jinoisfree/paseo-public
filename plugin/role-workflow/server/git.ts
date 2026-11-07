@@ -1,3 +1,4 @@
+import { readData } from "./data-records";
 import { execFile } from "node:child_process";
 import { readdir, lstat, stat } from "node:fs/promises";
 import path from "node:path";
@@ -5,6 +6,8 @@ import { promisify } from "node:util";
 import type { PushTarget } from "../shared/artifacts";
 import { resolvedFolder } from "./workspaces";
 import { gitEnvironment } from "./git-environment";
+
+export class CleanupQueryLimitError extends Error {}
 
 export interface Baseline {
   head: string;
@@ -53,7 +56,7 @@ async function git(cwd: string, args: string[]): Promise<string> {
   const { stdout } = await execute("git", ["-c", "core.fsmonitor=false", ...args], {
     cwd,
     timeout: 5000,
-    maxBuffer: 1024 * 1024,
+    maxBuffer: 32 * 1024 * 1024,
     // Agents run git in the same folder; a status refresh must not take the index lock.
     env: gitEnvironment(),
   });
@@ -77,7 +80,7 @@ async function dirty(run: typeof git, cwd: string) {
   const rows: { code: string; file: string }[] = [];
   let incomplete = false;
   for (let index = 0; index < entries.length; index++) {
-    const entry = entries[index];
+    const entry = readData(entries, index);
     if (entry.length < 4) continue;
     if (rows.length === ROWS) {
       incomplete = true;
@@ -257,14 +260,21 @@ export function createRepoProbe(run: typeof git = git): RepoProbe {
         if (flags.split("\0").some(row => /^[a-zS]/.test(row))) hazards.push("assume-unchanged 또는 skip-worktree 파일이 있습니다");
         if (modules.split("\n").some(row => /^[+\-U]/.test(row))) hazards.push("submodule 상태가 기준과 다릅니다");
         const hashes = [...new Set(reflog.split(/\s+/).filter(Boolean))];
-        if (hashes.length > 1000) return null;
-        for (const hash of hashes) {
-          const included = await this.isAncestor!(cwd, hash, integrated);
-          if (included === null) return null;
-          if (!included) { hazards.push("반영되지 않은 worktree HEAD reflog 커밋이 있습니다"); break; }
-        }
+        if (hashes.length > 2000) throw new CleanupQueryLimitError("HEAD reflog가 2000개를 넘어 전체 포함 여부를 확인하지 못했습니다");
+        if (!hashes.every(hash => /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(hash))) return null;
+        if (hashes.length && (await run(cwd, ["rev-list", "--max-count=1", ...hashes, "--not", integrated, "--"])).trim())
+          hazards.push("반영되지 않은 worktree HEAD reflog 커밋이 있습니다");
+        // Git itself enters each initialized module, avoiding ambiguous path parsing.
+        const submodules = await run(cwd, ["submodule", "foreach", "--quiet", "--recursive",
+          'git -c core.fsmonitor=false status --porcelain --untracked-files=all && git log --branches --not --remotes --oneline -1 && git log HEAD --not --remotes --oneline -1']);
+        if (submodules.trim()) hazards.push("초기화된 submodule에 미커밋 변경 또는 원격에 없는 커밋이 있습니다");
         return hazards;
-      } catch { return null; }
+      } catch (error) {
+        if (error instanceof CleanupQueryLimitError) throw error;
+        if ((error as { code?: unknown }).code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER")
+          throw new CleanupQueryLimitError("Git 안전 검사 출력이 32MB를 넘어 전체 상태를 확인하지 못했습니다");
+        return null;
+      }
     },
     async fastForward(cwd, commit) {
       if (!/^[a-f0-9]{40,64}$/.test(commit)) return { ok: false, detail: "전체 커밋 해시가 아닙니다." };

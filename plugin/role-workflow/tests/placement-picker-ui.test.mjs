@@ -13,7 +13,7 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { PlacementPickerCard } from './client/placement-picker';
 window.__calls=[];window.__fail=false;
-window.__choose=async input=>{window.__calls.push(input);return {ok:!window.__fail,detail:window.__fail?'이미 정해졌습니다.':input.placement==='wait'?'앞 작업이 끝나면 자동으로 시작합니다.':'따로 작업 공간에서 시작합니다.'};};
+window.__choose=async input=>{window.__calls.push(structuredClone(input));return {ok:!window.__fail,detail:window.__fail?'이미 정해졌습니다.':input.placement==='wait'?'앞 작업이 끝나면 자동으로 시작합니다.':'따로 작업 공간에서 시작합니다.'};};
 createRoot(document.getElementById('root')).render(<PlacementPickerCard item={{data:{workflowId:'task',number:7,title:'기존 작업'}}} theme={{colors:{foreground:'#111',foregroundMuted:'#555',border:'#bbb'}}}/>);
 `, resolveDir: root, loader: "tsx" },
     bundle: true, write: false, platform: "browser", format: "iife", jsx: "automatic",

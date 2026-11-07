@@ -1,3 +1,4 @@
+import { installLifecycle } from "./lifecycle-fixture.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -45,18 +46,18 @@ async function fixture(t, { defaultPins = false } = {}) {
     }),
     archiveWorkspace: async id => {
       assert.equal(id, "tree", "the planner workspace must never be archived by cleanup");
-      calls.push(id); spaces.delete(id); agents.get("E").archived = true;
+      calls.push(structuredClone(id)); spaces.delete(id); agents.get("E").archived = true;
     },
     pushReview: {
       get: async id => spaces.has(id) ? { pinnedAt: pins.get(id) ?? null } : null,
       pin: async id => {
-        pinCalls.push(id);
+        pinCalls.push(structuredClone(id));
         const at = `plugin-${pinCalls.length}`;
         pins.set(id, at);
         return at;
       },
       unpin: async (id, expectedPinAt) => {
-        unpinCalls.push({ id, expectedPinAt });
+        unpinCalls.push(structuredClone({ id, expectedPinAt }));
         if (pins.get(id) !== expectedPinAt) return false;
         pins.delete(id);
         return true;
@@ -69,14 +70,14 @@ async function fixture(t, { defaultPins = false } = {}) {
       agents.set(m.id, { ...agents.get("P"), id: m.id, config: m.config });
       return "plan";
     },
-    placementPicker: async (agentId, workflowId, blocker, generation) => cards.push({ agentId, workflowId, blocker, generation }),
+    placementPicker: async (agentId, workflowId, blocker, generation) => cards.push(structuredClone({ agentId, workflowId, blocker, generation })),
     createWorktree: async () => { throw new Error("not selected in this test"); },
     send: async () => {}, quotaAccount: async () => null, quotaAvailable: async () => null,
   };
   const file = path.join(state, "state.json"), probe = createRepoProbe();
   let record;
   const runner = { read: async () => structuredClone(record), history: async () => [], isRunning: () => false };
-  let engine = new WorkflowEngine(file, port, undefined, probe, () => now, runner);
+  let engine = new WorkflowEngine(file, installLifecycle(port), undefined, probe, () => now, runner);
   await engine.configure({ ...await engine.settings(), autoArchivePushed: false, ...(defaultPins ? {} : { autoPinPushed: false, autoPinStarted: false }), titleMarker: false, autoResumeQuota: false, autoResumeTransient: false });
   const id = await engine.enroll(agents.get("P"), config, {}, "federated", true, 5);
   await engine.selectExecutor(id, { provider: "codex", model: "test", thinking: "" });
@@ -97,7 +98,7 @@ async function fixture(t, { defaultPins = false } = {}) {
     get w() { return w; }, get engine() { return engine; },
     run: () => engine.worktreeCleanup.run(w),
     advance: (ms = CLEANUP_RETRY_MS + 1) => { now += ms; },
-    restart: async () => { await engine.save(); await engine.close(); engine = new WorkflowEngine(file, port, undefined, probe, () => now, runner); await engine.tick(); w = engine.database.workflows[0]; },
+    restart: async () => { await engine.save(); await engine.close(); engine = new WorkflowEngine(file, installLifecycle(port), undefined, probe, () => now, runner); await engine.tick(); w = engine.database.workflows[0]; },
   };
 }
 
@@ -544,19 +545,22 @@ test("AC-101/AC-104/R-1: legacy queued executor pins stay excluded and retire af
 
 
 for (const failure of ["missing directory", "identity mismatch"])
-test(`AC-205 R-3: three consecutive permanent ${failure} errors stop cleanup durably`, async t => {
+test(`AC-205 R-3: three consecutive permanent ${failure} errors need ten minutes before stopping durably`, async t => {
   const f = await fixture(t);
   if (failure === "missing directory") await rm(f.tree, { recursive: true });
   else { const identify = f.probe.identity; f.probe.identity = async cwd => ({ ...await identify(cwd), common: cwd }); }
   for (let i = 1; i <= 3; i++) {
     await f.run();
     assert.equal(f.w.worktreeCleanup.permanentErrors, i);
-    assert.equal(f.w.worktreeCleanup.stage, i === 3 ? "failed" : "pending");
+    assert.equal(f.w.worktreeCleanup.stage, "pending");
     assert.equal(f.w.worktreeCleanup.attempts, 0);
   }
+  f.advance(10 * 60_000);
+  await f.run();
+  assert.equal(f.w.worktreeCleanup.stage, "failed");
   assert.match(f.w.detail, /직접 보관하세요/);
   await f.restart();
-  assert.equal(f.w.worktreeCleanup.permanentErrors, 3);
+  assert.equal(f.w.worktreeCleanup.permanentErrors, 4);
   assert.deepEqual(f.calls, []);
 });
 
@@ -657,7 +661,7 @@ test("AC-205 D-4: engine recreates generation 2 through the real port with a sta
   let made = false;
   const folder = path.join(f.dir, "generation-2");
   const native = createPort(() => ({ workspaces: { create: async input => {
-    requests.push(input);
+    requests.push(structuredClone(input));
     if (!made) {
       made = true;
       await git(f.repo, "worktree", "add", "-q", "-b", input.source.branchName, folder, input.source.baseBranch);
@@ -725,4 +729,33 @@ test("AC-202: the real engine gate rejects archive requests without this cleanup
   await f.run();
   assert.equal(f.w.worktreeCleanup.stage, "done");
   assert.equal((await f.engine.worktreeCleanup.verifyForArchive(f.w)).stage, "pending", "proof cannot be reused after archive");
+});
+
+test("AC-205 N-3: Git query output limits remain pending with a reason and no archive attempt", async t => {
+  const f = await fixture(t);
+  f.probe.cleanupHazards = async () => { throw Error("Git 안전 검사 출력이 32MB를 넘어 전체 상태를 확인하지 못했습니다"); };
+  for (let i = 0; i < 4; i++) { await f.run(); f.advance(); }
+  assert.equal(f.w.worktreeCleanup.stage, "pending");
+  assert.equal(f.w.worktreeCleanup.attempts, 0);
+  assert.equal(f.w.worktreeCleanup.permanentErrors, 0);
+  assert.match(f.w.worktreeCleanup.detail, /32MB.*확인하지 못/);
+  assert.deepEqual(f.calls, []);
+});
+
+test("AC-205 N-2: elapsed ten minutes alone is insufficient and legacy failures start a fresh observation window", async t => {
+  const f = await fixture(t);
+  await rm(f.tree, { recursive: true });
+  f.w.worktreeCleanup = { stage: "failed", attempts: 0, at: new Date(0).toISOString(), detail: "old", evidenceFiles: null,
+    permanentError: "worktree 디렉터리가 없습니다", permanentErrors: 3, permanentSince: null };
+  await f.run();
+  assert.equal(f.w.worktreeCleanup.stage, "pending");
+  assert.equal(f.w.worktreeCleanup.permanentErrors, 1);
+  f.advance(10 * 60_000);
+  await f.run();
+  assert.equal(f.w.worktreeCleanup.stage, "pending");
+  assert.equal(f.w.worktreeCleanup.permanentErrors, 2);
+  await f.run();
+  assert.equal(f.w.worktreeCleanup.stage, "failed");
+  assert.equal(f.w.worktreeCleanup.permanentErrors, 3);
+  assert.deepEqual(f.calls, []);
 });

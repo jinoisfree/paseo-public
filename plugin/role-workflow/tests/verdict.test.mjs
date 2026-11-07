@@ -52,7 +52,7 @@ async function fixture(t, { contract = 2, mode = "federated", legacy = false } =
     rename: async () => {},
     history: async () => ({ text: "", key: "", messageIds: [], failed: null }),
     send: async (id, prompt, messageId) => {
-      sent.push({ id, prompt, messageId });
+      sent.push(structuredClone({ id, prompt, messageId }));
       agents.get(id).status = "running";
     },
     create: async (w, role, member) => {

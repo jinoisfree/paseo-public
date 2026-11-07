@@ -23,9 +23,9 @@ async function fixture(t) {
     quotaAccount: async () => null,
     quotaAvailable: async () => null,
     create: async () => "ws",
-    modePicker: async (agentId, workflowId) => cards.push({ agentId, workflowId }),
+    modePicker: async (agentId, workflowId) => cards.push(structuredClone({ agentId, workflowId })),
     executorPicker: async (agentId, workflowId) => pickers.push({ agentId, workflowId }),
-    send: async (id, prompt, messageId) => sent.push({ id, prompt, messageId }),
+    send: async (id, prompt, messageId) => sent.push(structuredClone({ id, prompt, messageId })),
   };
   const engine = new WorkflowEngine(file, port);
   t.after(async () => {

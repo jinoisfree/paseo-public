@@ -32,7 +32,7 @@ test("notifier filters expiration, preserves token file and uses attention paylo
     home,
     now: () => Date.parse("2026-01-01"),
     fetch: async (url, init) => {
-      requests.push({ url, init });
+      requests.push(structuredClone({ url, init }));
       return new Response(JSON.stringify({ data: [{ status: "ok" }] }), { status: 200 });
     },
   });
@@ -125,7 +125,7 @@ test("postJson sends the body over node:http(s) and reports status, json and soc
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
-      seen.push({ method: req.method, type: req.headers["content-type"], body });
+      seen.push(structuredClone({ method: req.method, type: req.headers["content-type"], body }));
       if (req.url === "/slow") return; // never answers; the abort signal must end it
       res.statusCode = req.url === "/fail" ? 500 : 200;
       res.end(JSON.stringify({ data: [{ status: "ok" }] }));

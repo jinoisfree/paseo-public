@@ -1,3 +1,4 @@
+import { installLifecycle } from "./lifecycle-fixture.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
@@ -291,6 +292,7 @@ async function fixture(
       {
         id,
         pinnedAt: null,
+        cwd: dir,
         archiving: false,
         status: "done",
       },
@@ -320,7 +322,7 @@ async function fixture(
     },
   };
   const probe = { snapshot: async () => null, changes: async () => "", pushed: async () => true };
-  let engine = new WorkflowEngine(file, port, async (event) => events.push(event), probe);
+  let engine = new WorkflowEngine(file, installLifecycle(port), async (event) => events.push(event), probe);
   const id = await engine.enroll(agents.get("planner"), { provider: "claude" }, {}, mode);
   await engine.setProgress(1, progress);
   await engine.close();
@@ -335,7 +337,7 @@ async function fixture(
   // Tests only: isolated state fixture. Operational state is never edited.
   db.workflows[0].status = db.workflows[0].notifiedStatus = status;
   await writeFile(file, JSON.stringify(db));
-  engine = new WorkflowEngine(file, port, async (event) => events.push(event));
+  engine = new WorkflowEngine(file, installLifecycle(port), async (event) => events.push(event));
   t.after(async () => {
     await engine.close();
     await rm(dir, { recursive: true, force: true });
@@ -502,7 +504,7 @@ test("old state loads default archive settings and an empty archive list", async
   delete db.settings.autoArchivePushed;
   delete db.settings.archiveAfterDays;
   await writeFile(f.file, JSON.stringify(db));
-  const engine = new WorkflowEngine(f.file, f.port);
+  const engine = new WorkflowEngine(f.file, installLifecycle(f.port));
   t.after(() => engine.close());
   assert.equal((await engine.settings()).autoArchivePushed, true);
   assert.equal((await engine.settings()).archiveAfterDays, 3);
@@ -524,7 +526,7 @@ test("archive retains only the most recent 500 entries and survives a new engine
     archivedAt: new Date(Date.now() - 86400000 - i * 1000).toISOString(),
   }));
   await writeFile(f.file, JSON.stringify(db));
-  const engine = new WorkflowEngine(f.file, f.port);
+  const engine = new WorkflowEngine(f.file, installLifecycle(f.port));
   t.after(() => engine.close());
   await engine.archiveFinished(true, [f.id]);
   const state = await engine.list();

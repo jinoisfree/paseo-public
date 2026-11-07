@@ -17,9 +17,9 @@ async function fixture(t,{mode="federated",provider="codex",ask=false,options=[{
   const port={inspect:async id=>agents.get(id)??null,history:async id=>histories.get(id)??{text:"",key:"",failed:null,messageIds:[]},
     models:async()=>{modelCalls++;if(catalogFailure)throw Error("catalog offline");return models;},
     projectName:async()=>"Project",workspaceName:async()=>"Task",rename:async()=>{},quotaAccount:async()=>null,quotaAvailable:async()=>null,
-    create:async(w,role,m)=>{created.push({w,role,m});agents.set(m.id,{...agents.get("A"),id:m.id,config:m.config});return "ws";},
+    create:async(w,role,m)=>{created.push(structuredClone({w,role,m}));agents.set(m.id,{...agents.get("A"),id:m.id,config:m.config});return "ws";},
     executorPicker:async(agentId,workflowId)=>{pickers.push([agentId,workflowId]);},
-    send:async(id,prompt,messageId)=>{sent.push({id,prompt,messageId});agents.get(id).status="running";}};
+    send:async(id,prompt,messageId)=>{sent.push(structuredClone({id,prompt,messageId}));agents.get(id).status="running";}};
   let engine=new WorkflowEngine(file,port);
   await engine.configure({...await engine.settings(),askExecutorModel:ask,autoPinStarted:false,autoArchivePushed:false,titleMarker:false,autoResumeQuota:false,autoResumeTransient:false});
   const id=await engine.enroll(agents.get("A"),original,{},mode,true,contract);

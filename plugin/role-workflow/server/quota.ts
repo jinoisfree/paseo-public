@@ -1,3 +1,4 @@
+import { readData } from "./data-records";
 import { z } from "zod";
 import type { PaseoProviderUsageResult } from "@getpaseo/client";
 type ProviderUsage = PaseoProviderUsageResult["providers"][number];
@@ -20,7 +21,7 @@ export const QUOTA_CHECK_MS = 60_000;
 export const QUOTA_ACCOUNT_SETTLE_MS = 120_000;
 export const QUOTA_MAX_AGE = 14 * 24 * 60 * 60_000;
 export function quotaDelay(attempts: number): number {
-  return [5, 15, 30, 60][Math.min(Math.max(attempts - 1, 0), 3)] * 60_000;
+  return readData([5, 15, 30, 60], Math.min(Math.max(attempts - 1, 0), 3)) * 60_000;
 }
 
 /** Only messages observed in Codex failures or the installed Claude SDK are accepted. */

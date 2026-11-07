@@ -1,3 +1,4 @@
+import { readData } from "./data-records";
 import path from "node:path";
 import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
 import { parseLoggedPush } from "./shell-push-log";
@@ -97,9 +98,9 @@ function pushArguments(args: string[], output: string, known: Map<string, Remote
   let index = 1;
   while (
     ["-u", "--set-upstream", "-f", "--force", "--force-with-lease", "--porcelain"].includes(
-      args[index],
+      readData(args, index),
     ) ||
-    args[index]?.startsWith("--force-with-lease=")
+    readData(args, index)?.startsWith("--force-with-lease=")
   )
     index++;
   const [remote, ref, ...extra] = args.slice(index);

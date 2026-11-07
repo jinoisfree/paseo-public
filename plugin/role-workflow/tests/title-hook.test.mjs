@@ -77,7 +77,7 @@ test("model RPC lists selectable models and thinking defaults, returns failures 
   try {
     const calls = [];
     const listModels = async (...args) => {
-      calls.push(args);
+      calls.push(structuredClone(args));
       return {
         models: [
           {
@@ -162,7 +162,7 @@ test("both initial providers plan, managed executors keep their role, and model 
     paseo: {
       providers: {
         listModels: async (provider) => {
-          calls.push(provider);
+          calls.push(structuredClone(provider));
           return { models: [{ id: "m", label: "Model", isDefault: true }] };
         },
       },

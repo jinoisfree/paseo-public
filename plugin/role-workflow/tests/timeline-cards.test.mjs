@@ -12,7 +12,7 @@ const cases = [
 for (const [kind, data, keys] of cases)
 test(`AC-204: ${kind} appends only its strict shared data keys; unknown keys append zero times`, async () => {
   const calls = [];
-  const api = { agents: { ref: () => ({ timeline: { append: async item => calls.push(item) } }) } };
+  const api = { agents: { ref: () => ({ timeline: { append: async item => calls.push(structuredClone(item)) } }) } };
   await appendTimelineCard(api, "P", "card", kind, data);
   assert.deepEqual(Object.keys(calls[0].data).sort(), keys);
   assert.deepEqual(calls[0].data, data);
@@ -26,7 +26,7 @@ test(`AC-204: ${kind} appends only its strict shared data keys; unknown keys app
 });
 test("AC-204: the actual placement port rejects an oversized blocker before timeline append", async () => {
   const calls = [];
-  const port = createPort(() => ({ agents: { ref: () => ({ timeline: { append: async item => calls.push(item) } }) } }));
+  const port = createPort(() => ({ agents: { ref: () => ({ timeline: { append: async item => calls.push(structuredClone(item)) } }) } }));
   await assert.rejects(port.placementPicker("P", "w", { number: 2, title: "other", env: "private" }));
   assert.deepEqual(calls, []);
   assert.deepEqual(Object.keys(timelineCardSchemas).sort(), ["executor-picker", "general-agent", "mode-picker", "placement-picker"]);
@@ -35,7 +35,7 @@ test("AC-204: the actual placement port rejects an oversized blocker before time
 
 test("AC-204: actual mode, executor, placement and general ports append the same strict card payloads", async () => {
   const calls = [];
-  const port = createPort(() => ({ agents: { ref: () => ({ timeline: { append: async item => calls.push(item) } }) } }));
+  const port = createPort(() => ({ agents: { ref: () => ({ timeline: { append: async item => calls.push(structuredClone(item)) } }) } }));
   await port.modePicker("P", "w");
   await port.executorPicker("P", "w");
   await port.placementPicker("P", "w", { number: 2, title: "other" });

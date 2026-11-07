@@ -36,7 +36,7 @@ function fixture() {
         setTitle: async (name) => {
           if (fail) throw Error("temporary rename failure");
           rows.find((row) => row.id === id).name = name;
-          renamed.push({ id, name });
+          renamed.push(structuredClone({ id, name }));
         },
       }),
     },

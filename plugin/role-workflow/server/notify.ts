@@ -1,3 +1,4 @@
+import { readData } from "./data-records";
 // Adapted for paseo-public: phone notifications require explicit user configuration.
 import { readFile } from "node:fs/promises";
 import { request as httpsRequest } from "node:https";
@@ -128,7 +129,7 @@ export function createNotifier(options: Options = {}) {
         serverId,
         workspaceId: event.workspaceId,
         agentId: event.agentId,
-        reason: { permission: "permission", stopped: "error", completed: "finished", waiting: "permission" }[event.kind],
+        reason: readData({ permission: "permission", stopped: "error", completed: "finished", waiting: "permission" }, event.kind),
       };
       for (let i = 0; i < active.length; i += 100) {
         try {

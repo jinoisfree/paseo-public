@@ -31,7 +31,7 @@ async function fixture(t, mode, contract = mode === 'general' ? 3 : 2) {
       return 'ws';
     },
     send: async (id, prompt, messageId) => {
-      sent.push({ id, prompt, messageId });
+      sent.push(structuredClone({ id, prompt, messageId }));
       if (failSend) throw Error('injected lost acknowledgement');
       agents.get(id).status = 'running';
     },

@@ -106,7 +106,7 @@ async function hooks(t, settings) {
     paseo: {
       agents: {
         ref: (id) => ({
-          respondToPermission: async (input) => responses.push({ id, input }),
+          respondToPermission: async (input) => responses.push(structuredClone({ id, input })),
           refresh: async () => null,
         }),
       },

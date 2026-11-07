@@ -11,8 +11,8 @@ async function fixture(t,{provider="claude",used=499999,max=1000000}={}){
  const agent={id:"A",workspaceId:"ws",projectId:"p",cwd:dir,title:"Task",status:"idle",archived:false,permission:false,usage:used/max,contextUsage:{contextWindowUsedTokens:used,contextWindowMaxTokens:max},config};
  const compacted=[],sent=[],created=[],pending=[];let failure=false,hold=false;let history={text:"",key:"",messageIds:[],failed:null};
  const port={inspect:async()=>agent,history:async()=>history,projectName:async()=>"Project",workspaceName:async()=>"Task",rename:async()=>{},
-  compact:async(id,messageId)=>{compacted.push({id,messageId});if(failure)throw Error("Failed to compact context: injected native failure");if(hold)await new Promise(r=>pending.push(r));},
-  send:async(...args)=>sent.push(args),create:async(...args)=>{created.push(args);return "replacement";},quotaAccount:async()=>null,quotaAvailable:async()=>null};
+  compact:async(id,messageId)=>{compacted.push(structuredClone({id,messageId}));if(failure)throw Error("Failed to compact context: injected native failure");if(hold)await new Promise(r=>pending.push(r));},
+  send:async(...args)=>sent.push(structuredClone(args)),create:async(...args)=>{created.push(structuredClone(args));return "replacement";},quotaAccount:async()=>null,quotaAvailable:async()=>null};
  let engine=new WorkflowEngine(file,port);await engine.configure({...await engine.settings(),threshold:0.7,codexCompression:"native",claudeCompression:{threshold:0.55,oneMillionTokenLimit:500000},autoArchivePushed:false,autoPinStarted:false,titleMarker:false});
  const id=await engine.enroll(agent,config,{},"general",true,4);
  t.after(async()=>{for(const done of pending)done();await engine.close();await rm(dir,{recursive:true,force:true});});
@@ -80,7 +80,7 @@ test("unknown or stale maintenance history never authorizes a retry send",async 
 
 test("failure after user pause remains paused and has an explicit reachable recovery path",async t=>{
  const f=await fixture(t,{used:500000});let reject;
- f.port.compact=async(id,messageId)=>{f.compacted.push({id,messageId});await new Promise((_,r)=>reject=r);};
+ f.port.compact=async(id,messageId)=>{f.compacted.push(structuredClone({id,messageId}));await new Promise((_,r)=>reject=r);};
  await f.finish();await f.engine.control(f.id,"pause");reject(Error("Failed to compact context: native failure"));await f.settle();assert.equal((await f.state()).status,"paused");
  await f.engine.control(f.id,"resume");assert.equal((await f.state()).status,"error");assert.equal((await f.engine.list()).workflows[0].compactionRecovery,true);
  await f.engine.maintenanceEnded("A","manual-after-pause",true,"user-manual");await f.engine.control(f.id,"retry_compaction");assert.equal((await f.state()).status,"active");assert.equal(f.compacted.length,1);assert.equal(f.sent.length,0);

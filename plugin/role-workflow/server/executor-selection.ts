@@ -1,19 +1,20 @@
+import { unknownData, readData, writeData } from "./data-records";
 import { EXECUTOR_QUESTIONS, type ExecutorSelection, type SelectionField, type SelectionStage } from "../shared/executor-selection";
 import type { ExecutorModel } from "./protocol";
 import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
 
 const stages = Object.keys(EXECUTOR_QUESTIONS) as SelectionStage[];
 export function selectionQuestions(input: unknown): SelectionField[] {
-  const questions = input && typeof input === "object" ? Reflect.get(input, "questions") : null;
+  const questions = input && typeof input === "object" ? unknownData(input, "questions") : null;
   if (!Array.isArray(questions) || !questions.length || questions.length > 3) return [];
   const fields: SelectionField[] = [];
   for (const [index, question] of questions.entries()) {
     const stage = stages.find(stage => {
-      const q = EXECUTOR_QUESTIONS[stage];
+      const q = readData(EXECUTOR_QUESTIONS, stage);
       return question?.question === q.question || question?.title === q.question;
     });
     if (!stage || fields.some(x => x.stage === stage)) return [];
-    const q = EXECUTOR_QUESTIONS[stage];
+    const q = readData(EXECUTOR_QUESTIONS, stage);
     fields.push({ stage, keys: [...new Set([q.question, q.header, `Question ${index + 1}`,
       ...(typeof question.id === "string" ? [question.id] : [])])] });
   }
@@ -23,13 +24,13 @@ export function selectionQuestions(input: unknown): SelectionField[] {
 }
 export function pendingFields(pending: ExecutorSelection["pending"]): SelectionField[] {
   return pending?.fields ?? (pending?.stage ? [{stage: pending.stage,
-    keys: [EXECUTOR_QUESTIONS[pending.stage].question, EXECUTOR_QUESTIONS[pending.stage].header, "Question 1"]}] : []);
+    keys: [readData(EXECUTOR_QUESTIONS, pending.stage).question, readData(EXECUTOR_QUESTIONS, pending.stage).header, "Question 1"]}] : []);
 }
 export function selectionAnswers(input: unknown, fields: SelectionField[]): Partial<Record<SelectionStage, string>> {
-  const answers = input && typeof input === "object" ? Reflect.get(input, "answers") : null;
+  const answers = input && typeof input === "object" ? unknownData(input, "answers") : null;
   if (!answers || typeof answers !== "object") return {};
   return Object.fromEntries(fields.flatMap(field => {
-    const values = field.keys.filter(key => Object.hasOwn(answers, key)).map(key => Reflect.get(answers, key));
+    const values = field.keys.filter(key => Object.hasOwn(answers, key)).map(key => unknownData(answers, key));
     return values.length && values.every(x => typeof x === "string" && x === values[0]) ? [[field.stage, values[0]]] : [];
   }));
 }
@@ -45,10 +46,10 @@ export function timelineSelections(items: readonly AgentTimelineItem[]) {
     const fields: SelectionField[] = [];
     const values: Partial<Record<SelectionStage, string>> = {};
     for (const block of blocks) {
-      const stage = stages.find(stage => block.startsWith(EXECUTOR_QUESTIONS[stage].question + "\n"));
+      const stage = stages.find(stage => block.startsWith(readData(EXECUTOR_QUESTIONS, stage).question + "\n"));
       if (!stage || fields.some(x => x.stage === stage)) return [];
-      fields.push({stage, keys:[EXECUTOR_QUESTIONS[stage].question]});
-      values[stage] = block.slice(EXECUTOR_QUESTIONS[stage].question.length + 1).trim();
+      fields.push({stage, keys:[readData(EXECUTOR_QUESTIONS, stage).question]});
+      writeData(values, stage, block.slice(readData(EXECUTOR_QUESTIONS, stage).question.length + 1).trim());
     }
     return fields.length ? [{id:item.callId, fields, values}] : [];
   });

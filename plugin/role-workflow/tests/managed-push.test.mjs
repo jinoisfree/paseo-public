@@ -52,7 +52,7 @@ async function fixture(t) {
   const target = { repository, remote: "origin", branch: "main", commit: hash };
   const calls = [];
   const driver = async (cwd, args) => {
-    calls.push({ cwd, args });
+    calls.push(structuredClone({ cwd, args }));
     return git(cwd, args);
   };
   const runner = new ManagedPushRunner(records, driver);

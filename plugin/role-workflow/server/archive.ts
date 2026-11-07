@@ -10,6 +10,7 @@ export interface ArchiveConversation {
   lastActivityAt: string | null;
 }
 export interface ArchiveWorkspace {
+  cwd?: string;
   id: string;
   pinnedAt?: string | null;
   archiving: boolean;

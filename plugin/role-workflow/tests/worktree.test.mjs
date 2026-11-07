@@ -42,22 +42,22 @@ async function fixture(t, { placement = "worktree", overlap = true, foreign = fa
     quotaAccount: async () => null,
     quotaAvailable: async () => null,
     executorPicker: async () => {},
-    placementPicker: async (agentId, workflowId, blocker) => cards.push({ agentId, workflowId, blocker }),
+    placementPicker: async (agentId, workflowId, blocker) => cards.push(structuredClone({ agentId, workflowId, blocker })),
     // Stands in for Paseo: a branch-off worktree from the named branch.
     createWorktree: async (w, baseBranch) => {
-      worktrees.push({ w, baseBranch });
+      worktrees.push(structuredClone({ w, baseBranch }));
       const folder = path.join(dir, "wt");
       if (foreign) return { workspaceId: "wks_foreign", path: other };
       if (worktrees.length === 1) await git(repo, "worktree", "add", "-q", "-b", `role-workflow/${w.number}-x`, folder, baseBranch);
       return { workspaceId: "wks_worktree", path: folder };
     },
     create: async (w, role, m) => {
-      created.push({ w, role, m });
+      created.push(structuredClone({ w, role, m }));
       agents.set(m.id, { ...agents.get("A"), id: m.id, workspaceId: w.isolation === "worktree" ? w.worktree.workspaceId : "ws", status: "idle", config: m.config, cwd: w.isolation === "worktree" ? w.worktree.path : repo });
       return w.isolation === "worktree" ? w.worktree.workspaceId : "ws";
     },
     send: async (id, prompt, messageId) => {
-      sent.push({ id, prompt, messageId });
+      sent.push(structuredClone({ id, prompt, messageId }));
       agents.get(id).status = "running";
     },
   };
@@ -127,7 +127,9 @@ test("AC-03/AC-05: overlapping worktree placement preserves repository, branch a
   assert.equal(f.created[0].role, "execute");
   assert.equal(f.created[0].m.id, w.execute.id);
   assert.equal(f.created[0].w.isolation, "worktree");
-  assert.equal(f.created[0].m.workspaceId, "wks_worktree");
+  assert.equal(f.created[0].m.workspaceId, null, "member is not bound until creation succeeds");
+  assert.equal(f.created[0].w.worktree.workspaceId, "wks_worktree");
+  assert.equal(w.execute.workspaceId, "wks_worktree");
   const prompt = f.sent.findLast((x) => x.id === w.execute.id).prompt;
   assert.match(prompt, new RegExp(`구현 worktree: ${w.worktree.path.replaceAll("/", "\\/")}`));
   assert.match(prompt, /작업 문서\(handoff·impl-report·verdict\)는 계획 담당 폴더 .*의 절대 경로/);
@@ -147,7 +149,9 @@ test("AC-01: without overlap the executor opens beside its planner", async (t) =
   assert.equal(w.isolation, "shared");
   assert.equal(w.worktree, null);
   assert.deepEqual(f.worktrees, []);
-  assert.equal(f.created[0].m.workspaceId, "ws");
+  assert.equal(f.created[0].m.workspaceId, null, "member is not bound until creation succeeds");
+  assert.equal(f.created[0].w.plan.workspaceId, "ws");
+  assert.equal(f.engine.database.workflows.find(x => x.id === f.id).execute.workspaceId, "ws");
   assert.doesNotMatch(f.sent.at(-1).prompt, /구현 worktree:/);
 });
 
@@ -236,7 +240,9 @@ test(`AC-01: ${placement} without overlap creates a shared tab without a card`, 
   const f = await fixture(t, { placement, overlap: false });
   await f.start();
   assert.equal((await f.state()).isolation, "shared");
-  assert.equal(f.created[0].m.workspaceId, "ws");
+  assert.equal(f.created[0].m.workspaceId, null, "member is not bound until creation succeeds");
+  assert.equal(f.created[0].w.plan.workspaceId, "ws");
+  assert.equal(f.engine.database.workflows.find(x => x.id === f.id).execute.workspaceId, "ws");
   assert.equal(f.worktrees.length, 0);
   assert.equal(f.cards.length, 0);
 });
@@ -296,7 +302,9 @@ test(`AC-04: wait keeps instructions queued until the blocker is ${release}`, as
   w = await f.state();
   assert.equal(w.placement, null);
   assert.equal(f.created.length, 1);
-  assert.equal(f.created[0].m.workspaceId, "ws");
+  assert.equal(f.created[0].m.workspaceId, null, "member is not bound until creation succeeds");
+  assert.equal(f.created[0].w.plan.workspaceId, "ws");
+  assert.equal(f.engine.database.workflows.find(x => x.id === f.id).execute.workspaceId, "ws");
   assert.equal(w.pending.stage, "sent");
   assert.equal(f.worktrees.length, 0);
 });
@@ -550,7 +558,7 @@ test("AC-12/AC-14: base inspection uses only read-only Git commands and fails cl
   const { w } = await readyWorktreePush(f);
   const calls = [];
   const probe = createRepoProbe(async (cwd, args) => {
-    calls.push(args);
+    calls.push(structuredClone(args));
     return git(cwd, ...args);
   });
   assert.equal((await checkWorktreeBase(w, probe, w.pushTargets)).ok, true);
@@ -576,7 +584,7 @@ test("AC-02 F-1/F-5/F-6: minimal card payload retries failures and survives rest
     calls++;
     assert.deepEqual(Object.keys(blocker).sort(), ["number", "title"]);
     if (calls === 1) throw new Error("timeline unavailable");
-    f.cards.push({ agentId, workflowId, blocker });
+    f.cards.push(structuredClone({ agentId, workflowId, blocker }));
   };
   await f.start();
   assert.equal((await f.state()).status, "active");
@@ -624,4 +632,21 @@ test("AC-205 F-4: stored baseBranch survives another planner checkout while lega
   assert.equal((await checkWorktreeBase(w, f.probe, w.pushTargets)).ok, true);
   delete w.worktree.baseBranch;
   assert.equal((await checkWorktreeBase(w, f.probe, w.pushTargets)).ok, false);
+});
+
+test("AC-203 N-1: creation records capture title, selected config and workspace before later mutation", async t => {
+  const f = await fixture(t);
+  await f.start();
+  const created = f.created[0];
+  assert.equal(created.w.title, "Task");
+  assert.equal(created.m.config.provider, "codex/builder");
+  assert.equal(created.m.config.thinkingOptionId, "high");
+  assert.equal(created.w.plan.workspaceId, "ws");
+  assert.equal(created.w.worktree.workspaceId, "wks_worktree");
+  assert.equal(created.m.workspaceId, null);
+  const w = f.engine.database.workflows.find(w => w.id === f.id);
+  w.title = "Later title"; w.execute.config.provider = "claude/later"; w.worktree.workspaceId = "later";
+  assert.equal(created.w.title, "Task");
+  assert.equal(created.m.config.provider, "codex/builder");
+  assert.equal(created.w.worktree.workspaceId, "wks_worktree");
 });

@@ -1,3 +1,4 @@
+import { eventItems, type OperationalApi } from "./server/timeline-cards";
 import { SCREEN_SELECTION_PROMPT } from "./server/executor-selection";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import type { PaseoApi, PaseoAgentConfig } from "@getpaseo/client";
@@ -14,10 +15,10 @@ import {
   pushApprovalPrompt,
   titlePrompt,
 } from "./server/protocol";
+import { createWorkspaceAccess } from "./server/workspace-lifecycle";
 import { WorkflowEngine } from "./server/engine";
 import { permissionCommands, PUSH_DENIED_MESSAGE, pushGuardEnv, runsGitPush } from "./server/push-guard";
 import { createRepoProbe } from "./server/git";
-import { createWorkspacePins } from "./server/workspace-pins";
 import { createPort, readCompletedTurn, withCallBudgets } from "./server/paseo-port";
 import {
   status,
@@ -44,13 +45,10 @@ import { folderList } from "./shared/folders";
 import { listFolders } from "./server/folders";
 
 export default function contribute(server: PluginServerContext) {
-  let api: PaseoApi | null = null;
+  let api: OperationalApi | null = null;
   let fatal: string | null = null;
-  const pins = createWorkspacePins(process.env.PASEO_HOME ?? path.join(homedir(), ".paseo"));
-  const port = withCallBudgets(createPort(() => {
-    if (!api) throw new Error("Paseo 연결을 기다리고 있습니다.");
-    return api;
-  }, pins));
+  const access = createWorkspaceAccess(process.env.PASEO_HOME ?? path.join(homedir(), ".paseo"));
+  const port = withCallBudgets(createPort(access.api, access));
   const directory =
     process.env.PASEO_ROLE_WORKFLOW_STATE_DIR ??
     path.join(process.env.PASEO_HOME ?? path.join(homedir(), ".paseo"), "role-workflow");
@@ -83,9 +81,9 @@ export default function contribute(server: PluginServerContext) {
       });
   };
   const attach = (paseo: PaseoApi) => {
-    api = paseo;
-    if (!projectSubscription && paseo.projects?.subscribe) {
-      projectSubscription = paseo.projects.subscribe(() => syncProjectTitles());
+    api = access.attach(paseo);
+    if (!projectSubscription && api.projects?.subscribe) {
+      projectSubscription = api.projects.subscribe(() => syncProjectTitles());
       syncProjectTitles();
     }
   };
@@ -205,7 +203,7 @@ export default function contribute(server: PluginServerContext) {
     }),
     server.addHook("agent.turn.after", async (event, context) => {
       attach(context.paseo);
-      const turn = await readCompletedTurn(event.timeline ?? [], event.agent.cwd, () =>
+      const turn = await readCompletedTurn(eventItems(event), event.agent.cwd, () =>
         port.history(event.agent.id),
       ).catch((error: unknown) => {
         report(error);
@@ -220,7 +218,7 @@ export default function contribute(server: PluginServerContext) {
       if (event.outcome.kind === "failed") failure = event.outcome.error.message;
       if (event.outcome.kind === "canceled") failure = event.outcome.reason;
       if (event.outcome.kind === "completed")
-        await engine.generalTimeline(event.agent.id, event.timeline ?? [], turn.generalAnswers, turn.selectionAnswers, turn.modeAnswer, turn.goal);
+        await engine.generalTimeline(event.agent.id, eventItems(event), turn.generalAnswers, turn.selectionAnswers, turn.modeAnswer, turn.goal);
       await engine
         .ended(
           event.agent.id,
@@ -431,7 +429,7 @@ export default function contribute(server: PluginServerContext) {
     removers.forEach((remove) => remove());
     await rulesReady;
     await engine.close();
-    await pins.close();
+    await port.closeLifecycle?.();
   };
 }
 

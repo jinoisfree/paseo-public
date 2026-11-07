@@ -1,3 +1,4 @@
+import { readData } from "./data-records";
 import path from "node:path";
 
 type Piece = { text: string } | { variable: string; quoted: boolean };
@@ -12,7 +13,7 @@ interface GitCommand {
 }
 
 function escapeSequence(source: string, index: number, quote: string) {
-  const next = source[index + 1];
+  const next = readData(source, index + 1);
   if (!quote) return next === "\n" ? { text: "", skip: 1 } : null;
   if (next && ['"', "\\", "$"].includes(next)) return { text: next, skip: 1 };
   return { text: "\\", skip: 0 };
@@ -23,10 +24,10 @@ function operator(
   index: number,
   active: boolean,
 ): { token?: Exclude<Token, Word>; skip: number } | null {
-  const char = source[index];
+  const char = readData(source, index);
   if (!active && source.startsWith("2>&1", index)) return { token: "2>&1" as const, skip: 3 };
-  if (char === "&") return source[index + 1] === "&" ? { token: "&&" as const, skip: 1 } : null;
-  if (char === "|" && source[index + 1] === "|") return null;
+  if (char === "&") return readData(source, index + 1) === "&" ? { token: "&&" as const, skip: 1 } : null;
+  if (char === "|" && readData(source, index + 1) === "|") return null;
   if (/[<(){}#*?[\]~]/.test(char)) return null;
   if (char === ";" || char === "\n" || char === "|" || char === ">")
     return { token: char === "\n" ? (";" as const) : char, skip: 0 };
@@ -59,7 +60,7 @@ function tokenize(source: string): Token[] | null {
   };
   for (; index < source.length; index++) {
     if (!active) wordStart = index;
-    const char = source[index];
+    const char = readData(source, index);
     if (["`", "\0"].includes(char)) return null;
     if (quote === "'") {
       if (char === "'") quote = "";
@@ -243,11 +244,11 @@ function redirection(tokens: CommandToken[], variables: Map<string, string>) {
   if (index === -1) return { head: tokens, file: null };
   if (
     tokens.length !== index + 3 ||
-    typeof tokens[index + 1] === "string" ||
-    tokens[index + 2] !== "2>&1"
+    typeof readData(tokens, index + 1) === "string" ||
+    readData(tokens, index + 2) !== "2>&1"
   )
     return null;
-  const file = resolve(tokens[index + 1] as Word, variables);
+  const file = resolve(readData(tokens, index + 1) as Word, variables);
   return file && !file.startsWith("-") ? { head: tokens.slice(0, index), file } : null;
 }
 
@@ -337,7 +338,7 @@ class LoggedPush {
       directory = path.resolve(this.cwd, args[2]);
       offset = 3;
     }
-    if (!literal(redirect.head[offset] as Word | undefined)) return false;
+    if (!literal(readData(redirect.head, offset) as Word | undefined)) return false;
     const gitArgs = args.slice(offset);
     if (gitArgs[0] === "push") {
       if (this.log || !redirect.file) return false;

@@ -244,9 +244,9 @@ for (const [name, flags, modules, expected] of [
 ]) test(`AC-205 D-1: ${name} cleanup probe uses only the specified read commands`, async () => {
   const calls = [];
   const probe = createRepoProbe(async (cwd, args) => {
-    calls.push({ cwd, args });
+    calls.push(structuredClone({ cwd, args }));
     if (args[0] === "ls-files") return flags;
-    if (args[0] === "submodule") return modules;
+    if (args[0] === "submodule") return args[1] === "status" ? modules : "";
     if (args[0] === "reflog") return "";
     throw Error("unexpected Git command");
   });
@@ -257,5 +257,49 @@ for (const [name, flags, modules, expected] of [
     { cwd: "/repo", args: ["ls-files", "-v", "-z"] },
     { cwd: "/repo", args: ["submodule", "status", "--recursive"] },
     { cwd: "/repo", args: ["reflog", "show", "--format=%H", "HEAD"] },
+    { cwd: "/repo", args: ["submodule", "foreach", "--quiet", "--recursive", 'git -c core.fsmonitor=false status --porcelain --untracked-files=all && git log --branches --not --remotes --oneline -1 && git log HEAD --not --remotes --oneline -1'] },
   ]);
+});
+
+test("AC-205 N-3: all HEAD reflog hashes use one reachability process and bounded output failures carry a reason", async () => {
+  const hashes = ["a".repeat(40), "b".repeat(40)];
+  const calls = [];
+  const probe = createRepoProbe(async (cwd, args) => {
+    calls.push(structuredClone({ cwd, args }));
+    if (args[0] === "reflog") return hashes.join("\n");
+    if (args[0] === "rev-list") return hashes[0];
+    return "";
+  });
+  assert.match((await probe.cleanupHazards("/repo", "c".repeat(40))).join(" "), /reflog/);
+  assert.deepEqual(calls.filter(c => c.args[0] === "rev-list"), [{ cwd: "/repo", args: ["rev-list", "--max-count=1", ...hashes, "--not", "c".repeat(40), "--"] }]);
+  assert.equal(calls.some(c => ["merge-base", "cat-file"].includes(c.args[0])), false);
+  const limit = createRepoProbe(async () => { throw Object.assign(Error("large"), { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" }); });
+  await assert.rejects(limit.cleanupHazards("/repo", hashes[0]), /32MB.*확인하지 못/);
+  const many = createRepoProbe(async (cwd, args) => args[0] === "reflog" ? Array.from({ length: 2001 }, (_, i) => i.toString(16).padStart(40, "0")).join("\n") : "");
+  await assert.rejects(many.cleanupHazards("/repo", hashes[0]), /2000개.*확인하지 못/);
+});
+
+for (const kind of ["uncommitted", "branch-only-unpushed", "detached-unpushed"])
+test(`AC-205 N-3: initialized submodule ${kind} is skipped even when parent status hides it`, async t => {
+  const root = await mkdtemp(path.join(tmpdir(), "submodule-cleanup-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const sub = path.join(root, "sub"), parent = path.join(root, "parent");
+  for (const repo of [sub, parent]) {
+    git(root, "init", "-q", "-b", "main", repo);
+    git(repo, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "base");
+  }
+  git(parent, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "module");
+  git(parent, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-qam", "module");
+  const module = path.join(parent, "module");
+  const base = git(module, "rev-parse", "HEAD").trim();
+  if (kind === "uncommitted") await writeFile(path.join(module, "untracked"), "keep");
+  else {
+    git(module, "checkout", "-q", kind === "detached-unpushed" ? "--detach" : "-b", ...(kind === "detached-unpushed" ? [] : ["private"]));
+    git(module, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "private");
+    if (kind === "branch-only-unpushed") git(module, "checkout", "--detach", "-q", base);
+  }
+  git(parent, "config", "submodule.module.ignore", "all");
+  assert.equal(git(parent, "status", "--porcelain").trim(), "");
+  const head = git(parent, "rev-parse", "HEAD").trim();
+  assert.match((await createRepoProbe().cleanupHazards(parent, head)).join(" "), /초기화된 submodule.*미커밋.*원격/);
 });

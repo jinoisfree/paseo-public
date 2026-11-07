@@ -1,3 +1,4 @@
+import { createWorkspaceAccess } from "../server/workspace-lifecycle.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -26,7 +27,7 @@ function fixture() {
       },
     },
     async send(text, options) {
-      sent.push({ text, options });
+      sent.push(structuredClone({ text, options }));
     },
   };
   const port = createPort(() => ({ agents: { ref: () => agent } }));
@@ -86,7 +87,7 @@ test("archive port reads pins, canonical activity and all tabs across directory 
       ref: (id) => ({
         timeline: {
           refetch: async (options) => {
-            calls.push(options);
+            calls.push(structuredClone(options));
             return {
               entries: [{ timestamp: "2026-10-01T00:00:00Z" }],
               agent: { id, pendingPermissions: [], activeTurn: null },
@@ -207,17 +208,25 @@ test("AC-103: archive port verifies archive RPC success and preserves archived s
   };
   const port = createPort(() => api);
   assert.equal((await port.inspect("a")).archived, true);
-  await port.archiveWorkspace("ws");
+  assert.equal("archiveWorkspace" in port, false);
+  assert.equal("pushReview" in port, false);
+  const access = createWorkspaceAccess("/tmp");
+  access.attach(api);
+  const gate = access.lifecycle({ db: async () => ({ workflows: [] }), port: () => ({
+    archiveInspection: async () => ({ workspaces: [{ id: "ws", pinnedAt: null, cwd: "/tmp" }],
+      conversations: [{ id: "a", workspaceId: "ws", status: "idle", activeTurn: false, permission: false }] }),
+  }) });
+  await gate.archive("ws");
   api.workspaces.ref = () => ({ archive: async () => ({ error: "blocked", archivedAt: null }) });
-  await assert.rejects(port.archiveWorkspace("ws"), /blocked/);
+  await assert.rejects(gate.archive("ws"), /blocked/);
   api.workspaces.ref = () => ({
     archive: async () => ({ workspaceId: "ws", error: null, archivedAt: null }),
   });
-  await assert.rejects(port.archiveWorkspace("ws"), /확인하지/);
+  await assert.rejects(gate.archive("ws"), /확인하지/);
   api.workspaces.ref = () => ({
     archive: async () => ({ workspaceId: "wrong", error: null, archivedAt: "now" }),
   });
-  await assert.rejects(port.archiveWorkspace("ws"), /확인하지/);
+  await assert.rejects(gate.archive("ws"), /확인하지/);
 });
 test("native compaction waits for a completion event rather than command acceptance", async () => {
   const f = fixture();
@@ -496,7 +505,7 @@ test("explicit model validated before workspace creation, default remains resolv
   const api = {
     providers: {
       listModels: async (base, options) => {
-        calls.push({ base, options });
+        calls.push(structuredClone({ base, options }));
         return { models: [{ id: "known", isDefault: true }] };
       },
     },
@@ -531,9 +540,9 @@ test("thinking validates against selected model and rename uses workspace title 
       }),
     },
     workspaces: {
-      ref: (id) => ({ setTitle: async (title) => renamed.push({ id, title }) }),
+      ref: (id) => ({ setTitle: async (title) => renamed.push(structuredClone({ id, title })) }),
       create: async (input) => {
-        created.push(input);
+        created.push(structuredClone(input));
         return { id: "ws", agents: { create: async ({ agentId }) => ({ id: agentId }) } };
       },
     },
@@ -674,7 +683,7 @@ test("history pages back until the message that started a long turn is in view",
         ref: () => ({
           timeline: {
             refetch: async (options) => {
-              calls.push(options);
+              calls.push(structuredClone(options));
               return pages[Math.min(calls.length, pages.length) - 1];
             },
           },
@@ -771,7 +780,7 @@ test("history pages through async answers and questions to the original request 
         ref: () => ({
           timeline: {
             refetch: async (options) => {
-              calls.push(options);
+              calls.push(structuredClone(options));
               return pages[calls.length - 1];
             },
           },
@@ -851,7 +860,7 @@ function historicalPort(pages) {
       ref: () => ({
         timeline: {
           refetch: async (options) => {
-            calls.push(options);
+            calls.push(structuredClone(options));
             if (calls.length > pages.length) throw Error("unexpected extra history request");
             return pages[calls.length - 1];
           },
@@ -1262,13 +1271,13 @@ test("an executor opens as a tab in its planner's workspace instead of a workspa
         id,
         agents: {
           create: async (options) => {
-            calls.push(["agent", id, options.title, options.labels["role-workflow.role"]]);
+            calls.push(structuredClone(["agent", id, options.title, options.labels["role-workflow.role"]]));
             return { id: options.agentId };
           },
         },
       }),
       create: async () => {
-        calls.push(["workspace"]);
+        calls.push(structuredClone(["workspace"]));
         throw new Error("no new workspace for a paired executor");
       },
     },
@@ -1330,7 +1339,7 @@ test("a turn records which provider turn each user message belongs to", () => {
 
 test("AC-106: a cleaned placement uses a fresh worktree key and branch while retrying the same generation is stable", async () => {
   const calls = [];
-  const api = { workspaces: { create: async options => { calls.push(options); return { id: "new-workspace", refresh: async () => ({ workspaceDirectory: "/example/worktree" }) }; } } };
+  const api = { workspaces: { create: async options => { calls.push(structuredClone(options)); return { id: "new-workspace", refresh: async () => ({ workspaceDirectory: "/example/worktree" }) }; } } };
   const port = createPort(() => api);
   const w = { id: "12345678-task", number: 1, cwd: "/example/repo", projectId: "project", title: "task", progress: "active", worktreeHistory: [], execute: { generation: 1, config: { provider: "codex/test" } } };
   await port.createWorktree(w, "main");
@@ -1346,7 +1355,7 @@ test("AC-106: a cleaned placement uses a fresh worktree key and branch while ret
 
 test("AC-106/N-1: placement timeline ids keep the initial id and separate later generations without expanding card data", async () => {
   const cards = [];
-  const port = createPort(() => ({ agents: { ref: () => ({ timeline: { append: async item => cards.push(item) } }) } }));
+  const port = createPort(() => ({ agents: { ref: () => ({ timeline: { append: async item => cards.push(structuredClone(item)) } }) } }));
   await port.placementPicker("P", "task", { number: 7, title: "blocker" });
   await port.placementPicker("P", "task", { number: 7, title: "blocker" }, 2);
   await port.placementPicker("P", "task", { number: 7, title: "blocker" }, 3);

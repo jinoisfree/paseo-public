@@ -35,10 +35,10 @@ export class WorktreeCleanup {
     if (isFinished(w) && await this.manuallyArchived(w)) return;
     if (w.progress !== "pushed") return;
     if (w.worktreeCleanup && ["done", "skipped"].includes(w.worktreeCleanup.stage)) return;
-    w.worktreeCleanup ??= { stage: "pending", attempts: 0, detail: "", at: new Date(this.host.now()).toISOString(), evidenceFiles: null, permanentError: "", permanentErrors: 0 };
+    w.worktreeCleanup ??= { stage: "pending", attempts: 0, detail: "", at: new Date(this.host.now()).toISOString(), evidenceFiles: null, permanentSince: null, permanentError: "", permanentErrors: 0 };
     const state = w.worktreeCleanup;
-    if ((state.permanentErrors ?? 0) >= 3 || state.attempts >= 3 || (state.attempts > 0 && this.host.now() - Date.parse(state.at) < CLEANUP_RETRY_MS)) return;
-    const record = async (stage: typeof state.stage, detail: string) => {
+    if ((state.stage === "failed" && (state.permanentErrors ?? 0) >= 3 && state.permanentSince !== null && this.host.now() - state.permanentSince >= 10 * 60_000) || state.attempts >= 3 || (state.attempts > 0 && this.host.now() - Date.parse(state.at) < CLEANUP_RETRY_MS)) return;
+    const record = async (stage: "pending" | "skipped" | "done" | "failed", detail: string) => {
       if (stage === "done") {
         for (const row of [...w.startPin?.workspaces ?? [], ...w.pushReview?.workspaces ?? []]) {
           if (row.id === w.worktree!.workspaceId) {
@@ -111,7 +111,7 @@ export class WorktreeCleanup {
     if (!missing) return false;
     w.worktreeCleanup = { stage: "done", attempts: w.worktreeCleanup?.attempts ?? 0,
       evidenceFiles: w.worktreeCleanup?.evidenceFiles ?? null, at: new Date(this.host.now()).toISOString(),
-      permanentError: "", permanentErrors: 0, detail: "Paseo에서 직접 보관된 따로 작업 공간의 정리를 확인했습니다. 이전 증거 보존은 자동으로 확인하지 않습니다." };
+      permanentSince: null, permanentError: "", permanentErrors: 0, detail: "Paseo에서 직접 보관된 따로 작업 공간의 정리를 확인했습니다. 이전 증거 보존은 자동으로 확인하지 않습니다." };
     for (const row of [...w.startPin?.workspaces ?? [], ...w.pushReview?.workspaces ?? []]) {
       if (row.id === w.worktree.workspaceId) { row.phase = "acknowledged"; row.ownedPinAt = null; }
     }
@@ -144,18 +144,20 @@ export class WorktreeCleanup {
   private async readiness(w: Workflow): Promise<Readiness> {
     try {
       const ready = await this.inspectReadiness(w);
-      if (w.worktreeCleanup) { w.worktreeCleanup.permanentError = ""; w.worktreeCleanup.permanentErrors = 0; }
+      if (w.worktreeCleanup) { w.worktreeCleanup.permanentSince = null; w.worktreeCleanup.permanentError = ""; w.worktreeCleanup.permanentErrors = 0; }
       return ready;
     } catch (error) {
       if (error instanceof PermanentCleanupError && w.worktreeCleanup) {
         const state = w.worktreeCleanup;
-        state.permanentErrors = state.permanentError === error.message ? (state.permanentErrors ?? 0) + 1 : 1;
+        const same = state.permanentError === error.message && state.permanentSince != null;
+        if (!same) state.permanentSince = this.host.now();
+        state.permanentErrors = same ? (state.permanentErrors ?? 0) + 1 : 1;
         state.permanentError = error.message;
-        return state.permanentErrors >= 3
+        return state.permanentErrors >= 3 && state.permanentSince !== null && this.host.now() - state.permanentSince >= 10 * 60_000
           ? { stage: "failed", detail: `따로 작업 공간을 자동으로 정리하지 못했습니다: ${error.message}. 직접 보관하세요.` }
           : { stage: "pending", detail: `따로 작업 공간 상태를 확인하지 못해 보존합니다: ${error.message}. 다음 점검 때 다시 확인합니다.` };
       }
-      if (w.worktreeCleanup) { w.worktreeCleanup.permanentError = ""; w.worktreeCleanup.permanentErrors = 0; }
+      if (w.worktreeCleanup) { w.worktreeCleanup.permanentSince = null; w.worktreeCleanup.permanentError = ""; w.worktreeCleanup.permanentErrors = 0; }
       const reason = error instanceof Error ? error.message : String(error);
       return { stage: "pending", detail: `따로 작업 공간 상태를 확인하지 못해 보존합니다: ${reason}. 다음 점검 때 다시 확인합니다.` };
     }

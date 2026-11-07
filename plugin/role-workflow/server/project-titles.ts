@@ -1,8 +1,8 @@
-import type { PaseoApi } from "@getpaseo/client";
+import type { OperationalApi } from "./timeline-cards";
 import { projectTitleLabel, replaceProjectTitleLabel } from "./protocol";
 
 /** Called on project events and periodically, inside the engine's title mutation queue. */
-export function createProjectTitleSync(getApi: () => PaseoApi) {
+export function createProjectTitleSync(getApi: () => OperationalApi) {
   const applied = new Map<string, string>();
   return async () => {
     const api = getApi();

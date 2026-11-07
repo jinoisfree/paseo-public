@@ -39,7 +39,7 @@ async function fixture(t, options = {}) {
   const port = {
     inspect: async () => live,
     createGeneral: async (w, transfer, mode) => {
-      calls.push({ w, transfer, mode });
+      calls.push(structuredClone({ w, transfer, mode }));
       if (options.fail) throw Error("creation unavailable");
       agents.set(transfer.id, transfer.agentId);
     },
@@ -338,7 +338,7 @@ test("general port uses the same workspace, selected config and stable initial-m
       ref: (id) => ({
         agents: {
           create: async (options) => {
-            calls.push({ id, options });
+            calls.push(structuredClone({ id, options }));
             return { id: options.agentId };
           },
         },

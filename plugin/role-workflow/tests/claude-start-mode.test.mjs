@@ -36,7 +36,7 @@ async function fixture(t, project) {
     paseo: {
       providers: {
         listModes: async (...args) => {
-          calls.push(args);
+          calls.push(structuredClone(args));
           return { modes: [{ id: "bypassPermissions" }, { id: "acceptEdits" }] };
         },
         listModels: async () => ({ models: [] }),

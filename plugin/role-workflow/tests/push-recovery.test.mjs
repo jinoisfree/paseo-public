@@ -92,7 +92,7 @@ function fixture(mode = "general") {
   const probe = {
     repository: async (cwd) => cwd,
     commit: async (cwd, hash) => {
-      calls.commit.push({ cwd, hash });
+      calls.commit.push(structuredClone({ cwd, hash }));
       return target.commit;
     },
     pushedTarget: async (value) => {
@@ -237,7 +237,7 @@ test("an observed abbreviated hash must resolve to its own full commit", async (
     const f = fixture();
     f.histories.get("planner").evidence.pushes[0].commit = "aaaaaaa";
     f.probe.commit = async (cwd, hash) => {
-      f.calls.commit.push({ cwd, hash });
+      f.calls.commit.push(structuredClone({ cwd, hash }));
       return resolved;
     };
     const result = await f.run();
@@ -398,7 +398,7 @@ test("remote absence, uncertainty and query failure never produce PUSH", async (
   for (const value of [false, null, "throw"]) {
     const f = fixture();
     f.probe.pushedTarget = async (actual) => {
-      f.calls.remote.push(actual);
+      f.calls.remote.push(structuredClone(actual));
       if (value === "throw") throw Error("network unavailable");
       return value;
     };

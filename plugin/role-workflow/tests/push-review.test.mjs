@@ -1,3 +1,4 @@
+import { installLifecycle } from "./lifecycle-fixture.mjs";
 import { test } from "node:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -5,7 +6,7 @@ import path from "node:path";
 import { WorkflowEngine } from "../server/engine.ts";
 import assert from "node:assert/strict";
 import { pushReviewKey, syncPushReview } from "../server/push-review.ts";
-import { pinDaemonUrl } from "../server/workspace-pins.ts";
+import { pinDaemonUrl } from "../server/workspace-lifecycle.ts";
 import { stripTitleDecor } from "../server/protocol.ts";
 
 const review = () => ({
@@ -88,7 +89,7 @@ test("pre-existing pins and separate workspaces are acknowledged independently",
   const port = {
     get: async (id) => ({ pinnedAt: pinned.has(id) ? id : null }),
     pinWorkspace: async (id) => {
-      calls.push(id);
+      calls.push(structuredClone(id));
       pinned.add(id);
       return id;
     },
@@ -123,7 +124,7 @@ test("new work withdraws only its own automatic pin, preserving manual and repla
       pinWorkspace: async () => (pinnedAt = "automatic"),
       unpinOwned: async (id, expected) => {
         assert.equal(expected, pinnedAt);
-        calls.push(id);
+        calls.push(structuredClone(id));
         pinnedAt = null;
         return true;
       },
@@ -217,13 +218,13 @@ async function fixture(t, options = {}) {
       async pin(id) {
         const row = (await stored()).workflows[0].startPin.workspaces.find((w) => w.id === id);
         assert.equal(row.phase, "sent", "persist the attempt before sending a pin RPC");
-        pinCalls.push(id);
+        pinCalls.push(structuredClone(id));
         const pinnedAt = `start-${pinCalls.length}`;
         pins.set(id, pinnedAt);
         return pinnedAt;
       },
       async unpin(id) {
-        unpinCalls.push(id);
+        unpinCalls.push(structuredClone(id));
         pins.delete(id);
         return true;
       },
@@ -236,7 +237,7 @@ async function fixture(t, options = {}) {
     repository: async (cwd) => path.resolve(cwd),
     pushedTarget: async () => true,
   };
-  let engine = new WorkflowEngine(file, port, undefined, probe);
+  let engine = new WorkflowEngine(file, installLifecycle(port), undefined, probe);
   t.after(async () => {
     await engine.close();
     await rm(dir, { recursive: true, force: true });
@@ -268,7 +269,7 @@ async function fixture(t, options = {}) {
         edit(db);
         await writeFile(file, JSON.stringify(db));
       }
-      engine = new WorkflowEngine(file, port, undefined, probe);
+      engine = new WorkflowEngine(file, installLifecycle(port), undefined, probe);
     },
   };
 }

@@ -61,7 +61,7 @@ async function freshUser(
       ? {
           providers: {
             async listModels(provider, options) {
-              calls.push([provider, options]);
+              calls.push(structuredClone([provider, options]));
               return { models: [{ id: "sample-model", label: "Sample model", isDefault: true }] };
             },
           },

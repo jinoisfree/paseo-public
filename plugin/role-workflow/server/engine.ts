@@ -1,3 +1,4 @@
+import { unknownData, readData, readOptionalData, writeData, deleteData } from "./data-records";
 import { compressionDecision, type ContextUsage } from "../shared/compression";
 import { executorSelectionSchema, selectionStageLabel, type SelectionStage } from "../shared/executor-selection";
 import { applySelectionBatch, selectionAnswers, pendingFields, timelineSelections, explicitSelection } from "./executor-selection";
@@ -9,7 +10,7 @@ import { verdictProblem, verdictView, VERDICT_REPAIR } from "./verdict";
 import { generalAnswers, configChoice, type GeneralQuestion } from "./general-agent";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
-import { WorkspaceLifecycle } from "./workspace-lifecycle";
+import { WorkspaceLifecycle, type LifecycleHost } from "./workspace-lifecycle";
 import { z } from "zod";
 import type { AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import type { PaseoAgentConfig } from "@getpaseo/client";
@@ -42,7 +43,6 @@ import {
   pushReviewSchema,
   pushReviewKey,
   syncPushReview,
-  type PushReviewPort,
 } from "./push-review";
 import {
   repositoryPathsSchema,
@@ -76,7 +76,7 @@ const memberSchema = z.object({
   workspaceId: z.string().nullable(),
   generation: z.number(),
   config: z.custom<PaseoAgentConfig>(
-    (v) => !!v && typeof v === "object" && typeof Reflect.get(v, "provider") === "string",
+    (v) => !!v && typeof v === "object" && typeof unknownData(v, "provider") === "string",
   ),
   env: z.record(z.string(), z.string()).default({}),
   usage: z.number().nullable(),
@@ -164,7 +164,7 @@ const workflowSchema = z.object({
   worktreeCleanup: z.object({
     stage: z.enum(["pending", "done", "skipped", "failed"]), attempts: z.number().int().nonnegative(),
     detail: z.string(), at: z.string(), evidenceFiles: z.number().int().nonnegative().nullable().default(null),
-    permanentError: z.string().default(""), permanentErrors: z.number().int().nonnegative().default(0),
+    permanentSince: z.number().nonnegative().nullable().default(null), permanentError: z.string().default(""), permanentErrors: z.number().int().nonnegative().default(0),
   }).nullable().default(null),
   /** Commit sets already notified about a required base merge; survives restart and retargeting. */
   worktreeMergeNotices: z.array(z.string()).default([]),
@@ -364,11 +364,12 @@ export interface History {
 export interface WorkflowPort {
   models?(provider: "codex" | "claude", cwd: string): Promise<readonly ExecutorModel[]>;
   syncProjectTitles?(): Promise<void>;
-  pushReview?: PushReviewPort;
+  lifecycle?(host: LifecycleHost): WorkspaceLifecycle;
+  closeLifecycle?(): Promise<void>;
   quotaAccount(provider: string): Promise<string | null>;
   quotaAvailable(provider: string): Promise<boolean | null>;
   archiveInspection(workspaceIds: readonly string[]): Promise<ArchiveInspection>;
-  archiveWorkspace(workspaceId: string): Promise<void>;
+
   workspaceName(workspaceId: string): Promise<string | null>;
   projectName(projectId: string, cwd?: string): Promise<string>;
   rename(workspaceId: string, title: string): Promise<void>;
@@ -445,13 +446,12 @@ function migrate(db: Database): Database {
     if (w.processed.length > 200) w.processed.splice(0, w.processed.length - 200);
     if (db.revision < 3)
       for (const memory of w.memories)
-        w.constraints[`remember:${createHash("sha256").update(memory.text).digest("hex")}`] =
-          memory.text;
+        writeData(w.constraints, `remember:${createHash("sha256").update(memory.text).digest("hex")}`, memory.text);
     if (db.revision < 1) adoptFlags(w);
     // Numbers were global before. Each project continues from its own highest until the
     // existing titles are renumbered.
     if (db.revision < 2)
-      db.sequences[w.projectId] = Math.max(db.sequences[w.projectId] ?? 0, w.number);
+      writeData(db.sequences, w.projectId, Math.max(readData(db.sequences, w.projectId) ?? 0, w.number));
   }
   db.revision = 3;
   return db;
@@ -466,7 +466,7 @@ function adoptFlags(w: Workflow) {
   // instruction's answer.
   if (w.status === "needs_input" && !w.inbox)
     w.asker = w.phase === "execute" && w.execute?.lastTurnKey ? "execute" : "plan";
-  const holder = w.pending && w.pending.stage !== "queued" ? w[w.pending.role] : null;
+  const holder = w.pending && w.pending.stage !== "queued" ? readData(w, w.pending.role) : null;
   if (w.inbox && holder?.id === w.inbox.agentId) w.inbox.answers = true;
 }
 
@@ -480,8 +480,8 @@ interface Unmanaged {
   title: string;
 }
 function nextNumber(sequences: Record<string, number>, projectId: string): number {
-  sequences[projectId] = (sequences[projectId] ?? 0) + 1;
-  return sequences[projectId];
+  writeData(sequences, projectId, (readData(sequences, projectId) ?? 0) + 1);
+  return readData(sequences, projectId);
 }
 /**
  * Gives every flow and flowless workspace its number within its project. Without `renumber`
@@ -557,10 +557,12 @@ export class WorkflowEngine {
   private readonly scopeCache = new Map<string, Promise<string>>();
   private readonly managedRunner: ManagedPushRunner;
   private readonly managedExecutions = new Map<string, ManagedPush>();
-  private readonly lifecycle = new WorkspaceLifecycle({
-    port: () => this.port, db: () => this.db(),
-    cleanupReadiness: w => this.worktreeCleanup.verifyForArchive(w),
-  });
+  private lifecycleInstance?: WorkspaceLifecycle;
+  private get lifecycle() {
+    return this.lifecycleInstance ??= (this.port.lifecycle ?? (host => new WorkspaceLifecycle(host)))({
+      port: () => this.port, db: () => this.db(), cleanupReadiness: w => this.worktreeCleanup.verifyForArchive(w),
+    });
+  }
   private readonly archives = new Archives({
     lifecycle: () => this.lifecycle,
     port: () => this.port,
@@ -835,15 +837,15 @@ export class WorkflowEngine {
   async generalDefault(cwd: string): Promise<GeneralAgent | null> {
     const db = await this.db();
     return db.settings.rememberProjectChoices
-      ? (db.projects[path.resolve(cwd)]?.general ?? null)
+      ? (readData(db.projects, path.resolve(cwd))?.general ?? null)
       : null;
   }
   async startSettings(cwd: string, planner: string): Promise<Settings> {
     const db = await this.db();
-    const saved = db.settings.rememberProjectChoices ? db.projects[path.resolve(cwd)] : undefined;
+    const saved = db.settings.rememberProjectChoices ? readData(db.projects, path.resolve(cwd)) : undefined;
     if (!saved) return db.settings;
     const provider = oppositeProvider(planner);
-    const executor = saved[provider];
+    const executor = readData(saved, provider);
     return {
       ...db.settings,
       // Remembered choices must not disable an explicitly enabled mode or model question;
@@ -861,19 +863,19 @@ export class WorkflowEngine {
     const db = await this.db();
     if (!db.settings.rememberProjectChoices || w.mode === "undecided") return;
     const key = path.resolve(w.cwd);
-    const saved = { ...db.projects[key], mode: w.mode };
+    const saved = { ...readData(db.projects, key), mode: w.mode };
     if (executor && w.execute) {
       const provider = this.executorChoice.executorProvider(w);
-      saved[provider] = {
+      writeData(saved, provider, {
         model: w.execute.config.provider,
         thinking: w.execute.config.thinkingOptionId ?? "",
-      };
+      });
     }
-    db.projects[key] = saved;
+    writeData(db.projects, key, saved);
   }
   forgetProject(cwd: string) {
     return this.serial(async () => {
-      delete (await this.db()).projects[path.resolve(cwd)];
+      deleteData((await this.db()).projects, path.resolve(cwd));
       await this.save();
       return { ok: true as const };
     });
@@ -1010,8 +1012,8 @@ export class WorkflowEngine {
       );
     for (const item of decision?.constraints ?? []) {
       // A stable id updates a rule without evicting an unrelated older constraint.
-      if (item.text.trim()) w.constraints[`rule:${item.id}`] = item.text.trim();
-      else delete w.constraints[`rule:${item.id}`];
+      if (item.text.trim()) writeData(w.constraints, `rule:${item.id}`, item.text.trim());
+      else deleteData(w.constraints, `rule:${item.id}`);
     }
     if (decision) {
       this.remember(w, decision.remember);
@@ -1295,7 +1297,7 @@ export class WorkflowEngine {
         managedRetry: null,
         pushReview: null,
         startPin:
-          db.settings.autoPinStarted && this.port.pushReview && snapshot.workspaceId
+          db.settings.autoPinStarted && this.lifecycle.supportsPins && snapshot.workspaceId
             ? {
                 key: "start",
                 workspaces: [{ id: snapshot.workspaceId, phase: "queued", ownedPinAt: null }],
@@ -1420,7 +1422,7 @@ export class WorkflowEngine {
         const snapshot = await this.port.inspect(agentId);
         if (w.status !== "paused") w.status = snapshot?.permission ? "active" : "needs_input";
         this.seen(w, key);
-        this.touch(w, w.selection!.error || `구현 담당 ${selectionStageLabel[w.selection!.stage]} 선택의 실제 답변을 기다립니다.`);
+        this.touch(w, w.selection!.error || `구현 담당 ${readData(selectionStageLabel, w.selection!.stage)} 선택의 실제 답변을 기다립니다.`);
         await this.save();
         return;
       }
@@ -1921,7 +1923,7 @@ export class WorkflowEngine {
     return "done";
   }
   private async queuePushReview(w: Workflow) {
-    if (!(await this.settings()).autoPinPushed || !this.port.pushReview || !w.pushTargets.length)
+    if (!(await this.settings()).autoPinPushed || !this.lifecycle.supportsPins || !w.pushTargets.length)
       return;
     const key = pushReviewKey(w.pushTargets);
     if (w.pushReview?.key === key) {
@@ -1936,7 +1938,7 @@ export class WorkflowEngine {
     };
   }
   private async syncStartPin(w: Workflow) {
-    if (!w.startPin || !this.port.pushReview) return;
+    if (!w.startPin || !this.lifecycle.supportsPins) return;
     try {
       // Always active: starting a new phase never withdraws a workflow's start pin.
       await syncPushReview(w.startPin, this.lifecycle, () => this.save(), true, w.isolation === "worktree" ? w.execute?.workspaceId ?? null : null);
@@ -1947,7 +1949,7 @@ export class WorkflowEngine {
     }
   }
   private async syncPushReview(w: Workflow) {
-    if (!w.pushReview || !this.port.pushReview) return false;
+    if (!w.pushReview || !this.lifecycle.supportsPins) return false;
     const active =
       w.progress === "pushed" &&
       w.pushReview.key === pushReviewKey(w.pushTargets) &&
@@ -1966,12 +1968,12 @@ export class WorkflowEngine {
     return this.serial(async () => {
       const w = (await this.db()).workflows.find((entry) => entry.id === id);
       const review = w?.pushReview;
-      if (!w || !review || review.key !== key || w.progress !== "pushed" || !this.port.pushReview)
+      if (!w || !review || review.key !== key || w.progress !== "pushed" || !this.lifecycle.supportsPins)
         throw new Error("이전 자동 고정 기록과 현재 푸시 상태가 다릅니다.");
       const rows = [];
       for (const pin of pins) {
         const row = review.workspaces.find((entry) => entry.id === pin.workspaceId);
-        const current = await this.port.pushReview.get(pin.workspaceId);
+        const current = await this.lifecycle.get(pin.workspaceId);
         if (!row || row.phase !== "pinned" || row.ownedPinAt || current?.pinnedAt !== pin.pinnedAt)
           throw new Error("고정이 변경됐거나 이미 확인됐습니다. 기존 고정을 보존합니다.");
         rows.push({ row, expectedPin: pin });
@@ -2510,7 +2512,7 @@ export class WorkflowEngine {
       if (!parsed.success) return;
       const answers = parsed.data.answers;
       const answer =
-        answers[question.question] ?? (question.header ? answers[question.header] : undefined);
+        readData(answers, question.question) ?? (question.header ? readData(answers, question.header) : undefined);
       if (answer !== "일반개발" && answer !== "연합개발") return;
       const w = (await this.db()).workflows.find(
         (candidate) => candidate.plan?.id === agentId || candidate.execute?.id === agentId,
@@ -2707,7 +2709,7 @@ export class WorkflowEngine {
     // A later turn also lists the delivery, so only the turn the delivery opened answers it.
     // Histories without turns keep the planner's earlier exact-response rule.
     return history.turnId
-      ? history.messageTurns?.[pendingId] === history.turnId
+      ? readOptionalData(history.messageTurns, pendingId) === history.turnId
       : member === w.plan;
   }
   private async checkResume(w: Workflow, message: string) {
@@ -2943,7 +2945,7 @@ export class WorkflowEngine {
   }
   /** The addressee's latest turn, once it is idle and the instruction is known to have arrived. */
   private async lastTurn(w: Workflow, pending: Pending) {
-    const member = w[pending.role];
+    const member = readData(w, pending.role);
     if (!member) return null;
     const snapshot = await this.port.inspect(member.id);
     if (!snapshot || !this.quiet(snapshot)) return null;
@@ -3051,11 +3053,11 @@ export class WorkflowEngine {
     }
   }
   private async prepareMember(w: Workflow, role: "plan" | "execute") {
-    const member = w[role];
+    const member = readData(w, role);
     if (!member) return;
     const snapshot = member.workspaceId ? await this.port.inspect(member.id) : null;
     if (await this.compaction.prepareCompaction(w, member, snapshot, role === "plan" ? "계획" : "실행")) return;
-    const current = w[role]!;
+    const current = readData(w, role)!;
     if (!current.workspaceId) {
       if (role === "execute" && capabilities(w).executorSelection) {
         await this.executorChoice.restoreExecutor(w);
@@ -3111,7 +3113,7 @@ export class WorkflowEngine {
     if (w.plan?.compaction || w.execute?.compaction) return;
     const pending = w.pending;
     if (!pending || pending.stage === "sent" || w.status !== "active") return;
-    const member = w[pending.role];
+    const member = readData(w, pending.role);
     if (!member) throw new Error("다음 담당 대화가 없습니다.");
     if (!member.workspaceId) return;
     const snapshot = await this.port.inspect(member.id);
@@ -3145,7 +3147,7 @@ export class WorkflowEngine {
     const answering = pending.role === "plan" && pending.phase === "execute";
     this.touch(
       w,
-      answering ? "계획 담당이 답변을 처리하고 있습니다." : descriptions[pending.phase],
+      answering ? "계획 담당이 답변을 처리하고 있습니다." : readData(descriptions, pending.phase),
     );
     await this.save();
   }
@@ -3157,7 +3159,7 @@ export class WorkflowEngine {
     const pending = w.pending;
     if (!pending || pending.stage !== "sending" || w.status === "active")
       throw new Error("다시 보낼 미확인 전달이 없습니다.");
-    const member = w[pending.role];
+    const member = readData(w, pending.role);
     if (!member) throw new Error("다음 담당 대화가 없습니다.");
     const snapshot = await this.port.inspect(member.id);
     if (!snapshot || snapshot.archived) throw new Error("다음 담당 대화를 사용할 수 없습니다.");
@@ -3293,7 +3295,7 @@ export class WorkflowEngine {
         w.status === "active" &&
         w.pending &&
         w.pending.stage !== "queued" &&
-        w[w.pending.role]?.id === agentId;
+        readData(w, w.pending.role)?.id === agentId;
       if (!automatic) w.transientPause = null;
       if (w?.mode === "general" && w.generalDelivery?.stage === "uncertain") {
         w.generalDelivery = null;
@@ -3324,7 +3326,7 @@ export class WorkflowEngine {
         active.push(w);
     }
     for (let i = 0; i < active.length; i++) {
-      const left = active[i];
+      const left = readData(active, i);
       const scopes = await this.scopes(left);
       for (const right of active.slice(i + 1)) {
         const others = await this.scopes(right);
@@ -3373,14 +3375,14 @@ export class WorkflowEngine {
     for (const item of items) {
       const text = item.replace(/\s+/g, " ").trim();
       if (!text || w.memories.some((memory) => memory.text === text)) continue;
-      w.constraints[`remember:${createHash("sha256").update(text).digest("hex")}`] = text;
+      writeData(w.constraints, `remember:${createHash("sha256").update(text).digest("hex")}`, text);
       w.memories.push({ sequence: ++w.memorySequence, text });
       if (w.memories.length > 50) w.memories.shift();
     }
     // Every full context repeats these; keep the newest 100 so a long flow stays bounded.
     const remembered = Object.keys(w.constraints).filter((key) => key.startsWith("remember:"));
     for (const key of remembered.slice(0, Math.max(0, remembered.length - 100)))
-      delete w.constraints[key];
+      deleteData(w.constraints, key);
   }
   private assignmentError(w: Workflow, role: Role, d: Decision): string | null {
     if (
@@ -3609,9 +3611,9 @@ export class WorkflowEngine {
     if (w.quotaPause?.role === role) w.quotaPause = null;
     w.transientPause = null;
     this.remember(w, d.remember);
-    this.recordCompaction(w[role]!, inbox);
-    w[role]!.handoff = d.handoff;
-    w[role]!.lastTurnKey = inbox.key;
+    this.recordCompaction(readData(w, role)!, inbox);
+    readData(w, role)!.handoff = d.handoff;
+    readData(w, role)!.lastTurnKey = inbox.key;
     const report = `${d.summary}\n${d.handoff}\n검증:\n${d.checks.join("\n")}`;
     this.seen(w, inbox.key);
     w.inbox = null;

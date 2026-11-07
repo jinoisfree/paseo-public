@@ -1,3 +1,4 @@
+import { readData } from "./data-records";
 import { agentRulesBlock } from "./rules";
 import type { WorkflowRole } from "../shared/assignment";
 import { FEDERATED_ONLY, automationBlock, stripManagedBlocks } from "./protocol";
@@ -68,7 +69,7 @@ export function appendRoleInstructions(
   if (provider !== "claude" && provider !== "codex") return existing;
   const counterpart = options.sharedRoles
     ? "선택된 담당 모델"
-    : NAMES[provider === "claude" ? "codex" : "claude"];
+    : readData(NAMES, provider === "claude" ? "codex" : "claude");
   const automated = options.automated ?? false;
   // Without an explicit role each provider keeps its original one.
   const instructions =

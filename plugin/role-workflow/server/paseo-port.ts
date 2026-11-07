@@ -1,3 +1,4 @@
+import { readData, readOptionalData, writeData } from "./data-records";
 import { contextUsage, contextRatio } from "../shared/compression";
 import { timelineSelections, timelineMode } from "./executor-selection";
 import { asyncGeneralAnswers } from "./general-agent";
@@ -11,10 +12,8 @@ import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
 import { decorateTitle } from "./protocol";
 import type { WorkflowPort, History } from "./engine";
 import type { ArchiveInspection, ArchiveConversation } from "./archive";
-import type { PushReviewPort } from "./push-review";
 import { turnEvidence } from "./push-evidence";
-import { appendTimelineCard } from "./timeline-cards";
-import { lifecycleTransport } from "./workspace-lifecycle";
+import { appendTimelineCard, readTimelinePage, subscribeAgentEvents, type TimelinePage, type OperationalApi } from "./timeline-cards";
 import { createProjectTitleSync } from "./project-titles";
 
 const ASYNC_ANSWER_PREFIX = "Answers to your questions:\n\n";
@@ -77,7 +76,7 @@ export function readTurn(
 ): History & { goal: string; request: string; maintenance: boolean } {
   const lastUser = items.findLastIndex((item) => item.type === "user_message");
   const turn = items.slice(lastUser + 1);
-  const user = items[lastUser];
+  const user = readData(items, lastUser);
   const messages = turn
     .filter((item) => item.type === "assistant_message")
     .map((item) => item.text);
@@ -93,9 +92,9 @@ export function readTurn(
   // that ended even after the user's own messages were folded into it.
   const messageTurns: Record<string, string> = {};
   items.forEach((item, index) => {
-    const turnId = turnIds?.[index];
+    const turnId = readOptionalData(turnIds, index);
     if (item.type !== "user_message" || !turnId) return;
-    for (const id of [item.clientMessageId, item.messageId]) if (id) messageTurns[id] = turnId;
+    for (const id of [item.clientMessageId, item.messageId]) if (id) writeData(messageTurns, id, turnId);
   });
   const turnId = turnIds?.at(-1);
   const identity =
@@ -150,7 +149,7 @@ export async function readCompletedTurn(
   }
   const turn = readTurn(items, cwd);
   const lastUser = items.findLastIndex((item) => item.type === "user_message");
-  if (lastUser < 0 || !isAsyncAnswerCandidate(items[lastUser])) return turn;
+  if (lastUser < 0 || !isAsyncAnswerCandidate(readData(items, lastUser))) return turn;
   // A stale/failed history query must not fall back to borrowing earlier push evidence.
   turn.evidence = turnEvidence(items.slice(lastUser + 1), cwd);
   try {
@@ -167,9 +166,6 @@ const TAB_NAMES: Record<string, string> = { claude: "Claude", codex: "GPT" };
 const HISTORY_PAGE = 200;
 const HISTORY_PAGES = 25;
 
-type TimelinePage = Awaited<
-  ReturnType<ReturnType<PaseoApi["agents"]["ref"]>["timeline"]["refetch"]>
->;
 type HistoricalPage = TimelinePage & {
   agent: NonNullable<TimelinePage["agent"]>;
   startCursor: NonNullable<TimelinePage["startCursor"]>;
@@ -250,19 +246,18 @@ function checkHistoricalEntries(
 
 /** An explicit source request only: later turns must contain complete text-only replies. */
 async function readHistoricalPush(
-  api: PaseoApi,
+  api: OperationalApi,
   agentId: string,
   messageId: string,
 ): Promise<{ turn: History; later: History[] }> {
   historicalCheck(messageId.trim());
-  const timeline = api.agents.ref(agentId).timeline;
   const pages: TimelinePage["entries"][] = [];
   let newest: HistoricalPage | undefined;
   let before: TimelinePage["startCursor"] = null;
   let source = -1;
   let bounded = false;
   for (let count = 0; count < HISTORY_PAGES; count++) {
-    const page = await timeline.refetch(
+    const page = await readTimelinePage(api, agentId,
       before
         ? { direction: "before", cursor: before, limit: HISTORY_PAGE }
         : { limit: HISTORY_PAGE },
@@ -283,7 +278,7 @@ async function readHistoricalPush(
     historicalCheck(matches.length <= 1);
     source = matches[0] ?? -1;
     if (source > 0) {
-      historicalCheck(entries[source - 1].turnId !== entries[source].turnId);
+      historicalCheck(readData(entries, source - 1).turnId !== readData(entries, source).turnId);
       bounded = true;
       break;
     }
@@ -391,13 +386,12 @@ function auditTurnFinished(entries: TimelinePage["entries"]): boolean {
 }
 
 /** Automatic audits never search across a later provider turn, even a text-only follow-up. */
-async function readPushAuditHistory(api: PaseoApi, agentId: string): Promise<History> {
-  const timeline = api.agents.ref(agentId).timeline;
+async function readPushAuditHistory(api: OperationalApi, agentId: string): Promise<History> {
   const pages: TimelinePage["entries"][] = [];
   let newest: HistoricalPage | undefined;
   let before: TimelinePage["startCursor"] = null;
   for (let count = 0; count < HISTORY_PAGES; count++) {
-    const page = await timeline.refetch(
+    const page = await readTimelinePage(api, agentId,
       before
         ? { direction: "before", cursor: before, limit: HISTORY_PAGE }
         : { limit: HISTORY_PAGE },
@@ -431,7 +425,7 @@ async function readPushAuditHistory(api: PaseoApi, agentId: string): Promise<His
   throw new Error("최신 푸시 응답의 시작 경계를 확인할 수 없습니다.");
 }
 
-async function readProjectName(api: PaseoApi, projectId: string, cwd = ""): Promise<string> {
+async function readProjectName(api: OperationalApi, projectId: string, cwd = ""): Promise<string> {
   try {
     const project = (await api.projects.list()).projects.find((row) => row.projectId === projectId);
     const name = project?.projectCustomName?.trim() || project?.projectDisplayName.trim();
@@ -443,15 +437,16 @@ async function readProjectName(api: PaseoApi, projectId: string, cwd = ""): Prom
 }
 
 export function createPort(
-  getApi: () => PaseoApi,
-  pins?: { pin: PushReviewPort["pin"]; unpin(id: string): Promise<void> },
+  getApi: () => OperationalApi,
+  lifecycle: Pick<WorkflowPort, "lifecycle" | "closeLifecycle"> = {},
 ): WorkflowPort {
   const usageRecoveryEnabled = false;
   let usageCheckedAt = -Infinity;
   let usage: ReturnType<PaseoApi["providers"]["listUsage"]> | undefined;
   return {
     syncProjectTitles: createProjectTitleSync(getApi),
-    ...lifecycleTransport(getApi, pins),
+    ...(lifecycle.lifecycle ? { lifecycle: lifecycle.lifecycle } : {}),
+    ...(lifecycle.closeLifecycle ? { closeLifecycle: lifecycle.closeLifecycle } : {}),
     async quotaAccount(provider) {
       return quotaAccount(provider);
     },
@@ -558,7 +553,7 @@ export function createPort(
       const agent = await workspace.agents.create({
         agentId: member.id,
         idempotencyKey: `role-workflow-agent:${member.id}`,
-        title: beside ? `${TAB_NAMES[base] ?? base} 실행` : title,
+        title: beside ? `${readData(TAB_NAMES, base) ?? base} 실행` : title,
         config: member.config,
         env: { ...member.env, PASEO_ROLE_WORKFLOW_MANAGED: "1", PASEO_ROLE_WORKFLOW_ROLE: role },
         labels: {
@@ -647,7 +642,7 @@ export function createPort(
         180000,
       );
       let assistantText = "";
-      const subscription = agent.timeline.subscribe(({ event }) => {
+      const subscription = subscribeAgentEvents(getApi(), id, ({ event }) => {
         if (event.type === "error" || event.type === "turn_failed") finish(new Error(event.error));
         if (event.type === "turn_canceled") finish(new Error(event.reason));
         if (event.type !== "timeline") return;
@@ -678,8 +673,7 @@ export function createPort(
       return readPushAuditHistory(getApi(), agentId);
     },
     async history(id, through) {
-      const timeline = getApi().agents.ref(id).timeline;
-      let page = await timeline.refetch({ limit: HISTORY_PAGE });
+      let page = await readTimelinePage(getApi(), id, { limit: HISTORY_PAGE });
       const pages = [page.entries];
       // One page holds 200 entries and a long turn has more. Walk back until the message
       // that started the turn is in view. A caller confirming a delivery names that message,
@@ -701,7 +695,7 @@ export function createPort(
         );
       };
       while (pages.length < HISTORY_PAGES && page.hasOlder && page.startCursor && !reached()) {
-        page = await timeline.refetch({
+        page = await readTimelinePage(getApi(), id, {
           direction: "before",
           cursor: page.startCursor,
           limit: HISTORY_PAGE,
@@ -731,7 +725,7 @@ const ARCHIVE_ACTIVITY_TIMEOUT_MS = 5000;
 const ARCHIVE_ACTIVITY_CONCURRENCY = 8;
 
 export async function readArchiveInspection(
-  api: PaseoApi,
+  api: OperationalApi | PaseoApi,
   workspaceIds: readonly string[],
   options: { activityTimeoutMs?: number } = {},
 ): Promise<ArchiveInspection> {
@@ -745,6 +739,7 @@ export async function readArchiveInspection(
         .filter((w) => workspaceIds.includes(w.id))
         .map((w) => ({
           id: w.id,
+          ...(w.workspaceDirectory ? { cwd: w.workspaceDirectory } : {}),
           pinnedAt: w.pinnedAt,
           archiving: !!w.archivingAt,
           status: w.status,
@@ -769,7 +764,7 @@ export async function readArchiveInspection(
   const worker = async () => {
     while (next < agents.length) {
       const index = next++;
-      conversations[index] = await archiveConversation(api, agents[index], activityTimeoutMs);
+      writeData(conversations, index, await archiveConversation(api, readData(agents, index), activityTimeoutMs));
     }
   };
   await Promise.all(
@@ -787,7 +782,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 }
 
 async function archiveConversation(
-  api: PaseoApi,
+  api: OperationalApi | PaseoApi,
   a: PaseoAgent,
   timeoutMs: number,
 ): Promise<ArchiveConversation> {
@@ -795,7 +790,7 @@ async function archiveConversation(
   try {
     // Daemons may project this request; merged rows retain their latest update timestamp.
     const tail = await withTimeout(
-      api.agents.ref(a.id).timeline.refetch({ limit: 1, projection: "canonical" }),
+      readTimelinePage(api, a.id,{ limit: 1, projection: "canonical" }),
       timeoutMs,
     );
     if (tail.error || tail.hasNewer || tail.gap || !tail.agent || tail.agent.id !== a.id)
@@ -824,7 +819,7 @@ async function archiveConversation(
 }
 
 /** The model the conversation will run: the one asked for, or the provider's default. */
-async function resolveModel(api: PaseoApi, cwd: string, config: PaseoAgentConfig): Promise<string> {
+async function resolveModel(api: OperationalApi, cwd: string, config: PaseoAgentConfig): Promise<string> {
   const slash = config.provider.indexOf("/");
   const base = slash === -1 ? config.provider : config.provider.slice(0, slash);
   const requested = slash === -1 ? null : config.provider.slice(slash + 1);
@@ -856,7 +851,7 @@ async function resolveModel(api: PaseoApi, cwd: string, config: PaseoAgentConfig
 }
 
 async function validateMode(
-  api: PaseoApi,
+  api: OperationalApi,
   provider: string,
   cwd: string,
   config: PaseoAgentConfig,
@@ -881,7 +876,7 @@ export async function quotaAccount(
     return null;
   }
 }
-async function limitedUsage(api: PaseoApi) {
+async function limitedUsage(api: OperationalApi) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
@@ -913,7 +908,6 @@ export const CALL_BUDGETS_MS: Partial<Record<keyof WorkflowPort, number>> = {
   placementPicker: 20_000,
   quotaAccount: 20_000,
   quotaAvailable: 20_000,
-  archiveWorkspace: 30_000,
   history: 60_000,
   historicalPush: 60_000,
   pushAuditHistory: 60_000,
@@ -929,9 +923,9 @@ export function withCallBudgets(
 ): WorkflowPort {
   const bounded: Record<string, unknown> = { ...port };
   for (const [name, ms] of Object.entries(budgets)) {
-    const call = Reflect.get(port, name);
+    const call = new Map(Object.entries(port)).get(name);
     if (typeof call !== "function" || !ms) continue;
-    bounded[name] = (...args: unknown[]) => {
+    writeData(bounded, name, (...args: unknown[]) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const expired = new Promise<never>((_, reject) => {
         timer = setTimeout(
@@ -942,7 +936,7 @@ export function withCallBudgets(
       return Promise.race([Promise.resolve(call.apply(port, args)), expired]).finally(() =>
         clearTimeout(timer),
       );
-    };
+    });
   }
   return bounded as unknown as WorkflowPort;
 }

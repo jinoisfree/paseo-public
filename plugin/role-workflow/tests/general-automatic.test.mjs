@@ -27,13 +27,13 @@ async function fixture(t, { choice = { provider: "codex", model: "builder", thin
     quotaAccount: async () => null, quotaAvailable: async () => null,
     history: async (id) => histories.get(id) ?? { text: "", key: "", messageIds: [], failed: null },
     create: async (w, role, member) => {
-      created.push({ w, role, member });
+      created.push(structuredClone({ w, role, member }));
       if (failCreate) throw Error("creation failed");
       agents.set(member.id, { ...agents.get("A"), id: member.id, config: member.config });
       return "workspace";
     },
     send: async (id, prompt, messageId) => {
-      sent.push({ id, prompt, messageId });
+      sent.push(structuredClone({ id, prompt, messageId }));
       if (failSend) throw Error("delivery acknowledgement lost");
       agents.get(id).status = "running";
     },

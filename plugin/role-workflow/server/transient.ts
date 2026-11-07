@@ -1,3 +1,4 @@
+import { readData } from "./data-records";
 import { z } from "zod";
 import { usageLimit } from "./quota";
 
@@ -18,5 +19,5 @@ export function transientFailure(text: string): boolean {
   );
 }
 export function transientDelay(attempts: number): number {
-  return [1, 3, 10, 30, 60][Math.min(Math.max(attempts, 0), 4)] * 60_000;
+  return readData([1, 3, 10, 30, 60], Math.min(Math.max(attempts, 0), 4)) * 60_000;
 }

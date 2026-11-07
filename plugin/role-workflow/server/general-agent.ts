@@ -1,15 +1,16 @@
+import { unknownData, readData, writeData } from "./data-records";
 import { GENERAL_QUESTIONS, LEGACY_GENERAL_QUESTIONS, type GeneralAgent } from "../shared/general-agent";
 import type { PaseoAgentConfig } from "@getpaseo/client";
 import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
 
 export type GeneralQuestion = keyof typeof GENERAL_QUESTIONS;
 export function generalQuestionNames(input: unknown): GeneralQuestion[] {
-  const questions = input && typeof input === "object" ? Reflect.get(input, "questions") : null;
+  const questions = input && typeof input === "object" ? unknownData(input, "questions") : null;
   if (!Array.isArray(questions)) return [];
   return questions.flatMap((q) =>
     Object.entries(GENERAL_QUESTIONS).flatMap(([name, value]) =>
       q &&
-      [value, LEGACY_GENERAL_QUESTIONS[name as GeneralQuestion]].some((v) =>
+      [value, readData(LEGACY_GENERAL_QUESTIONS, name as GeneralQuestion)].some((v) =>
         q.question === v.question || q.title === v.question || q.header === v.header)
         ? [name as GeneralQuestion]
         : [],
@@ -20,17 +21,17 @@ export function generalAnswers(
   input: unknown,
   names: readonly GeneralQuestion[],
 ): Partial<Record<GeneralQuestion, string>> {
-  const answers = input && typeof input === "object" ? Reflect.get(input, "answers") : null;
+  const answers = input && typeof input === "object" ? unknownData(input, "answers") : null;
   if (!answers || typeof answers !== "object") return {};
   return Object.fromEntries(
     names.flatMap((name, index) => {
-      const q = GENERAL_QUESTIONS[name];
-      const legacy = LEGACY_GENERAL_QUESTIONS[name];
+      const q = readData(GENERAL_QUESTIONS, name);
+      const legacy = readData(LEGACY_GENERAL_QUESTIONS, name);
       const value =
-        Reflect.get(answers, legacy.question) ?? Reflect.get(answers, legacy.header) ??
-        Reflect.get(answers, q.question) ??
-        Reflect.get(answers, q.header) ??
-        Reflect.get(answers, `Question ${index + 1}`);
+        unknownData(answers, legacy.question) ?? unknownData(answers, legacy.header) ??
+        unknownData(answers, q.question) ??
+        unknownData(answers, q.header) ??
+        unknownData(answers, `Question ${index + 1}`);
       return typeof value === "string" ? [[name, value]] : [];
     }),
   );
@@ -56,9 +57,9 @@ export function asyncGeneralAnswers(
     if (next?.type !== "user_message" || next.text !== "Answers to your questions:\n\n" + detail)
       continue;
     for (const [name, q] of Object.entries(GENERAL_QUESTIONS)) {
-      for (const variant of [q, LEGACY_GENERAL_QUESTIONS[name as GeneralQuestion]]) {
+      for (const variant of [q, readData(LEGACY_GENERAL_QUESTIONS, name as GeneralQuestion)]) {
         const entry = detail.split("\n\n").find((part) => part.startsWith(variant.question + "\n"));
-        if (entry) result[name as GeneralQuestion] = entry.slice(variant.question.length + 1).trim();
+        if (entry) writeData(result, name as GeneralQuestion, entry.slice(variant.question.length + 1).trim());
       }
     }
   }
