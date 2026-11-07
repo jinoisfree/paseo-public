@@ -1974,9 +1974,9 @@ export class WorkflowEngine {
         const current = await this.port.pushReview.get(pin.workspaceId);
         if (!row || row.phase !== "pinned" || row.ownedPinAt || current?.pinnedAt !== pin.pinnedAt)
           throw new Error("고정이 변경됐거나 이미 확인됐습니다. 기존 고정을 보존합니다.");
-        rows.push({ row, pin });
+        rows.push({ row, expectedPin: pin });
       }
-      for (const { row, pin } of rows) row.ownedPinAt = pin.pinnedAt;
+      for (const { row, expectedPin } of rows) row.ownedPinAt = expectedPin.pinnedAt;
       await this.save();
       return { adopted: rows.length };
     });

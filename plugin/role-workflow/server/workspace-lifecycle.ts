@@ -12,6 +12,8 @@ interface Host {
 /** The only mutation boundary for workspace archive and automatic pins. */
 export class WorkspaceLifecycle {
   constructor(private readonly host: Host) {}
+  get supportsArchive() { return typeof this.host.port().archiveWorkspace === "function"; }
+  get supportsUnpin() { return typeof this.host.port().pushReview?.unpin === "function"; }
   get(id: string) { return this.host.port().pushReview?.get(id) ?? Promise.resolve(null); }
   private async executor(id: string) {
     return (await this.host.db()).workflows.find(w => w.isolation === "worktree" &&

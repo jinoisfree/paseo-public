@@ -18,6 +18,16 @@ test("AC-201: every raw workspace mutation call in server stays inside workspace
     const ast = parse(await readFile(file, "utf8"), { sourceType: "module", plugins: ["typescript"] });
     function visit(node) {
       if (!node || typeof node !== "object") return;
+      const key = property => property?.type === "Identifier" ? property.name : property?.value;
+      const raw = name => ["archiveWorkspace", "pin", "unpin"].includes(name);
+      if (path.basename(file) !== "workspace-lifecycle.ts") {
+        if (["MemberExpression", "OptionalMemberExpression"].includes(node.type) && raw(node.computed ? node.property.value : key(node.property)))
+          violations.push(`${path.basename(file)}:${node.loc.start.line} raw mutation handle`);
+        if (node.type === "ObjectPattern" && node.properties.some(p => raw(key(p.key))))
+          violations.push(`${path.basename(file)}:${node.loc.start.line} destructured mutation handle`);
+        if (["CallExpression", "OptionalCallExpression"].includes(node.type) && node.callee.type === "Identifier" && raw(node.callee.name))
+          violations.push(`${path.basename(file)}:${node.loc.start.line} raw mutation function`);
+      }
       if (node.type === "CallExpression" || node.type === "OptionalCallExpression") {
         let callee = node.callee;
         while (callee?.type === "TSNonNullExpression") callee = callee.expression;

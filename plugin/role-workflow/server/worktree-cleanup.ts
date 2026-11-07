@@ -59,7 +59,7 @@ export class WorktreeCleanup {
     try {
       let ready = await this.readiness(w);
       if (ready.stage !== "ready") { await record(ready.stage, ready.detail); return; }
-      if (!this.host.port().archiveWorkspace) throw new Error("현재 연결이 워크스페이스 보관을 지원하지 않습니다");
+      if (!this.host.lifecycle().supportsArchive) throw new Error("현재 연결이 워크스페이스 보관을 지원하지 않습니다");
       state.stage = "pending";
       state.evidenceFiles = null;
       state.attempts++;
@@ -196,7 +196,7 @@ export class WorktreeCleanup {
     if (archiveWorkspacePinned(workspace)) {
       if (!ownedPinAt)
         return preserve("고정된 작업 공간은 보존합니다. 고정을 해제하면 따로 작업 공간 정리를 다시 확인합니다.", "pending");
-      if (!this.host.port().pushReview?.unpin)
+      if (!this.host.lifecycle().supportsUnpin)
         return preserve("플러그인 고정 해제를 지원하지 않아 따로 작업 공간을 보존합니다.", "pending");
     }
     if (workspace.archiving || !["idle", "closed"].includes(conversation.status) || conversation.permission !== false ||
