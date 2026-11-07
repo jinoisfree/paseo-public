@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -48,7 +49,8 @@ export async function pushGuardEnv(
   const current = await readFile(file, "utf8").catch(() => null);
   if (current !== content) {
     await mkdir(directory, { recursive: true });
-    const temporary = `${file}.${process.pid}.tmp`;
+    // Sessions open concurrently in one plugin process; each write needs its own temporary file.
+    const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
     await writeFile(temporary, content, { mode: 0o600 });
     await rename(temporary, file);
   }

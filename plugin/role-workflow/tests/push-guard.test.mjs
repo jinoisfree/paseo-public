@@ -162,3 +162,14 @@ test("a git push permission request is denied while other commands are left to t
   await off.permission({ command: "git push" });
   assert.deepEqual(off.responses, []);
 });
+
+test("sessions opening at the same moment all get the guard", async (t) => {
+  const dir = await directory(t);
+  const state = path.join(dir, "state");
+  // Different user configs force every call to rewrite the file concurrently.
+  const results = await Promise.all(
+    Array.from({ length: 24 }, (_, i) => pushGuardEnv(state, {}, { HOME: path.join(dir, `home-${i % 3}`) })),
+  );
+  for (const env of results) assert.equal(env.GIT_CONFIG_GLOBAL, path.join(state, "push-guard.gitconfig"));
+  assert.match(await readFile(path.join(state, "push-guard.gitconfig"), "utf8"), new RegExp(PUSH_GUARD_SCHEME));
+});
