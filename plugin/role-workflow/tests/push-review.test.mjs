@@ -438,3 +438,24 @@ for (const options of [{ noPort: true }, { noWorkspace: true }])
     assert.equal((await f.stored()).workflows[0].startPin, null);
     assert.deepEqual(f.pinCalls, []);
   });
+
+
+test("AC-101/R-1: legacy executor pin rows retain ownership but never get pinned or unpinned by generic review sync", async () => {
+  for (const active of [false, true]) {
+    const state = { key: "legacy", workspaces: [
+      { id: "tree", phase: "queued", ownedPinAt: null },
+      { id: "tree", phase: "pinned", ownedPinAt: "owned" },
+      { id: "plan", phase: "queued", ownedPinAt: null },
+    ] };
+    const ids = [];
+    const port = {
+      get: async id => { ids.push(id); return { pinnedAt: null }; },
+      pin: async id => { assert.equal(id, "plan"); return "plan pin"; },
+      unpin: async () => assert.fail("cleanup owns legacy executor unpin"),
+    };
+    await syncPushReview(state, port, async () => {}, active, "tree");
+    assert.deepEqual(ids, ["plan"]);
+    assert.equal(state.workspaces[0].phase, "queued");
+    assert.equal(state.workspaces[1].ownedPinAt, "owned");
+  }
+});

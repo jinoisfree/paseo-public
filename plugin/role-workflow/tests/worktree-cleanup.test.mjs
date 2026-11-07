@@ -14,7 +14,7 @@ import { CLEANUP_RETRY_MS } from "../server/worktree-cleanup.ts";
 
 const execute = promisify(execFile);
 const git = (cwd, ...args) => execute("git", ["-c", "user.email=cleanup@example.invalid", "-c", "user.name=cleanup", ...args], { cwd }).then(r => r.stdout.trim());
-async function fixture(t) {
+async function fixture(t, { defaultPins = false } = {}) {
   const dir = await realpath(await mkdtemp(path.join(tmpdir(), "worktree-cleanup-")));
   const repo = path.join(dir, "repo"), tree = path.join(dir, "worktree"), state = path.join(dir, "state");
   await execute("git", ["init", "-q", "-b", "main", repo]);
@@ -36,15 +36,31 @@ async function fixture(t) {
     ["E", { id: "E", workspaceId: "tree", projectId: "project", cwd: tree, config, status: "idle", permission: false, archived: false, usage: 0, title: "executor" }],
   ]);
   const spaces = new Set(["plan", "tree"]), calls = [], cards = [];
+  const pins = new Map(), pinCalls = [], unpinCalls = [];
   const port = {
     inspect: async id => agents.get(id) ?? null,
     archiveInspection: async ids => ({
-      workspaces: [...spaces].filter(id => ids.includes(id)).map(id => ({ id, pinnedAt: null, archiving: false, status: "done" })),
+      workspaces: [...spaces].filter(id => ids.includes(id)).map(id => ({ id, pinnedAt: pins.get(id) ?? null, archiving: false, status: "done" })),
       conversations: [...agents.values()].filter(a => ids.includes(a.workspaceId)).map(a => ({ ...a, activeTurn: a.status === "running", lastActivityAt: new Date(now - 60000).toISOString() })),
     }),
     archiveWorkspace: async id => {
       assert.equal(id, "tree", "the planner workspace must never be archived by cleanup");
       calls.push(id); spaces.delete(id); agents.get("E").archived = true;
+    },
+    pushReview: {
+      get: async id => spaces.has(id) ? { pinnedAt: pins.get(id) ?? null } : null,
+      pin: async id => {
+        pinCalls.push(id);
+        const at = `plugin-${pinCalls.length}`;
+        pins.set(id, at);
+        return at;
+      },
+      unpin: async (id, expectedPinAt) => {
+        unpinCalls.push({ id, expectedPinAt });
+        if (pins.get(id) !== expectedPinAt) return false;
+        pins.delete(id);
+        return true;
+      },
     },
     projectName: async () => "project", workspaceName: async () => "task", rename: async () => {},
     history: async () => ({ text: "", key: "", failed: null, messageIds: [] }),
@@ -61,7 +77,7 @@ async function fixture(t) {
   let record;
   const runner = { read: async () => structuredClone(record), history: async () => [], isRunning: () => false };
   let engine = new WorkflowEngine(file, port, undefined, probe, () => now, runner);
-  await engine.configure({ ...await engine.settings(), autoArchivePushed: false, autoPinPushed: false, autoPinStarted: false, titleMarker: false, autoResumeQuota: false, autoResumeTransient: false });
+  await engine.configure({ ...await engine.settings(), autoArchivePushed: false, ...(defaultPins ? {} : { autoPinPushed: false, autoPinStarted: false }), titleMarker: false, autoResumeQuota: false, autoResumeTransient: false });
   const id = await engine.enroll(agents.get("P"), config, {}, "federated", true, 5);
   await engine.selectExecutor(id, { provider: "codex", model: "test", thinking: "" });
   let w = engine.database.workflows[0];
@@ -77,7 +93,7 @@ async function fixture(t) {
   await engine.save();
   t.after(async () => { await engine.close(); await rm(dir, { recursive: true, force: true }); });
   return {
-    dir, repo, tree, state, file, id, commit, port, probe, agents, spaces, calls, cards,
+    dir, repo, tree, state, file, id, commit, port, probe, agents, spaces, calls, cards, pins, pinCalls, unpinCalls,
     get w() { return w; }, get engine() { return engine; },
     run: () => engine.worktreeCleanup.run(w),
     advance: (ms = CLEANUP_RETRY_MS + 1) => { now += ms; },
@@ -271,7 +287,7 @@ test("AC-107/B-1: dirty skipped worktrees cannot bypass cleanup through automati
   f.w.progress = "done";
   const preview = await f.engine.archiveFinished();
   assert.deepEqual(preview.rows, []);
-  assert.deepEqual(preview.blocked, [{ id: f.id, number: f.w.number, title: f.w.title, reason: "따로 작업 공간 정리가 끝나지 않아 보관하지 않습니다" }]);
+  assert.deepEqual(preview.blocked, [{ id: f.id, number: f.w.number, title: f.w.title, reason: "푸시 전 작업의 따로 작업 공간은 자동 정리하지 않습니다. 필요하면 커밋을 확인한 뒤 Paseo에서 직접 보관하세요(무시된 파일과 커밋하지 않은 파일은 지워집니다)." }]);
   assert.deepEqual((await f.engine.archiveFinished(true, [f.id])).archivedIds, []);
   assert.deepEqual((await f.engine.archives.applyArchive(stale, "done")).archivedIds, []);
   assert.deepEqual(f.calls, []);
@@ -381,4 +397,147 @@ test(`AC-102/N-5: ${pinnedAt ? "pinned" : "unknown pin"} workspace stays pending
   pin = null;
   await f.run();
   assert.equal(f.w.worktreeCleanup.stage, "done");
+});
+
+
+test("AC-101/R-1: default start and push pins preserve the planner while a newly placed worktree archives normally", async t => {
+  const f = await fixture(t, { defaultPins: true });
+  const settings = await f.engine.settings();
+  assert.equal(settings.autoPinStarted, true);
+  assert.equal(settings.autoPinPushed, true);
+  f.w.execute.workspaceId = null;
+  f.w.status = "active";
+  f.port.create = async () => "tree";
+  await f.engine.prepareMember(f.w, "execute");
+  assert.equal(f.w.execute.workspaceId, "tree");
+  assert.deepEqual(f.w.startPin.workspaces.map(row => row.id), ["plan"]);
+  await f.engine.syncStartPin(f.w);
+  await f.engine.queuePushReview(f.w);
+  assert.deepEqual(f.w.pushReview.workspaces.map(row => row.id), ["plan"]);
+  await f.engine.syncPushReview(f.w);
+  assert.deepEqual(f.pinCalls, ["plan"]);
+  await f.run();
+  assert.equal(f.w.worktreeCleanup.stage, "done");
+  assert.deepEqual(f.calls, ["tree"]);
+  assert.deepEqual(f.unpinCalls, []);
+  assert.equal(f.pins.get("plan"), "plugin-1");
+  assert.equal(f.agents.get("P").archived, false);
+  assert.equal(await readFile(path.join(f.state, "evidence", f.id, "worktree", "tree", "test.log"), "utf8"), "test evidence\n");
+});
+
+function legacyPin(f, source = "startPin", ownedPinAt = "owned") {
+  f.w[source] ??= { key: source, workspaces: [] };
+  const row = { id: "tree", phase: "pinned", ownedPinAt };
+  f.w[source].workspaces.push(row);
+  f.pins.set("tree", "owned");
+  return row;
+}
+
+for (const source of ["startPin", "pushReview", "both"])
+test(`AC-101/R-1: legacy ${source} ownership releases only the executor pin immediately before archive`, async t => {
+  const f = await fixture(t, { defaultPins: true });
+  await f.engine.syncStartPin(f.w);
+  const row = legacyPin(f, source === "both" ? "startPin" : source);
+  const second = source === "both" ? legacyPin(f, "pushReview") : null;
+  const order = [];
+  const unpin = f.port.pushReview.unpin, archive = f.port.archiveWorkspace;
+  f.port.pushReview.unpin = async (id, at) => {
+    order.push("unpin");
+    assert.equal(await readFile(path.join(f.state, "evidence", f.id, "worktree", "tree", "test.log"), "utf8"), "test evidence\n");
+    return unpin(id, at);
+  };
+  f.port.archiveWorkspace = async id => {
+    order.push("archive");
+    assert.equal(f.pins.has("tree"), false);
+    return archive(id);
+  };
+  await f.engine.syncStartPin(f.w);
+  await f.engine.syncPushReview(f.w);
+  assert.deepEqual(f.unpinCalls, [], "generic sync must not release the legacy pin before evidence checks");
+  await f.run();
+  assert.deepEqual(order, ["unpin", "archive"]);
+  assert.deepEqual(f.unpinCalls, [{ id: "tree", expectedPinAt: "owned" }]);
+  assert.equal(row.phase, "acknowledged");
+  assert.equal(row.ownedPinAt, null);
+  if (second) assert.equal(second.ownedPinAt, null);
+  assert.equal(f.pins.get("plan"), "plugin-1");
+  await f.restart();
+  assert.deepEqual(f.pinCalls, ["plan"]);
+  assert.deepEqual(f.calls, ["tree"]);
+});
+
+for (const kind of ["manual", "changed", "missing port", "missing method", "refused", "throw", "unconfirmed", "replaced during unpin", "active during unpin"])
+test(`AC-102/R-1: ${kind} pin preserves the worktree pending without consuming archive attempts`, async t => {
+  const f = await fixture(t, { defaultPins: true });
+  const row = legacyPin(f, "startPin", kind === "manual" ? null : kind === "changed" ? "old" : "owned");
+  if (kind === "missing port") delete f.port.pushReview;
+  if (kind === "missing method") delete f.port.pushReview.unpin;
+  if (kind === "refused") f.port.pushReview.unpin = async () => false;
+  if (kind === "throw") f.port.pushReview.unpin = async () => { throw Error("unpin failed"); };
+  if (kind === "unconfirmed") f.port.pushReview.unpin = async () => true;
+  if (kind === "replaced during unpin") f.port.pushReview.unpin = async () => { f.pins.set("tree", "new user pin"); return true; };
+  if (kind === "active during unpin") f.port.pushReview.unpin = async () => { f.pins.delete("tree"); f.agents.get("E").status = "running"; return true; };
+  await f.run();
+  assert.equal(f.w.worktreeCleanup.stage, "pending");
+  assert.equal(f.w.worktreeCleanup.attempts, 0);
+  assert.deepEqual(f.calls, []);
+  if (["manual", "changed", "missing port", "missing method"].includes(kind)) assert.deepEqual(f.unpinCalls, []);
+  if (["refused", "throw", "unconfirmed"].includes(kind)) assert.equal(row.ownedPinAt, "owned");
+  if (kind === "replaced during unpin") assert.equal(f.pins.get("tree"), "new user pin");
+});
+
+for (const unsafe of ["dirty", "evidence", "post-copy dirty"])
+test(`AC-102/AC-105/R-1: ${unsafe} prevents releasing even a plugin-owned pin`, async t => {
+  const f = await fixture(t);
+  legacyPin(f);
+  if (unsafe === "dirty") await writeFile(path.join(f.tree, "feature.txt"), "dirty");
+  if (unsafe === "evidence") await writeFile(path.join(f.state, "evidence"), "blocked");
+  if (unsafe === "post-copy dirty") {
+    const inspect = f.port.archiveInspection;
+    let count = 0;
+    f.port.archiveInspection = async ids => {
+      if (++count === 2) await writeFile(path.join(f.tree, "feature.txt"), "late edit");
+      return inspect(ids);
+    };
+  }
+  await f.run();
+  assert.deepEqual(f.unpinCalls, []);
+  assert.deepEqual(f.calls, []);
+  assert.equal(f.pins.get("tree"), "owned");
+});
+
+test("AC-104/R-1: lost unpin reply recovers after restart without pinning the executor again", async t => {
+  const f = await fixture(t, { defaultPins: true });
+  legacyPin(f);
+  const unpin = f.port.pushReview.unpin;
+  f.port.pushReview.unpin = async (id, at) => { await unpin(id, at); throw Error("response lost"); };
+  await f.run();
+  assert.equal(f.w.worktreeCleanup.stage, "pending");
+  assert.deepEqual(f.calls, []);
+  await f.restart();
+  assert.equal(f.w.worktreeCleanup.stage, "done");
+  assert.deepEqual(f.pinCalls, ["plan"]);
+  assert.deepEqual(f.unpinCalls, [{ id: "tree", expectedPinAt: "owned" }]);
+  assert.equal(f.w.startPin.workspaces.find(row => row.id === "tree").phase, "acknowledged");
+});
+
+
+test("AC-101/AC-104/R-1: legacy queued executor pins stay excluded and retire after confirmed cleanup", async t => {
+  const f = await fixture(t, { defaultPins: true });
+  await f.engine.queuePushReview(f.w);
+  const start = { id: "tree", phase: "queued", ownedPinAt: null };
+  const pushed = { ...start };
+  f.w.startPin.workspaces.push(start);
+  f.w.pushReview.workspaces.push(pushed);
+  await f.engine.syncStartPin(f.w);
+  await f.engine.syncPushReview(f.w);
+  assert.deepEqual(f.pinCalls, ["plan"]);
+  assert.deepEqual(f.unpinCalls, []);
+  await f.run();
+  assert.equal(start.phase, "acknowledged");
+  assert.equal(pushed.phase, "acknowledged");
+  assert.equal(f.w.worktreeCleanup.stage, "done");
+  await newPlan(f);
+  await f.engine.syncStartPin(f.w);
+  assert.deepEqual(f.pinCalls, ["plan"]);
 });

@@ -62,7 +62,7 @@
 
 ### worktree 자동 정리
 
-`WorktreeCleanup.run`은 승인된 푸시·ff 반영 뒤와 tick 복구에서 같은 판단을 사용합니다. `worktreeCleanup`은 pending → done/skipped/failed이며 failed는 60초 이상 간격으로 최대 3회 시도합니다. 상태 조회 오류와 pinned는 pending을 유지하고 attempts를 소모하지 않습니다. evidenceFiles는 보관 전에 상태 폴더 복사가 끝났음을 나타내는 복구 체크포인트입니다. 보관 응답이 유실돼도 재조회로 완료를 확인하며 done/skipped는 재실행하지 않습니다. 새 구현 주기는 cleanup을 초기화합니다. 새 plan에서 done인 worktree 또는 실행 대화가 보관되고 디렉터리가 없는 worktree는 worktreeHistory에 남기고 generation+1 실행 담당의 배치를 다시 결정합니다. 미정리 worktree 작업은 archiveCandidate에서 제외해 기존 자동·수동 보관으로 우회하지 못하게 합니다.
+`WorktreeCleanup.run`은 승인된 푸시·ff 반영 뒤와 tick 복구에서 같은 판단을 사용합니다. `worktreeCleanup`은 pending → done/skipped/failed이며 failed는 60초 이상 간격으로 최대 3회 시도합니다. 상태 조회 오류와 사용자 pinned는 pending을 유지하고 attempts를 소모하지 않습니다. worktree 실행 공간은 startPin·pushReview의 자동 고정 대상에서 제외하며, 과거 행의 ownedPinAt은 cleanup의 소유 확인을 위해 유지합니다. 소유 기록과 일치하는 고정만 증거 복사·직전 검사를 통과한 뒤 기존 unpin으로 해제하고 결과와 상태를 재조회합니다. 해제를 확인하지 못하면 pending으로 보존합니다. evidenceFiles는 보관 전에 상태 폴더 복사가 끝났음을 나타내는 복구 체크포인트입니다. 보관 응답이 유실돼도 재조회로 완료를 확인하며 done/skipped는 재실행하지 않습니다. 새 구현 주기는 cleanup을 초기화합니다. 새 plan에서 done인 worktree 또는 실행 대화가 보관되고 디렉터리가 없는 worktree는 worktreeHistory에 남기고 generation+1 실행 담당의 배치를 다시 결정합니다. 미정리 worktree 작업은 archiveCandidate에서 제외해 기존 자동·수동 보관으로 우회하지 못하게 합니다.
 
 ## 5. 진입점
 

@@ -31,10 +31,12 @@ export async function syncPushReview(
   port: PushReviewPort,
   save: () => Promise<void>,
   active = true,
+  excludedWorkspaceId: string | null = null,
 ) {
   let changed = false;
   for (const workspace of review.workspaces) {
-    if (workspace.phase === "acknowledged") continue;
+    // Keep legacy ownership records for cleanup, without pinning the executor again.
+    if (workspace.id === excludedWorkspaceId || workspace.phase === "acknowledged") continue;
     const current = await port.get(workspace.id).catch(() => null);
     if (current === null) continue;
     const pinned = !!current.pinnedAt;

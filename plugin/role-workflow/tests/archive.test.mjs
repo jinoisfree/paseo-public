@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { archiveCandidate } from "../server/archive.ts";
+import { archiveCandidate, archiveBlockReason } from "../server/archive.ts";
 import { WorkflowEngine } from "../server/engine.ts";
 
 const now = Date.parse("2026-10-06T12:00:00Z");
@@ -540,4 +540,14 @@ test(`AC-107/B-1: archiveCandidate requires completed worktree cleanup (${stage}
   assert.equal(!!archiveCandidate(w, inspection(), "pushed", 3, now), stage === "done");
   w.isolation = "shared";
   assert.ok(archiveCandidate(w, inspection(), "pushed", 3, now));
+});
+
+
+for (const progress of ["done", "no_push"])
+test(`AC-107/R-2: ${progress} explains direct Paseo archive risks without offering plugin archive`, () => {
+  const w = { ...flow(), progress, isolation: "worktree" };
+  assert.equal(archiveBlockReason(w), "푸시 전 작업의 따로 작업 공간은 자동 정리하지 않습니다. 필요하면 커밋을 확인한 뒤 Paseo에서 직접 보관하세요(무시된 파일과 커밋하지 않은 파일은 지워집니다).");
+  assert.equal(archiveCandidate(w, inspection(), "done", 0, now), null);
+  w.progress = "pushed";
+  assert.equal(archiveBlockReason(w), "따로 작업 공간 정리가 끝나지 않아 보관하지 않습니다");
 });

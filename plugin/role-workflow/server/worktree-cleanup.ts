@@ -16,7 +16,7 @@ export interface WorktreeCleanupHost {
   stateFolder(): string;
   touch(w: Workflow, detail: string): void;
 }
-type Readiness = { stage: "ready" | "pending" | "skipped" | "done"; detail: string };
+type Readiness = { stage: "ready" | "pending" | "skipped" | "done"; detail: string; ownedPinAt?: string };
 
 /** Archive only the integrated executor workspace; durable checkpoints survive a lost RPC reply. */
 export class WorktreeCleanup {
@@ -28,6 +28,14 @@ export class WorktreeCleanup {
     const state = w.worktreeCleanup;
     if (state.attempts >= 3 || (state.attempts > 0 && this.host.now() - Date.parse(state.at) < CLEANUP_RETRY_MS)) return;
     const record = async (stage: typeof state.stage, detail: string) => {
+      if (stage === "done") {
+        for (const row of [...w.startPin?.workspaces ?? [], ...w.pushReview?.workspaces ?? []]) {
+          if (row.id === w.worktree!.workspaceId) {
+            row.phase = "acknowledged";
+            row.ownedPinAt = null;
+          }
+        }
+      }
       if (state.stage !== stage || state.detail !== detail) {
         state.stage = stage;
         state.detail = detail;
@@ -54,6 +62,8 @@ export class WorktreeCleanup {
       await this.host.save();
       // Re-read membership, active conversations, Git status and ancestry after the copy.
       ready = await this.readiness(w);
+      if (ready.stage === "ready" && ready.ownedPinAt)
+        ready = await this.releaseOwnedPin(w, ready.ownedPinAt);
       if (ready.stage !== "ready") {
         state.attempts--;
         await record(ready.stage, ready.detail);
@@ -69,6 +79,28 @@ export class WorktreeCleanup {
       state.at = new Date(this.host.now()).toISOString();
       const reason = error instanceof Error ? error.message : String(error);
       await record("failed", `따로 작업 공간을 자동으로 정리하지 못했습니다: ${reason}. 직접 보관하세요.`);
+    }
+  }
+  private async releaseOwnedPin(w: Workflow, ownedPinAt: string): Promise<Readiness> {
+    const pending = (): Readiness => ({ stage: "pending", detail: "플러그인이 고정한 작업 공간의 고정 해제를 확인하지 못해 보존합니다. 다음 점검 때 다시 확인합니다." });
+    try {
+      const port = this.host.port().pushReview;
+      const id = w.worktree!.workspaceId;
+      if (!port?.unpin || !await port.unpin(id, ownedPinAt)) return pending();
+      const current = await port.get(id);
+      if (!current || current.pinnedAt !== null) return pending();
+      for (const row of [...w.startPin?.workspaces ?? [], ...w.pushReview?.workspaces ?? []]) {
+        if (row.id === id && row.ownedPinAt === ownedPinAt) {
+          row.phase = "acknowledged";
+          row.ownedPinAt = null;
+        }
+      }
+      await this.host.save();
+      // A user may have pinned or resumed the conversation during the unpin RPC.
+      const ready = await this.readiness(w);
+      return ready.ownedPinAt ? pending() : ready;
+    } catch {
+      return pending();
     }
   }
   private doneDetail(w: Workflow) {
@@ -113,8 +145,14 @@ export class WorktreeCleanup {
     const conversation = inspection.conversations.find(a => a.id === member.id)!;
     const workspace = inspection.workspaces.find(ws => ws.id === tree.workspaceId);
     if (!workspace) throw new Error("구현 작업 공간을 확인하지 못했습니다");
-    if (archiveWorkspacePinned(workspace))
-      return preserve("고정된 작업 공간은 보존합니다. 고정을 해제하면 따로 작업 공간 정리를 다시 확인합니다.", "pending");
+    const ownedPinAt = [...w.startPin?.workspaces ?? [], ...w.pushReview?.workspaces ?? []]
+      .find(row => row.id === tree.workspaceId && row.ownedPinAt && row.ownedPinAt === workspace.pinnedAt)?.ownedPinAt;
+    if (archiveWorkspacePinned(workspace)) {
+      if (!ownedPinAt)
+        return preserve("고정된 작업 공간은 보존합니다. 고정을 해제하면 따로 작업 공간 정리를 다시 확인합니다.", "pending");
+      if (!this.host.port().pushReview?.unpin)
+        return preserve("플러그인 고정 해제를 지원하지 않아 따로 작업 공간을 보존합니다.", "pending");
+    }
     if (workspace.archiving || !["idle", "closed"].includes(conversation.status) || conversation.permission !== false ||
       conversation.activeTurn !== false || snapshot.permission || !["idle", "closed"].includes(snapshot.status))
       return preserve("구현 대화의 실행·권한 대기가 끝나면 따로 작업 공간 정리를 다시 확인합니다.", "pending");
@@ -125,7 +163,7 @@ export class WorktreeCleanup {
     const included = await probe.isAncestor(tree.path, identity.head, commit);
     if (included === null) throw new Error("worktree 커밋의 반영 여부를 확인하지 못했습니다");
     if (!included) return preserve("반영되지 않은 로컬 커밋이 있어 따로 작업 공간을 보존합니다.");
-    return { stage: "ready", detail: "" };
+    return { stage: "ready", detail: "", ...(ownedPinAt ? { ownedPinAt } : {}) };
   }
 }
 

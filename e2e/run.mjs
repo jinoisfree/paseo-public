@@ -197,9 +197,8 @@ try {
     assert(installed.code === 0, `install failed: ${installed.stderr || installed.stdout}`);
     await waitFor("Plugin ready", async () => (await readyCount()) >= 1);
     assert(/role-workflow\s+running/.test((await cli("plugin", "ls")).stdout), "plugin is not running");
-    // Cleanup must respect user pins. Keep this isolated clean-archive fixture unpinned.
     const { settings } = await rpc("workflow.status", {});
-    await rpc("workflow.configure", { ...settings, autoPinStarted: false, autoPinPushed: false });
+    assert(settings.autoPinStarted && settings.autoPinPushed, "automatic pin defaults must remain enabled");
   });
 
   await step("without overlap a federated executor opens in the planner workspace tab", async () => {
@@ -441,7 +440,7 @@ try {
     assert((await run("git", ["ls-remote", remote])).stdout === "", "a commit reached the remote");
   });
 
-  await step("AC-107/B-1: manual archive preserves an unfinished dirty worktree and its planner", async () => {
+  await step("AC-107/B-1/R-2: manual archive preserves an unfinished dirty worktree and its planner", async () => {
     const flow = state().workflows.find(w => w.id === worktreeFlow?.id);
     assert(flow?.worktree && flow.progress === "done", "worktree fixture is not ready for archive preview");
     const { settings } = await rpc("workflow.status", {});
@@ -451,7 +450,7 @@ try {
       await rpc("workflow.configure", { ...settings, archiveAfterDays: 0 });
       const preview = await rpc("workflow.archive-finished", { apply: false, ids: [] });
       assert(!preview.rows.some(row => row.id === flow.id), "dirty worktree became an archive candidate");
-      assert(preview.blocked.some(row => row.id === flow.id && row.reason === "따로 작업 공간 정리가 끝나지 않아 보관하지 않습니다"), "archive screen has no preservation reason");
+      assert(preview.blocked.some(row => row.id === flow.id && row.reason === "푸시 전 작업의 따로 작업 공간은 자동 정리하지 않습니다. 필요하면 커밋을 확인한 뒤 Paseo에서 직접 보관하세요(무시된 파일과 커밋하지 않은 파일은 지워집니다)."), "archive screen has no preservation reason");
       const result = await rpc("workflow.archive-finished", { apply: true, ids: [flow.id] });
       assert(!result.archivedIds.includes(flow.id), "unfinished worktree was archived");
       const api = createPaseoApi(client);
@@ -464,11 +463,12 @@ try {
     }
   });
 
-  await step("AC-108: approved local push integrates and archives only the clean executor workspace", async () => {
+  await step("AC-101/AC-108/R-1: default pins keep the planner while approved local push archives the clean executor workspace", async () => {
     const flow = state().workflows.find(w => w.id === worktreeFlow?.id);
     assert(flow?.worktree, "worktree scenario did not finish");
     const { settings } = await rpc("workflow.status", {});
-    await rpc("workflow.configure", { ...settings, autoArchivePushed: false, autoArchiveWorktree: true, autoPinPushed: false });
+    await rpc("workflow.configure", { ...settings, autoArchivePushed: false, autoArchiveWorktree: true });
+    assert(settings.autoPinStarted && settings.autoPinPushed, "AC-108 must run with default automatic pin settings");
     const common = (await run("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: work })).stdout.trim();
     appendFileSync(join(common, "info", "exclude"), "\nevidence/\n");
     await mkdir(join(flow.worktree.path, "evidence"), { recursive: true });
@@ -502,6 +502,9 @@ try {
       const plan = (await api.agents.ref(flow.plan.id).refresh()).agent;
       const executor = (await api.agents.ref(flow.execute.id).refresh()).agent;
       const spaces = await api.workspaces.list({ page: { limit: 200 } });
+      assert(spaces.entries.find(ws => ws.id === flow.plan.workspaceId)?.pinnedAt, "planner workspace lost its default automatic pin");
+      assert(cleaned.startPin?.workspaces.every(row => row.id !== flow.worktree.workspaceId), "executor entered the start pin targets");
+      assert(cleaned.pushReview?.workspaces.every(row => row.id !== flow.worktree.workspaceId), "executor entered the push review pin targets");
       assert(!plan.archivedAt, "planner conversation was archived");
       assert(executor.archivedAt, "executor conversation is not archived");
       assert(spaces.entries.some(ws => ws.id === flow.plan.workspaceId), "planner workspace disappeared");
@@ -512,7 +515,7 @@ try {
       assert(branch.code === 0 || branch.code === 1, "could not observe the branch after archive");
       const included = await run("git", ["merge-base", "--is-ancestor", cleaned.integration.commit, "HEAD"], { cwd: work });
       assert(included.code === 0, "DATA LOSS RISK: integrated commit is missing from planner checkout");
-      cleanupObservation = { workflowId: flow.id, workspaceId: flow.worktree.workspaceId, directoryExists: existsSync(flow.worktree.path), branchExists: branch.code === 0, executorArchived: !!executor.archivedAt, plannerArchived: !!plan.archivedAt, evidenceFiles: cleaned.worktreeCleanup.evidenceFiles, attempts: cleaned.worktreeCleanup.attempts, at: cleaned.worktreeCleanup.at, integratedCommit: cleaned.integration.commit, workspaceRestoreApi: "not exposed by 0.15 public API; archived agent record remains readable" };
+      cleanupObservation = { autoPinStarted: settings.autoPinStarted, autoPinPushed: settings.autoPinPushed, plannerPinned: !!spaces.entries.find(ws => ws.id === flow.plan.workspaceId)?.pinnedAt, workflowId: flow.id, workspaceId: flow.worktree.workspaceId, directoryExists: existsSync(flow.worktree.path), branchExists: branch.code === 0, executorArchived: !!executor.archivedAt, plannerArchived: !!plan.archivedAt, evidenceFiles: cleaned.worktreeCleanup.evidenceFiles, attempts: cleaned.worktreeCleanup.attempts, at: cleaned.worktreeCleanup.at, integratedCommit: cleaned.integration.commit, workspaceRestoreApi: "not exposed by 0.15 public API; archived agent record remains readable" };
       writeFileSync(join(root, "worktree-cleanup-observation.json"), JSON.stringify(cleanupObservation, null, 2));
       console.log(`observation ${JSON.stringify(cleanupObservation)}`);
     } finally {

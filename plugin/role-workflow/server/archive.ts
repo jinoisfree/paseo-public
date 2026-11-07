@@ -68,9 +68,11 @@ export function archiveMembersPresent(
   return members.every(member => conversations.some(a => a.id === member.id && a.workspaceId === member.workspaceId));
 }
 
-export function archiveBlockReason(w: Pick<ArchiveFlow, "isolation" | "worktreeCleanup">): string | null {
-  return w.isolation === "worktree" && w.worktreeCleanup?.stage !== "done"
-    ? "따로 작업 공간 정리가 끝나지 않아 보관하지 않습니다" : null;
+export function archiveBlockReason(w: Pick<ArchiveFlow, "isolation" | "worktreeCleanup" | "progress">): string | null {
+  if (w.isolation !== "worktree" || w.worktreeCleanup?.stage === "done") return null;
+  return w.progress === "done" || w.progress === "no_push"
+    ? "푸시 전 작업의 따로 작업 공간은 자동 정리하지 않습니다. 필요하면 커밋을 확인한 뒤 Paseo에서 직접 보관하세요(무시된 파일과 커밋하지 않은 파일은 지워집니다)."
+    : "따로 작업 공간 정리가 끝나지 않아 보관하지 않습니다";
 }
 export function archiveWorkspacePinned(workspace: ArchiveWorkspace): boolean {
   return workspace.pinnedAt !== null;

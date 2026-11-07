@@ -1922,7 +1922,7 @@ export class WorkflowEngine {
         if (row.phase === "withdrawn") row.phase = "queued";
       return;
     }
-    const ids = [w.plan?.workspaceId, w.worktreeCleanup?.stage === "done" ? null : w.execute?.workspaceId].filter((id): id is string => !!id);
+    const ids = [w.plan?.workspaceId, w.isolation === "worktree" ? null : w.execute?.workspaceId].filter((id): id is string => !!id);
     w.pushReview = {
       key,
       workspaces: [...new Set(ids)].map((id) => ({ id, phase: "queued", ownedPinAt: null })),
@@ -1932,7 +1932,7 @@ export class WorkflowEngine {
     if (!w.startPin || !this.port.pushReview) return;
     try {
       // Always active: starting a new phase never withdraws a workflow's start pin.
-      await syncPushReview(w.startPin, this.port.pushReview, () => this.save(), true);
+      await syncPushReview(w.startPin, this.port.pushReview, () => this.save(), true, w.isolation === "worktree" ? w.execute?.workspaceId ?? null : null);
     } catch {
       w.artifactNotice =
         "새 작업 상단 고정 응답을 확인하지 못했습니다. 목록의 고정 상태를 다시 확인합니다.";
@@ -1947,7 +1947,7 @@ export class WorkflowEngine {
       !!w.pushCheck?.targets.length &&
       w.pushCheck.targets.every((target) => target.result === "pushed");
     try {
-      return await syncPushReview(w.pushReview, this.port.pushReview, () => this.save(), active);
+      return await syncPushReview(w.pushReview, this.port.pushReview, () => this.save(), active, w.isolation === "worktree" ? w.execute?.workspaceId ?? null : null);
     } catch {
       w.artifactNotice =
         "상단 고정 변경 응답을 확인하지 못했습니다. 목록의 고정 상태를 다시 확인합니다.";
@@ -3088,7 +3088,7 @@ export class WorkflowEngine {
         current,
         (await this.settings()).titleMarker,
       );
-      if (w.startPin && !w.startPin.workspaces.some((row) => row.id === current.workspaceId))
+      if (!(role === "execute" && w.isolation === "worktree") && w.startPin && !w.startPin.workspaces.some((row) => row.id === current.workspaceId))
         w.startPin.workspaces.push({
           id: current.workspaceId,
           phase: "queued",
