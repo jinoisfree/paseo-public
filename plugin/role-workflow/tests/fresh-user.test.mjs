@@ -69,12 +69,8 @@ async function freshUser(
       : {},
   };
   close = contribute({
-    before(name, fn) {
-      hooks.set(name, fn);
-      return () => {};
-    },
-    on: (name, fn) => {
-      events.set(name, fn);
+    addHook: (name, fn) => {
+      (name === "agent.create.before" || name === "agent.open.before" ? hooks : events).set(name, fn);
       return () => {};
     },
     handle: (contract, fn) => rpcs.set(contract.name, fn),
@@ -115,18 +111,18 @@ async function freshUser(
       context.paseo.workspaces = {
         ref: () => ({ refresh: async () => ({ projectId: "project", name: "Task" }) }),
       };
-      const response = await hooks.get("agent.create")(
+      const response = await hooks.get("agent.create.before")(
         { request: { config: { provider, cwd: home } } },
         context,
       );
-      await hooks.get("agent.session_open")(
+      await hooks.get("agent.open.before")(
         { request: { agentId: source.id, env: response.env, reason: "create" } },
         context,
       );
-      await events.get("agent.created")({ agent: source }, context);
+      await events.get("agent.create.after")({ agent: source }, context);
       // A default fresh conversation begins undecided; choosing federation retains its new contract.
       if (!general) {
-        await events.get("agent.permission_requested")(
+        await events.get("agent.permission.before")(
           {
             agent: source,
             request: {
@@ -145,7 +141,7 @@ async function freshUser(
           },
           context,
         );
-        await events.get("agent.permission_resolved")(
+        await events.get("agent.permission.after")(
           {
             agent: source,
             requestId: "mode",
@@ -162,11 +158,11 @@ async function freshUser(
     },
     async prompt(provider, env) {
       const request = { config: { provider, cwd: home }, ...(env ? { env } : {}) };
-      const first = await hooks.get("agent.create")({ request }, context);
+      const first = await hooks.get("agent.create.before")({ request }, context);
       assert.equal(first.config.provider, provider);
       const prompt = first.config.systemPrompt;
       assert.equal(typeof prompt, "string");
-      const second = await hooks.get("agent.create")(
+      const second = await hooks.get("agent.create.before")(
         { request: { ...request, config: { ...request.config, systemPrompt: prompt } } },
         context,
       );

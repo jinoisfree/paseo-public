@@ -20,12 +20,8 @@ async function fixture(t, project) {
     rpcs = new Map(),
     calls = [];
   const close = contribute({
-    before: (name, fn) => {
-      hooks.set(name, fn);
-      return () => {};
-    },
-    on: (name, fn) => {
-      events.set(name, fn);
+    addHook: (name, fn) => {
+      (name === "agent.create.before" || name === "agent.open.before" ? hooks : events).set(name, fn);
       return () => {};
     },
     handle: (contract, fn) => rpcs.set(contract.name, fn),
@@ -56,7 +52,7 @@ async function fixture(t, project) {
     configure: (settings) =>
       rpcs.get("workflow.configure")(settingsSchema.parse(settings), context),
     create: (config = {}, env = {}) =>
-      hooks.get("agent.create")(
+      hooks.get("agent.create.before")(
         { request: { config: { provider: "claude", cwd: dir, ...config }, env } },
         context,
       ),
@@ -79,11 +75,11 @@ async function fixture(t, project) {
       context.paseo.workspaces = {
         ref: () => ({ refresh: async () => ({ projectId: "project", name: "task" }) }),
       };
-      await hooks.get("agent.session_open")(
+      await hooks.get("agent.open.before")(
         { request: { agentId: "agent", env: result.env, reason: "create" } },
         context,
       );
-      await events.get("agent.created")(
+      await events.get("agent.create.after")(
         { agent: { id: "agent", parentAgentId: null, workspaceId: "workspace" } },
         context,
       );

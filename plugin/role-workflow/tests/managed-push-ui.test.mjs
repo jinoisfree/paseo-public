@@ -37,7 +37,7 @@ window.__rpc={
 };
 const rpc=(contract,input)=>window.__rpc[contract.name](input);
 const noop=()=>()=>{};
-contribute({rpc,paseo:{agents:{list:async()=>({subscription:{subscribe:()=>{}}})}},addTimelineTransformer:noop,addTimelineRenderer:noop,addSlashCommand:command=>{window.__slash[command.name]=command;return ()=>{};},addSurface:noop,addSidebarItem:noop,addCommandCenterItem:noop,openSurface:name=>{window.__surface=name;}});
+contribute({rpc,paseo:{agents:{list:async()=>({subscription:{subscribe:()=>{}}})}},addTimelineTransformer:noop,addTimelineRenderer:noop,addSlashCommand:command=>{window.__slash[command.name]=command;return ()=>{};},addSurface:noop,addSidebarItem:noop,addScreen:noop,addSidebarHeaderItem:noop,addCommandCenterItem:noop,openScreen:noop,openSurface:name=>{window.__surface=name;}});
 window.__invokePush=()=>window.__slash.push.onSubmit({agent:{id:'planner'},rpc});
 const colors={foreground:'#111',foregroundMuted:'#555',border:'#bbb',surface0:'#fff',surface1:'#eee',surface2:'#ddd',statusDanger:'#b00',statusSuccess:'#070'};
 createRoot(document.getElementById('root')).render(<Dashboard theme={{colors}} host={{id:'test',label:'test'}} layout={{compact:false,platform:'web'}}/>);

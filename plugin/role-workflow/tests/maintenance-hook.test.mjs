@@ -14,13 +14,13 @@ test("native maintenance lifecycle updates context without being consumed as a s
   agents:{ref:()=>({refresh:async()=>({agent}),send:async(...args)=>sends.push(args)})},
   workspaces:{ref:()=>({refresh:async()=>({projectId:"p",name:"Task"})})},
  }};
- const close=contribute({before:(name,fn)=>{before.set(name,fn);return()=>{};},on:(name,fn)=>{events.set(name,fn);return()=>{};},handle:(contract,fn)=>rpcs.set(contract.name,fn)});
+ const close=contribute({addHook:(name,fn)=>{(name==="agent.create.before"||name==="agent.open.before"?before:events).set(name,fn);return()=>{};},handle:(contract,fn)=>rpcs.set(contract.name,fn)});
  try{
   await rpcs.get("workflow.configure")(settingsSchema.parse({askMode:false,defaultMode:"general",claudeStartMode:"",koreanTitle:false,titleMarker:false,autoPinStarted:false,autoArchivePushed:false,codexCompression:"native",claudeCompression:{threshold:0.55,oneMillionTokenLimit:500000}}),context);
-  const created=await before.get("agent.create")({request:{config:{provider:"claude",cwd:dir}}},context);
-  await before.get("agent.session_open")({request:{agentId:"A",reason:"create",env:created.env}},context);
-  await events.get("agent.created")({agent},context);
-  const finish=timeline=>events.get("agent.turn_ended")({agent,timeline,outcome:{kind:"completed"}},context);
+  const created=await before.get("agent.create.before")({request:{config:{provider:"claude",cwd:dir}}},context);
+  await before.get("agent.open.before")({request:{agentId:"A",reason:"create",env:created.env}},context);
+  await events.get("agent.create.after")({agent},context);
+  const finish=timeline=>events.get("agent.turn.after")({agent,timeline,outcome:{kind:"completed"}},context);
   await finish([{type:"user_message",text:"일반개발\n작업",clientMessageId:"product-request"},{type:"assistant_message",text:"계속 작업 중"}]);
   let w=JSON.parse(await readFile(path.join(dir,"state.json"),"utf8")).workflows[0];const key=w.plan.lastTurnKey;assert.ok(key);
   agent.lastUsage.contextWindowUsedTokens=500000;

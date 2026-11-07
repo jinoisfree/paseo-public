@@ -91,7 +91,7 @@ export default function contribute(server: PluginServerContext) {
     console.error("role-workflow:", fatal);
   };
   const removers = [
-    server.before("agent.create", async ({ request }, context) => {
+    server.addHook("agent.create.before", async ({ request }, context) => {
       attach(context.paseo);
       const provider = request.config.provider;
       if (provider !== "claude" && provider !== "codex")
@@ -162,7 +162,7 @@ export default function contribute(server: PluginServerContext) {
         env: { ...env, PASEO_ROLE_WORKFLOW_SEED: token },
       };
     }),
-    server.before("agent.session_open", ({ request }, context) => {
+    server.addHook("agent.open.before", async ({ request }, context) => {
       attach(context.paseo);
       const token = request.env.PASEO_ROLE_WORKFLOW_SEED;
       const seed = seeds.get(token);
@@ -173,7 +173,7 @@ export default function contribute(server: PluginServerContext) {
       }
       return request;
     }),
-    server.on("agent.created", async ({ agent }, context) => {
+    server.addHook("agent.create.after", async ({ agent }, context) => {
       attach(context.paseo);
       const seed = createdSeeds.get(agent.id);
       createdSeeds.delete(agent.id);
@@ -191,9 +191,9 @@ export default function contribute(server: PluginServerContext) {
       }
       report(new Error(`대화 ${agent.id}를 작업에 연결하지 못했습니다. 대화 상태를 확인하세요.`));
     }),
-    server.on("agent.turn_ended", async (event, context) => {
+    server.addHook("agent.turn.after", async (event, context) => {
       attach(context.paseo);
-      const turn = await readCompletedTurn(event.timeline, event.agent.cwd, () =>
+      const turn = await readCompletedTurn(event.timeline ?? [], event.agent.cwd, () =>
         port.history(event.agent.id),
       ).catch((error: unknown) => {
         report(error);
@@ -208,7 +208,7 @@ export default function contribute(server: PluginServerContext) {
       if (event.outcome.kind === "failed") failure = event.outcome.error.message;
       if (event.outcome.kind === "canceled") failure = event.outcome.reason;
       if (event.outcome.kind === "completed")
-        await engine.generalTimeline(event.agent.id, event.timeline, turn.generalAnswers, turn.selectionAnswers, turn.modeAnswer, turn.goal);
+        await engine.generalTimeline(event.agent.id, event.timeline ?? [], turn.generalAnswers, turn.selectionAnswers, turn.modeAnswer, turn.goal);
       await engine
         .ended(
           event.agent.id,
@@ -225,19 +225,19 @@ export default function contribute(server: PluginServerContext) {
         .catch(report);
       void engine.auditPushes().catch(report);
     }),
-    server.on("agent.permission_requested", async ({ agent, request }, context) => {
+    server.addHook("agent.permission.before", async ({ agent, request }, context) => {
       attach(context.paseo);
       await engine.permission(agent.id, request).catch(report);
     }),
-    server.on("agent.permission_resolved", async ({ agent, requestId, resolution }, context) => {
+    server.addHook("agent.permission.after", async ({ agent, requestId, resolution }, context) => {
       attach(context.paseo);
       await engine.permissionResolved(agent.id, requestId, resolution).catch(report);
     }),
-    server.on("agent.archived", async ({ agent }, context) => {
+    server.addHook("agent.archive.after", async ({ agent }, context) => {
       attach(context.paseo);
       await engine.archived(agent.id).catch(report);
     }),
-    server.on("agent.turn_started", async (event, context) => {
+    server.addHook("agent.turn.before", async (event, context) => {
       attach(context.paseo);
       await engine.started(event.agent.id).catch(report);
     }),

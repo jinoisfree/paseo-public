@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,9 @@ import datetime
 from xml.sax.saxutils import escape
 from public_runtime import ROOT, LEGACY_FOLD_LABEL, AUTO_UPDATE_LABEL, load_config, config_path, data_root, logs_root, auto_update_logs, node_executable, app_path, backup_root, busy_workflows, verify_plugin_entries, auto_update_agent_state
 
+
+# role-workflow paseo-plugin.json requires >=0.15.0 <0.16.0; newer CLIs are left to the daemon's check.
+MIN_PASEO = (0, 15)
 
 def run(command, home, *, check=True, capture=False):
     env = os.environ.copy()
@@ -103,6 +107,11 @@ def verify_cli(paseo, home):
     if result.returncode:
         output = ((result.stdout or '')+(result.stderr or '')).strip() or '출력 없음'
         raise RuntimeError(f'Paseo CLI --version이 종료 코드 {result.returncode}로 끝났습니다 ({output}).\n{hint}')
+    found = re.search(r'(\d+)\.(\d+)\.(\d+)', result.stdout or '')
+    if found and (int(found[1]), int(found[2])) < MIN_PASEO:
+        raise RuntimeError(f'Paseo CLI {found[0]}은 지원 범위(0.15.x) 밖입니다. 선택한 CLI: {paseo}\n'
+                           'Paseo 앱을 0.15로 업데이트하거나 ~/.config/paseo-public/config.json의 paseo에 '
+                           '앱 안의 CLI(Paseo.app/Contents/Resources/bin/paseo) 경로를 지정하세요.')
 
 
 def read_paseo(home):

@@ -12,11 +12,10 @@ test("title prompt follows toggle and skips managed or nonautomated conversation
   const hooks = new Map(),
     rpcs = new Map();
   const close = contribute({
-    before: (name, fn) => {
+    addHook: (name, fn) => {
       hooks.set(name, fn);
       return () => {};
     },
-    on: () => () => {},
     handle: (contract, fn) => rpcs.set(contract.name, fn),
   });
   const context = { paseo: {} };
@@ -27,7 +26,7 @@ test("title prompt follows toggle and skips managed or nonautomated conversation
         context,
       );
       const request = { config: { provider: "claude", cwd: dir } };
-      const result = await hooks.get("agent.create")({ request }, context);
+      const result = await hooks.get("agent.create.before")({ request }, context);
       assert.equal(result.config.systemPrompt.includes("<paseo-title-v1>"), enabled);
       assert.match(result.config.systemPrompt, /<paseo-push-approval-v1>/);
       assert.match(result.config.systemPrompt, /명시적 승인을 받은 뒤에만/);
@@ -36,7 +35,7 @@ test("title prompt follows toggle and skips managed or nonautomated conversation
       { PASEO_ROLE_WORKFLOW_MANAGED: "1" },
       { PASEO_ROLE_WORKFLOW_DISABLE: "1" },
     ]) {
-      const result = await hooks.get("agent.create")(
+      const result = await hooks.get("agent.create.before")(
         { request: { config: { provider: "claude", cwd: dir }, env } },
         context,
       );
@@ -53,7 +52,7 @@ test("title prompt follows toggle and skips managed or nonautomated conversation
       );
       for (const provider of ["claude", "codex"]) {
         const request = { config: { provider, cwd: dir } };
-        const result = await hooks.get("agent.create")({ request }, context);
+        const result = await hooks.get("agent.create.before")({ request }, context);
         assert.equal(result.config.systemPrompt.includes("<paseo-progress-v1>"), titleMarker);
         assert.match(result.config.systemPrompt, /<paseo-push-approval-v1>/);
       }
@@ -72,8 +71,7 @@ test("model RPC lists selectable models and thinking defaults, returns failures 
   process.env.PASEO_ROLE_WORKFLOW_STATE_DIR = dir;
   const rpcs = new Map();
   const close = contribute({
-    before: () => () => {},
-    on: () => () => {},
+    addHook: () => () => {},
     handle: (contract, fn) => rpcs.set(contract.name, fn),
   });
   try {
@@ -154,11 +152,10 @@ test("both initial providers plan, managed executors keep their role, and model 
     rpcs = new Map(),
     calls = [];
   const close = contribute({
-    before: (name, fn) => {
+    addHook: (name, fn) => {
       hooks.set(name, fn);
       return () => {};
     },
-    on: () => () => {},
     handle: (contract, fn) => rpcs.set(contract.name, fn),
   });
   const context = {
@@ -178,7 +175,7 @@ test("both initial providers plan, managed executors keep their role, and model 
         config: { provider, cwd: dir, systemPrompt: "project rules" },
         labels: { custom: "keep" },
       };
-      const initial = await hooks.get("agent.create")({ request }, context);
+      const initial = await hooks.get("agent.create.before")({ request }, context);
       assert.match(initial.config.systemPrompt, /기획설계·검증 역할/);
       assert.match(initial.config.systemPrompt, /<paseo-work-mode-v4>/);
       if (provider === "codex")
@@ -186,7 +183,7 @@ test("both initial providers plan, managed executors keep their role, and model 
       assert.match(initial.config.systemPrompt,/플러그인 화면에서 고른다/);
       assert.ok(!initial.config.systemPrompt.includes(`${other}/m`));
       assert.deepEqual(Object.keys(initial).sort(), ["config", "env"]);
-      const managed = await hooks.get("agent.create")(
+      const managed = await hooks.get("agent.create.before")(
         {
           request: {
             ...request,
@@ -196,7 +193,7 @@ test("both initial providers plan, managed executors keep their role, and model 
         context,
       );
       assert.deepEqual(Object.keys(managed).sort(), ["config", "env"]);
-      const unrelated = await hooks.get("agent.create")(
+      const unrelated = await hooks.get("agent.create.before")(
         { request: { ...request, config: { ...request.config, provider: "opencode" } } },
         context,
       );
@@ -245,12 +242,8 @@ test("the start setting decides the question, the enrolled mode and which blocks
     events = new Map(),
     rpcs = new Map();
   const close = contribute({
-    before: (name, fn) => {
-      hooks.set(name, fn);
-      return () => {};
-    },
-    on: (name, fn) => {
-      events.set(name, fn);
+    addHook: (name, fn) => {
+      (name === "agent.create.before" || name === "agent.open.before" ? hooks : events).set(name, fn);
       return () => {};
     },
     handle: (contract, fn) => rpcs.set(contract.name, fn),
@@ -282,15 +275,15 @@ test("the start setting decides the question, the enrolled mode and which blocks
   };
   const start = async (agentId, settings) => {
     await rpcs.get("workflow.configure")(settingsSchema.parse(settings), context);
-    const created = await hooks.get("agent.create")(
+    const created = await hooks.get("agent.create.before")(
       { request: { config: { provider: "claude", cwd: dir, systemPrompt: "x".repeat(3000) } } },
       context,
     );
-    await hooks.get("agent.session_open")(
+    await hooks.get("agent.open.before")(
       { request: { agentId, env: created.env, reason: "create" } },
       context,
     );
-    await events.get("agent.created")(
+    await events.get("agent.create.after")(
       { agent: { id: agentId, parentAgentId: null, workspaceId: `workspace-${agentId}` } },
       context,
     );
@@ -360,15 +353,14 @@ test("failed rules publication preserves new conversation creation without the g
   const errors = t.mock.method(console, "error", () => {});
   const hooks = new Map();
   const close = contribute({
-    before(name, fn) {
+    addHook(name, fn) {
       hooks.set(name, fn);
       return () => {};
     },
-    on: () => () => {},
     handle: () => {},
   });
   try {
-    const result = await hooks.get("agent.create")(
+    const result = await hooks.get("agent.create.before")(
       { request: { config: { provider: "claude", cwd: dir } } },
       { paseo: {} },
     );

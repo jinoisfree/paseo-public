@@ -30,7 +30,7 @@ class SetupTests(unittest.TestCase):
         (self.root/'launchd').mkdir()
         (self.root/'launchd/auto-update.plist.in').write_bytes((Path(__file__).resolve().parents[1]/'launchd/auto-update.plist.in').read_bytes())
         self.config=self.home/'.config/paseo-public/config.json'
-        self.commands=[];self.reads=[];self.version_code=0;self.version_error='';self.launchctl_code=0;self.ls_override=None;self.fail_install=False;self.hook=None
+        self.commands=[];self.reads=[];self.version_code=0;self.version_out='0.15.2';self.version_error='';self.launchctl_code=0;self.ls_override=None;self.fail_install=False;self.hook=None
         self.env=mock.patch.dict(os.environ,{'HOME':str(self.home),'PASEO_PUBLIC_CONFIG':str(self.config),'PASEO_PUBLIC_NODE':str(self.node)})
         self.env.start();self.addCleanup(self.env.stop)
         self.patches=[mock.patch.object(setup,'ROOT',self.root),mock.patch.object(setup.time,'sleep'),mock.patch.object(setup,'cli_path',return_value=self.paseo),
@@ -42,7 +42,7 @@ class SetupTests(unittest.TestCase):
         # Read-only probes are kept apart so tests can assert that nothing was mutated.
         if args[1:2]==['--version'] or args[1:3]==['plugin','ls'] or args[1:2]==['print']:
             self.reads.append(args)
-            if args[1:2]==['--version']:return subprocess.CompletedProcess(args,self.version_code,stdout='',stderr=self.version_error)
+            if args[1:2]==['--version']:return subprocess.CompletedProcess(args,self.version_code,stdout=self.version_out,stderr=self.version_error)
             if args[1:2]==['print']:return subprocess.CompletedProcess(args,self.launchctl_code,stdout='',stderr='no such service')
             if self.ls_override is not None:return subprocess.CompletedProcess(args,0,stdout=json.dumps(self.ls_override),stderr='')
             entry=json.loads((self.home/'.paseo/config.json').read_text()).get('plugins',{}).get('role-workflow')
@@ -320,6 +320,15 @@ class SetupTests(unittest.TestCase):
         self.reads.clear();self.assertEqual(self.execute('install','--dry-run'),0);self.assertEqual(self.reads,[])
         with mock.patch.object(setup,'run',side_effect=PermissionError('denied')),self.assertRaisesRegex(RuntimeError,'denied'):
             setup.verify_cli(self.paseo,self.home)
+
+    def test_cli_older_than_supported_paseo_stops_before_changes(self):
+        self.ready();self.version_out='0.10.2\n'
+        with self.assertRaises(RuntimeError) as caught:self.execute('install')
+        message=str(caught.exception)
+        self.assertIn('0.10.2',message);self.assertIn('0.15',message);self.assertIn('Contents/Resources/bin/paseo',message)
+        self.assertEqual(self.commands,[])
+        self.version_out='paseo 0.16.0';self.commands.clear()
+        self.assertEqual(self.execute('install','--dry-run'),0)
 
     def test_post_install_verification_failure_is_reported(self):
         self.ready()

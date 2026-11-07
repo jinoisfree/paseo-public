@@ -9,9 +9,9 @@
     "rules:sync": "tsx scripts/sync-rules.mts"
   },
   "devDependencies": {
-    "@getpaseo/client": "0.10.3",
-    "@getpaseo/plugin": "0.10.3",
-    "@getpaseo/protocol": "0.10.3",
+    "@getpaseo/client": "0.15.0",
+    "@getpaseo/plugin": "0.15.0",
+    "@getpaseo/protocol": "0.15.0",
     "marked": "16.4.2",
     "react": "19.1.0",
     "react-native": "0.81.5",

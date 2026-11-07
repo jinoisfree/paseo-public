@@ -12,7 +12,7 @@ ROOT=Path(__file__).resolve().parents[1]
 EMAIL=re.compile(r'[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}')
 IP=re.compile(r'(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])')
 SECRETS=re.compile(r'(?<![\w])(?:sk(?:-ant)?-[A-Za-z0-9_-]{12,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[a-z]-[A-Za-z0-9-]{12,}|AKIA[A-Z0-9]{16}|Expo(?:nent)?PushToken\[[^\]]+\]|Bearer\s+[A-Za-z0-9._~+/=-]+|-----BEGIN [A-Z ]*PRIVATE KEY-----)')
-PERSONAL_PATHS=re.compile('/'+'(?:Users|Volumes)/[^\s\"\'`]+')
+PERSONAL_PATHS=re.compile('/'+r'''(?:Users|Volumes)/[^\s"'`]+''')
 LOCAL_HOST=re.compile(r'(?i)\b[A-Za-z0-9._-]+\.local\b')
 EXCLUDED={'node_modules','evidence','backups','build','automation','icloud-PASEO','paseo-home','codex-home','__pycache__'}
 

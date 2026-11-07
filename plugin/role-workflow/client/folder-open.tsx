@@ -1,7 +1,12 @@
-import { useCallback, useEffect, useMemo, useState, type ComponentType } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Pressable, Text } from "react-native";
 import { ScrollView, TextInput } from "@getpaseo/plugin/client/react-native";
-import { useRpc, type PluginClientContext, type PluginSurfaceProps } from "@getpaseo/plugin/client";
+import {
+  useRpc,
+  type PluginClientContext,
+  type PluginSidebarItemProps,
+  type PluginSurfaceProps,
+} from "@getpaseo/plugin/client";
 import type { RpcOutput } from "@getpaseo/plugin";
 import { folderList } from "../shared/folders";
 
@@ -160,25 +165,7 @@ export function FolderOpenScreen({
   );
 }
 
-// COMPAT(folderScreenAliases): added in v2.0.0, remove after 2027-03-29 when minimum Paseo is 0.11.
-// The development SDK is 0.10.3. Prefer 0.11+ APIs, keeping aliases for older hosts.
-type ScreenClient = PluginClientContext & {
-  addScreen?: (input: {
-    id: string;
-    title: string;
-    Component: ComponentType<PluginSurfaceProps>;
-  }) => () => void;
-  addSidebarHeaderItem?: (input: {
-    id: string;
-    title: string;
-    Component: ComponentType<SidebarProps>;
-  }) => () => void;
-  openScreen?: (input: { screenId: string }) => void;
-};
-type SidebarProps = Pick<PluginSurfaceProps, "theme"> & {
-  openScreen(input: { screenId: string }): void;
-};
-function FolderSidebar({ theme, openScreen }: SidebarProps) {
+function FolderSidebar({ theme, openScreen }: PluginSidebarItemProps) {
   const s = useFolderStyles(theme);
   const open = useCallback(() => openScreen({ screenId: "folders" }), [openScreen]);
   return (
@@ -188,37 +175,19 @@ function FolderSidebar({ theme, openScreen }: SidebarProps) {
   );
 }
 export function registerFolderOpen(client: PluginClientContext) {
-  const current = client as ScreenClient;
   const Screen = (props: PluginSurfaceProps) => {
     const openFolder = useCallback((cwd: string) => client.paseo.workspaces.open(cwd), []);
     return <FolderOpenScreen {...props} openFolder={openFolder} />;
   };
-  const open = () =>
-    current.openScreen
-      ? current.openScreen({ screenId: "folders" })
-      : client.openSurface("folders");
   return [
-    current.addScreen
-      ? current.addScreen({ id: "folders", title: "폴더 열기", Component: Screen })
-      : client.addSurface("folders", Screen),
-    current.addSidebarHeaderItem
-      ? current.addSidebarHeaderItem({
-          id: "folders",
-          title: "폴더 열기",
-          Component: FolderSidebar,
-        })
-      : client.addSidebarItem({
-          id: "folders",
-          title: "폴더 열기",
-          icon: "FolderOpen",
-          surface: "folders",
-        }),
+    client.addScreen({ id: "folders", title: "폴더 열기", Component: Screen }),
+    client.addSidebarHeaderItem({ id: "folders", title: "폴더 열기", Component: FolderSidebar }),
     client.addCommandCenterItem({
       id: "folders",
       title: "폴더 열기",
       icon: "FolderOpen",
       context: "global",
-      onSelect: open,
+      onSelect: () => client.openScreen({ screenId: "folders" }),
     }),
   ];
 }
