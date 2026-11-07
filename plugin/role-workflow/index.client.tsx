@@ -1,6 +1,7 @@
 import { GeneralAgentCard } from "./client/general-agent-card";
 import { generalCardSchema } from "./shared/general-agent";
-import type { PluginClientContext } from "@getpaseo/plugin/client";
+import type { PluginClientContext, PluginSidebarItemProps } from "@getpaseo/plugin/client";
+import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { registerResumeButtons } from "./client/resume-buttons";
 import { reportControl } from "./client/control-feedback";
 import { resumeResult } from "./shared/resume";
@@ -15,6 +16,16 @@ import { executorPickerCardSchema } from "./shared/executor-picker";
 import { focusManagedPush } from "./client/managed-push-panel";
 import { preparePush } from "./shared/managed-push";
 import { registerFolderOpen } from "./client/folder-open";
+
+function WorkflowSidebarItem({ currentScreen, openScreen }: PluginSidebarItemProps) {
+  return (
+    <SidebarRow
+      icon="Workflow"
+      active={currentScreen?.screenId === "workflow"}
+      onPress={() => openScreen({ screenId: "workflow" })}
+    />
+  );
+}
 
 export default function contribute(client: PluginClientContext) {
   const cleanups = [
@@ -70,7 +81,7 @@ export default function contribute(client: PluginClientContext) {
             `푸시 대상을 준비하지 못했습니다${reason}. 작업 상태를 확인한 뒤 다시 조회하세요.`,
           );
         } finally {
-          client.openSurface("workflow");
+          client.openScreen({ screenId: "workflow" });
         }
       },
     }),
@@ -89,7 +100,7 @@ export default function contribute(client: PluginClientContext) {
           await paseo.agents.ref(agent.id).send(action.text);
           reportControl("연합개발 전환 지시를 보냈습니다. 계획 담당의 응답을 기다립니다.");
         }
-        client.openSurface("workflow");
+        client.openScreen({ screenId: "workflow" });
       },
     }),
     client.addSlashCommand({
@@ -103,7 +114,7 @@ export default function contribute(client: PluginClientContext) {
         reportControl(
           resumeResult(await rpc(control, chatControl(workflows, agent.id, "resume", args))),
         );
-        client.openSurface("workflow");
+        client.openScreen({ screenId: "workflow" });
       },
     }),
     client.addSlashCommand({
@@ -116,22 +127,17 @@ export default function contribute(client: PluginClientContext) {
         const { workflows } = await rpc(status, {});
         const result = await rpc(control, chatControl(workflows, agent.id, "pause", args));
         reportControl(result.detail);
-        client.openSurface("workflow");
+        client.openScreen({ screenId: "workflow" });
       },
     }),
-    client.addSurface("workflow", Dashboard),
-    client.addSidebarItem({
-      id: "workflow",
-      title: "자동 작업",
-      icon: "Workflow",
-      surface: "workflow",
-    }),
+    client.addScreen({ id: "workflow", title: "자동 작업", Component: Dashboard }),
+    client.addSidebarHeaderItem({ id: "workflow", title: "자동 작업", Component: WorkflowSidebarItem }),
     client.addCommandCenterItem({
       id: "workflow",
       title: "자동 작업 상태·일시정지",
       icon: "Workflow",
       context: "global",
-      onSelect: () => client.openSurface("workflow"),
+      onSelect: () => client.openScreen({ screenId: "workflow" }),
     }),
   ];
   // Establish recovery context after app reconnect or plugin reload, without

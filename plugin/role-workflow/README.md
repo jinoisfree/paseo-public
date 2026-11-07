@@ -56,5 +56,5 @@ Paseo의 일반개발·연합개발 작업 상태를 관리하는 플러그인�
 
 - 서버 이벤트는 0.15의 `addHook`으로 등록합니다(`agent.create.before`, `agent.open.before`, `agent.create.after`, `agent.turn.before`, `agent.turn.after`, `agent.permission.before`, `agent.permission.after`, `agent.archive.after`). 옛 `on`/`before` 등록은 Paseo에서 2027-04-30 이후 제거됩니다.
 - 0.15의 `agent.turn.after`는 timeline을 비워 보냅니다. 끝난 턴은 대화 기록에서 다시 읽습니다.
-- 대시보드 화면은 아직 0.15에서 폐기 예정 표시만 붙은 `addSurface`/`addSidebarItem`/`openSurface`를 씁니다. 제거 일정이 정해지지 않아 화면 확인과 함께 별도로 옮깁니다.
+- 화면은 `addScreen`·`addSidebarHeaderItem`(호스트의 `SidebarRow`)·`openScreen`으로 등록합니다. 폐기 예정인 `addSurface`/`addSidebarItem`/`openSurface`는 쓰지 않습니다. Paseo는 옛 사이드바 항목과 같은 id의 설정 키와 `/sidebar/<id>` 링크를 새 화면으로 이어 줍니다.
 - 0.16이 나오면 변경점을 확인하고 테스트한 뒤 상한을 올립니다.

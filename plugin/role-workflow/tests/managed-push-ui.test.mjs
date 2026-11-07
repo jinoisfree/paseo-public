@@ -37,7 +37,7 @@ window.__rpc={
 };
 const rpc=(contract,input)=>window.__rpc[contract.name](input);
 const noop=()=>()=>{};
-contribute({rpc,paseo:{agents:{list:async()=>({subscription:{subscribe:()=>{}}})}},addTimelineTransformer:noop,addTimelineRenderer:noop,addSlashCommand:command=>{window.__slash[command.name]=command;return ()=>{};},addSurface:noop,addSidebarItem:noop,addScreen:noop,addSidebarHeaderItem:noop,addCommandCenterItem:noop,openScreen:noop,openSurface:name=>{window.__surface=name;}});
+contribute({rpc,paseo:{agents:{list:async()=>({subscription:{subscribe:()=>{}}})}},addTimelineTransformer:noop,addTimelineRenderer:noop,addSlashCommand:command=>{window.__slash[command.name]=command;return ()=>{};},addScreen:noop,addSidebarHeaderItem:noop,addCommandCenterItem:noop,openScreen:input=>{window.__surface=input.screenId;}});
 window.__invokePush=()=>window.__slash.push.onSubmit({agent:{id:'planner'},rpc});
 const colors={foreground:'#111',foregroundMuted:'#555',border:'#bbb',surface0:'#fff',surface1:'#eee',surface2:'#ddd',statusDanger:'#b00',statusSuccess:'#070'};
 createRoot(document.getElementById('root')).render(<Dashboard theme={{colors}} host={{id:'test',label:'test'}} layout={{compact:false,platform:'web'}}/>);
@@ -56,12 +56,14 @@ createRoot(document.getElementById('root')).render(<Dashboard theme={{colors}} h
           name: "fake-plugin-sdk",
           setup(builder) {
             builder.onResolve(
-              { filter: /^@getpaseo\/plugin(?:\/client(?:\/react-native)?)?$/ },
+              { filter: /^@getpaseo\/plugin(?:\/client(?:\/react-native|\/ui)?)?$/ },
               ({ path: modulePath }) => ({ path: modulePath, namespace: "sdk" }),
             );
             builder.onLoad({ filter: /.*/, namespace: "sdk" }, ({ path: modulePath }) => {
               let contents = "export const useRpc=contract=>window.__rpc[contract.name];";
               if (modulePath === "@getpaseo/plugin") contents = "export const defineRpc=x=>x;";
+              // The host provides the UI kit at runtime; the published module is types only.
+              else if (modulePath.endsWith("/ui")) contents = "export const SidebarRow=()=>null;";
               else if (modulePath.endsWith("/react-native"))
                 contents = 'export {ScrollView,TextInput} from "react-native-web";';
               return { loader: "js", resolveDir: root, contents };

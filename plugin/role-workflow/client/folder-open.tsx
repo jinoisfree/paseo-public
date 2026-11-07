@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Pressable, Text } from "react-native";
 import { ScrollView, TextInput } from "@getpaseo/plugin/client/react-native";
+import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import {
   useRpc,
   type PluginClientContext,
@@ -39,7 +40,6 @@ function useFolderStyles(theme: PluginSurfaceProps["theme"], busy = false) {
         gap: 6,
         opacity: busy ? 0.5 : 1,
       },
-      sidebar: { padding: 10 },
     }),
     [c, busy],
   );
@@ -165,13 +165,13 @@ export function FolderOpenScreen({
   );
 }
 
-function FolderSidebar({ theme, openScreen }: PluginSidebarItemProps) {
-  const s = useFolderStyles(theme);
-  const open = useCallback(() => openScreen({ screenId: "folders" }), [openScreen]);
+function FolderSidebar({ currentScreen, openScreen }: PluginSidebarItemProps) {
   return (
-    <Pressable accessibilityRole="button" onPress={open} style={s.sidebar}>
-      <Text style={s.text}>폴더 열기</Text>
-    </Pressable>
+    <SidebarRow
+      icon="FolderOpen"
+      active={currentScreen?.screenId === "folders"}
+      onPress={() => openScreen({ screenId: "folders" })}
+    />
   );
 }
 export function registerFolderOpen(client: PluginClientContext) {
