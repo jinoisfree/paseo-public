@@ -3,6 +3,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
+import { parse } from "@babel/parser";
 import { capabilityViolations } from "./capability-structure.mjs";
 import { WorkspaceLifecycle, bindWorkspaceLifecycle } from "../server/workspace-lifecycle.ts";
 
@@ -18,17 +21,34 @@ test("AC-201 C-1: all server modules and the server entrypoint obey capability f
   const violations = (await Promise.all(files.map(async file => capabilityViolations(await readFile(file, "utf8"), path.relative(root, file))))).flat();
   assert.deepEqual(violations, []);
 });
-for (const name of ["workspace-chain", "reflect", "template", "concatenation", "daemon-pin", "timeline-alias", "timeline-destructure", "computed-cleanup", "lifecycle-destructure", "lifecycle-prototype", "context-data-helper", "context-entries", "context-unknown-data", "context-values", "context-descriptor", "context-alias"])
+for (const name of ["workspace-chain", "reflect", "template", "concatenation", "daemon-pin", "timeline-alias", "timeline-destructure", "computed-cleanup", "lifecycle-destructure", "lifecycle-prototype", "context-archive-data", "context-entries", "context-unknown-data", "context-values", "context-descriptor", "context-alias"])
   test(`AC-201 C-1: negative fixture ${name} must fail in both server and entrypoint`, async () => {
     const source = await readFile(new URL(`./fixtures/capability-bypasses/${name}.ts`, import.meta.url), "utf8");
     for (const file of ["server/bypass.ts", "index.server.ts"]) {
       const violations = capabilityViolations(source, file);
       assert.ok(violations.length > 0, `${file}: ${name} escaped`);
-      if (name.startsWith("context-")) assert.ok(violations.some(v => /raw context API/.test(v)), `${name} must be caught at its API source`);
+      if (name.startsWith("context-") || name === "reflect") assert.ok(violations.some(v => /raw context API/.test(v)), `${name} must be caught at its API source`);
       if (name === "lifecycle-destructure") assert.ok(violations.some(v => /destructured capability/.test(v)));
       if (name === "lifecycle-prototype") assert.ok(violations.some(v => /prototype/.test(v)));
     }
   });
+
+test("AC-201 R7-3: every negative fixture imports existing modules and exported symbols", async () => {
+  const folder = new URL("./fixtures/capability-bypasses/", import.meta.url);
+  for (const file of (await readdir(folder)).filter(name => name.endsWith(".ts"))) {
+    const url = new URL(file, folder);
+    const ast = parse(await readFile(url, "utf8"), { sourceType: "module", plugins: ["typescript"] });
+    for (const declaration of ast.program.body.filter(node => node.type === "ImportDeclaration")) {
+      const target = createRequire(url).resolve(declaration.source.value);
+      const exports = await import(pathToFileURL(target).href);
+      for (const specifier of declaration.specifiers) {
+        if (specifier.type === "ImportNamespaceSpecifier") continue;
+        const name = specifier.type === "ImportDefaultSpecifier" ? "default" : specifier.imported.name ?? specifier.imported.value;
+        assert.ok(Object.hasOwn(exports, name), `${file}: ${declaration.source.value} has no export ${name}`);
+      }
+    }
+  }
+});
 
 function fixture(cleanupReadiness) {
   const w = { id: "w", isolation: "worktree", worktree: { workspaceId: "tree" }, execute: { id: "E", workspaceId: "tree" }, plan: { workspaceId: "plan" }, startPin: { workspaces: [] } };
@@ -78,6 +98,53 @@ test("AC-205 R-3/D-2: a final activity query failure preserves the workspace for
   const f = fixture(async () => ({ stage: "ready", detail: "" }));
   f.port.archiveInspection = async () => { throw Error("offline"); };
   assert.equal((await f.gate.archiveCleaned(f.w)).stage, "pending");
+  assert.deepEqual(f.calls, []);
+});
+
+test("AC-202/AC-205 R7-1: final inspection expires at sixty seconds, preserves pending and can retry", async t => {
+  const f = fixture(async () => ({ stage: "ready", detail: "" }));
+  const inspect = f.port.archiveInspection;
+  let started, reply;
+  const called = new Promise(resolve => { started = resolve; });
+  f.port.archiveInspection = (...args) => {
+    assert.deepEqual(args, [["tree"]]);
+    started();
+    return new Promise(resolve => { reply = resolve; });
+  };
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let settled = false;
+  const pending = f.gate.archiveCleaned(f.w).then(result => { settled = true; return result; });
+  await called;
+  t.mock.timers.tick(59_999);
+  await new Promise(setImmediate);
+  assert.equal(settled, false);
+  assert.deepEqual(f.calls, []);
+  t.mock.timers.tick(1);
+  await new Promise(setImmediate);
+  assert.equal(settled, true, "the final inspection must stop at sixty seconds");
+  const result = await pending;
+  assert.equal(result.stage, "pending");
+  assert.match(result.detail, /조회하지 못해 보존/);
+  assert.deepEqual(f.calls, []);
+  reply(await inspect());
+  await Promise.resolve();
+  assert.deepEqual(f.calls, [], "a late response cannot archive after the timeout");
+  f.port.archiveInspection = inspect;
+  assert.equal((await f.gate.archiveCleaned(f.w)).stage, "ready");
+  assert.deepEqual(f.calls, [["tree"]]);
+});
+
+test("AC-202 R7-1: an ordinary archive inspection also stops at sixty seconds without mutation", async t => {
+  const f = fixture(); f.w.isolation = "shared";
+  let started;
+  const called = new Promise(resolve => { started = resolve; });
+  f.port.archiveInspection = () => { started(); return new Promise(() => {}); };
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const pending = f.gate.archive("tree");
+  await called;
+  const rejected = assert.rejects(pending, /archiveInspection, 60초/);
+  t.mock.timers.tick(60_000);
+  await rejected;
   assert.deepEqual(f.calls, []);
 });
 
@@ -253,6 +320,13 @@ test("AC-201 D-1/C-1-R2: ordinary computed data access is allowed while raw cont
     'bindWorkspaceLifecycle(gate, {db: fake});',
   ]) assert.ok(capabilityViolations(source, "index.server.ts").length);
   assert.ok(capabilityViolations('class E { resume() { bindWorkspaceLifecycle(gate, {db: fake}); } }', "server/engine.ts").length);
+});
+
+test("AC-201 R7-2: Reflect.get is allowed for ordinary data while raw context flow remains rejected", () => {
+  for (const file of ["server/data.ts", "index.server.ts"]) {
+    assert.deepEqual(capabilityViolations('const value = Reflect.get(port, name);', file), []);
+    assert.ok(capabilityViolations('Reflect.get(context.paseo.workspaces.ref("x"), "archive")();', file).some(v => /raw context API/.test(v)));
+  }
 });
 
 test("AC-201 C-1-R1: every lifecycle policy operation rejects destructured and prototype bypass syntax", () => {

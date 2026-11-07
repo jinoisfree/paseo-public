@@ -892,7 +892,7 @@ async function limitedUsage(api: OperationalApi) {
  * that runs out of budget rejects; the engine already treats a failed send as uncertain and
  * confirms it from history instead of sending again. Calls with their own bounds are omitted.
  */
-export const CALL_BUDGETS_MS: Partial<Record<keyof WorkflowPort, number>> = {
+export const CALL_BUDGETS_MS = {
   inspect: 20_000,
   send: 20_000,
   rename: 20_000,
@@ -911,7 +911,7 @@ export const CALL_BUDGETS_MS: Partial<Record<keyof WorkflowPort, number>> = {
   create: 120_000,
   createWorktree: 120_000,
   createGeneral: 120_000,
-};
+} satisfies Partial<Record<keyof WorkflowPort, number>>;
 
 export function withCallBudgets(
   port: WorkflowPort,
@@ -919,7 +919,7 @@ export function withCallBudgets(
 ): WorkflowPort {
   const bounded: Record<string, unknown> = { ...port };
   for (const [name, ms] of Object.entries(budgets)) {
-    const call = new Map(Object.entries(port)).get(name);
+    const call = Reflect.get(port, name);
     if (typeof call !== "function" || !ms) continue;
     bounded[name] = (...args: unknown[]) => {
       let timer: ReturnType<typeof setTimeout> | undefined;

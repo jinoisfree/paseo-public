@@ -1,1 +1,1 @@
-Reflect.get(getApi().workspaces.ref("x"), "archive")();
+Reflect.get(context.paseo.workspaces.ref("x"), "archive")();

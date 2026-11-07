@@ -1,3 +1,10 @@
+/**
+ * Catch accidental plugin policy bypasses; deliberate malicious in-process code is out of scope.
+ * File allowlists cover raw SDK/pin imports and timeline/archive/pin handles, context.paseo
+ * may flow only into attach, and lifecycle creation/registration, destructuring and prototype
+ * access stay at their composition/operation boundaries. Ordinary computed data access and
+ * Reflect.get are allowed: capability isolation, not a JavaScript sandbox, owns the policy.
+ */
 import { parse } from "@babel/parser";
 
 const lifecycleFiles = new Set(["server/workspace-lifecycle.ts"]);
@@ -64,8 +71,6 @@ export function capabilityViolations(source, file) {
       if (!lifecycle && name === "archive" && !(file === "server/archives.ts" && source.slice(node.object.start, node.object.end) === "this.host.lifecycle()"))
         report(node, "raw archive handle");
       if (name === "archiveCleaned" && file !== "server/worktree-cleanup.ts") report(node, "cleanup proof outside cleanup");
-      if (node.object.type === "Identifier" && node.object.name === "Reflect" && name === "get" && !lifecycle && !cards)
-        report(node, "reflective capability access");
     }
     if (node.type === "ObjectPattern") for (const p of node.properties ?? []) {
       const name = key(p.key);
