@@ -1,4 +1,4 @@
-import { compressionDecision, contextRatio, type ContextUsage } from "../shared/compression";
+import { compressionDecision, type ContextUsage } from "../shared/compression";
 import { EXECUTOR_QUESTIONS, executorSelectionSchema, selectionStageLabel, type SelectionStage } from "../shared/executor-selection";
 import { applyLegacySelection, applySelectionBatch, validateSelection, selectionQuestions, selectionAnswers, pendingFields, timelineSelections, timelineMode, explicitSelection } from "./executor-selection";
 import type { ExecutorModel } from "./protocol";
@@ -76,16 +76,10 @@ import {
 } from "./artifacts";
 import { resolvedFolder, pathsOverlap } from "./workspaces";
 import { integrateWorktree, placeExecutor, workFolder, worktreeContext } from "./worktree";
-import {
-  recordQuotaFailure,
-  quotaPauseSchema,
-  usageLimit,
-  quotaDelay,
-  quotaCheckDue,
-  QUOTA_ACCOUNT_SETTLE_MS,
-} from "./quota";
-import { transientPauseSchema, transientFailure, transientDelay } from "./transient";
+import { quotaPauseSchema } from "./quota";
+import { transientPauseSchema } from "./transient";
 import { Recovery } from "./recovery";
+import { Compaction } from "./compaction";
 
 const memberSchema = z.object({
   id: z.string(),
@@ -566,6 +560,15 @@ export class WorkflowEngine {
   private readonly scopeCache = new Map<string, Promise<string>>();
   private readonly managedRunner: ManagedPushRunner;
   private readonly managedExecutions = new Map<string, ManagedPush>();
+  private readonly compaction = new Compaction({
+    port: () => this.port,
+    save: () => this.save(),
+    touch: (w, detail) => this.touch(w, detail),
+    serial: (work) => this.serial(work),
+    settings: () => this.settings(),
+    compacting: this.compacting,
+    compressionReasons: this.compressionReasons,
+  });
   private readonly recovery = new Recovery({
     port: () => this.port,
     now: () => this.now(),
@@ -1546,7 +1549,7 @@ export class WorkflowEngine {
       if (capabilities(w).standalone && w.plan?.id === agentId) {
         if (failed === null && !canceled) w.plan.lastTurnKey = key;
         if (compacted) w.plan.compactedForTurn = key;
-        await this.maintainStandalone(w);
+        await this.compaction.maintainStandalone(w);
         await this.save();
       }
     });
@@ -1561,7 +1564,7 @@ export class WorkflowEngine {
       if (!this.compacting.has(member.id)) {
         if (member.compaction && maintenanceId === member.compaction) {
           const recovering = !!member.compactionError;
-          this.finishCompaction(w, member, member.compactionTurnKey || member.lastTurnKey);
+          this.compaction.finishCompaction(w, member, member.compactionTurnKey || member.lastTurnKey);
           if (recovering) member.compactionError = "압축 완료 확인됨. 압축 복구 버튼으로 유지보수를 재개하세요.";
         } else {
           member.compactedForTurn = member.lastTurnKey;
@@ -3183,7 +3186,7 @@ export class WorkflowEngine {
       if (capabilities(w).standalone) {
         if (isFinished(w) || w.status === "completed") throw new Error("완료된 작업은 압축 유지보수를 시작하지 않습니다.");
         if (action === "pause") await this.pause(w);
-        else if (action === "retry_compaction") await this.retryCompaction(w);
+        else if (action === "retry_compaction") await this.compaction.retryCompaction(w);
         else if (action === "resume" && !message.trim()) {
           if (w.plan?.compactionError) {
             if (w.status !== "paused") throw new Error("압축 복구·재시도 버튼으로 완료 상태를 먼저 확인하세요.");
@@ -3191,7 +3194,7 @@ export class WorkflowEngine {
             this.touch(w, "압축 오류가 남아 있습니다. 압축 복구·재시도로 완료 상태를 확인하세요.");
           } else {
             w.status = "active";
-            await this.maintainStandalone(w);
+            await this.compaction.maintainStandalone(w);
           }
           await this.save();
         } else throw new Error("단일 대화에서는 압축 유지보수 일시정지·재개·복구만 지원합니다.");
@@ -3715,7 +3718,7 @@ export class WorkflowEngine {
           return false;
         });
         if (ready) await this.stepWorkflow(w);
-        else if (capabilities(w).standalone) await this.maintainStandalone(w).catch(error => {
+        else if (capabilities(w).standalone) await this.compaction.maintainStandalone(w).catch(error => {
           w.status = "error";
           this.touch(w, `압축 유지보수 확인 실패: ${String(error)}. 압축 복구·재시도를 사용하세요.`);
         });
@@ -3950,7 +3953,7 @@ export class WorkflowEngine {
     const member = w[role];
     if (!member) return;
     const snapshot = member.workspaceId ? await this.port.inspect(member.id) : null;
-    if (await this.prepareCompaction(w, member, snapshot, role === "plan" ? "계획" : "실행")) return;
+    if (await this.compaction.prepareCompaction(w, member, snapshot, role === "plan" ? "계획" : "실행")) return;
     const current = w[role]!;
     if (!current.workspaceId) {
       if (role === "execute" && capabilities(w).executorSelection) {
@@ -3974,112 +3977,6 @@ export class WorkflowEngine {
         });
       await this.save();
     }
-  }
-  private async prepareCompaction(w: Workflow, member: Member, snapshot: Snapshot | null, label: string): Promise<boolean> {
-    // Use the same fresh raw sample for display and policy; never retain stale usage.
-    const ratio = snapshot ? (snapshot.contextUsage === undefined ? snapshot.usage : contextRatio(snapshot.contextUsage)) : null;
-    member.usage = typeof ratio === "number" && Number.isFinite(ratio) && ratio >= 0 ? ratio : null;
-    const compression = compressionDecision(snapshot?.config?.provider ?? member.config.provider, await this.settings(), snapshot);
-    this.compressionReasons.set(member.id, compression.reason);
-    if (member.compaction) {
-      if (!this.compacting.has(member.id)) {
-        member.compactionError = "압축 중 연결이 끊겨 완료 여부를 확인해야 합니다.";
-        throw new Error(capabilities(w).standalone ? "압축 복구·재시도로 완료 상태를 확인하세요." : "압축 중 연결이 끊겼습니다. 대화 상태를 확인하고 재개하면 압축을 다시 시도합니다.");
-      }
-      return true;
-    }
-    if (
-      compression.due &&
-      member.lastTurnKey &&
-      member.compactedForTurn !== member.lastTurnKey &&
-      snapshot?.status === "idle" &&
-      !snapshot.permission
-    ) {
-      member.compaction = `role-workflow-compact:${randomUUID()}`;
-      member.compactionTurnKey = member.lastTurnKey;
-      member.compactionError = "";
-      this.touch(w, `${label} 대화의 컨텍스트를 압축하고 있습니다.`);
-      await this.save();
-      this.startCompaction(w, member);
-      return true;
-    }
-    return false;
-  }
-  private async maintainStandalone(w: Workflow) {
-    if (!capabilities(w).standalone || w.status !== "active" || isFinished(w) || !w.plan?.workspaceId || w.execute) return;
-    const snapshot = await this.port.inspect(w.plan.id);
-    if (!snapshot || snapshot.archived || snapshot.status !== "idle" || snapshot.permission) return;
-    if ((snapshot.config?.provider ?? w.plan.config.provider).split("/")[0] === "codex" && !w.plan.compaction) {
-      this.compressionReasons.set(w.plan.id, "Codex 단일 대화는 Codex 자체 압축을 사용합니다.");
-      return;
-    }
-    try { await this.prepareCompaction(w, w.plan, snapshot, "현재"); }
-    catch (error) {
-      w.status = "error";
-      this.touch(w, `컨텍스트 압축 유지보수: ${String(error)}`);
-      await this.save();
-    }
-  }
-  private finishCompaction(w: Workflow, member: Member, turnKey: string) {
-    member.compaction = null;
-    member.compactionTurnKey = "";
-    member.compactionError = "";
-    member.compactedForTurn = turnKey;
-    member.compactions++;
-    this.touch(w, "컨텍스트 압축을 마쳤습니다. 같은 대화에서 작업을 이어갑니다.");
-  }
-  private async retryCompaction(w: Workflow) {
-    const member = w.plan!;
-    if (w.status !== "error" || (!member.compaction && !member.compactionError)) throw new Error("복구할 압축 오류가 없습니다.");
-    const snapshot = await this.port.inspect(member.id);
-    if (!snapshot || snapshot.archived || snapshot.status !== "idle" || snapshot.permission || this.compacting.has(member.id))
-      throw new Error("대화가 열려 있고 유휴 상태이며 질문 대기가 없을 때 압축을 복구할 수 있습니다.");
-    if (member.compaction) {
-      const history = await this.port.history(member.id, member.compaction);
-      if (history.maintenance && history.maintenanceId === member.compaction && history.compacted && history.failed === null) {
-        this.finishCompaction(w, member, member.compactionTurnKey || member.lastTurnKey);
-      } else {
-        // A message ID is correlation, not proof that the host deduplicates sends.
-        // Retry only an exact request with an explicit terminal native failure.
-        if (!history.maintenance || history.maintenanceId !== member.compaction || history.compacted ||
-            !history.text.includes("Failed to compact context:"))
-          throw new Error("압축 완료·실패를 확인할 수 없어 재전송하지 않습니다. 대화에서 직접 /compact를 실행한 뒤 압축 복구를 누르세요.");
-        member.compaction = `role-workflow-compact:${randomUUID()}`;
-        member.compactionError = "";
-        w.status = "active";
-        await this.save();
-        this.startCompaction(w, member);
-        return;
-      }
-    }
-    member.compactionError = "";
-    w.status = "active";
-    await this.save();
-  }
-  private startCompaction(w: Workflow, member: Member) {
-    const turnKey = member.compactionTurnKey || member.lastTurnKey;
-    const job = this.port
-      .compact(member.id, member.compaction!)
-      .then(
-        () =>
-          this.serial(async () => {
-            this.finishCompaction(w, member, turnKey);
-            await this.save();
-          }),
-        (error) =>
-          this.serial(async () => {
-            if (!capabilities(w).standalone) member.compaction = null;
-            member.compactionError = String(error);
-            w.transientPause = null;
-            if (w.status !== "paused" && !isFinished(w)) w.status = "error";
-            this.touch(w, `컨텍스트 압축 실패: ${String(error)}. ${capabilities(w).standalone ? "압축 복구·재시도를 사용하세요." : "확인 후 재개하세요."}`);
-            await this.save();
-          }),
-      )
-      .finally(() => this.compacting.delete(member.id));
-    this.compacting.set(member.id, job);
-    // The durable error state is surfaced in the dashboard; prevent detached rejections.
-    void job.catch(() => {});
   }
   private async deliver(w: Workflow) {
     if (w.plan?.compaction || w.execute?.compaction) return;
