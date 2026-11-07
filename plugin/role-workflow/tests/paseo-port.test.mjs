@@ -1342,3 +1342,14 @@ test("AC-106: a cleaned placement uses a fresh worktree key and branch while ret
   assert.equal(calls[1].source.branchName, "role-workflow/1-12345678-2");
   assert.deepEqual(calls[1], calls[2]);
 });
+
+
+test("AC-106/N-1: placement timeline ids keep the initial id and separate later generations without expanding card data", async () => {
+  const cards = [];
+  const port = createPort(() => ({ agents: { ref: () => ({ timeline: { append: async item => cards.push(item) } }) } }));
+  await port.placementPicker("P", "task", { number: 7, title: "blocker" });
+  await port.placementPicker("P", "task", { number: 7, title: "blocker" }, 2);
+  await port.placementPicker("P", "task", { number: 7, title: "blocker" }, 3);
+  assert.deepEqual(cards.map(c => c.id), ["role-workflow-placement-picker:task", "role-workflow-placement-picker:task:2", "role-workflow-placement-picker:task:3"]);
+  for (const card of cards) assert.deepEqual(card.data, { workflowId: "task", number: 7, title: "blocker" });
+});

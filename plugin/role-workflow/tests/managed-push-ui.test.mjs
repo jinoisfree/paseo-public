@@ -6,7 +6,7 @@ import { build } from "esbuild";
 import { chromium } from "playwright";
 
 test(
-  "managed push UI previews before approval, prevents repeat execution and offers read-only recovery",
+  "AC-107/B-1: archive UI explains preserved worktrees; managed push previews approval and offers read-only recovery",
   { timeout: 60000 },
   async (t) => {
     const root = path.resolve(import.meta.dirname, "..");
@@ -30,7 +30,7 @@ window.__rpc={
  'workflow.repositories':async()=>({repositories:[]}),
  'workflow.test-notification':async()=>({ok:true,tokens:0,status:null,error:null}),
  'workflow.models':async()=>({models:[],error:null}),
- 'workflow.archive-finished':async()=>({rows:[],archivedIds:[],errors:[]}),
+ 'workflow.archive-finished':async input=>{window.__calls.push({name:'archive',input});return {rows:[],archivedIds:[],errors:[],blocked:[{id:'blocked',number:7,title:'미정리 작업',reason:'따로 작업 공간 정리가 끝나지 않아 보관하지 않습니다'}]};},
  'workflow.push-prepare':async input=>{window.__calls.push({name:'prepare',input}); if(flow.managedPush)flow.pushHistory.unshift(flow.managedPush);flow.managedPush={id:crypto.randomUUID(),workflowId:flow.id,epoch:0,state:'prepared',createdAt:'2026-10-15T00:00:00Z',updatedAt:'2026-10-15T00:00:00Z',approvedAt:null,targets:[structuredClone(target)],error:''};return structuredClone(flow.managedPush);},
  'workflow.push-execute':async input=>{window.__calls.push({name:'execute',input});if(window.__failure)throw Error('connection lost: private raw process log');await new Promise(resolve=>{window.__resolveExecute=resolve});flow.managedPush={...flow.managedPush,state:'pushed',approvedAt:'2026-10-15T00:01:00Z',targets:[{...target,exitCode:0,verified:true}]};return structuredClone(flow.managedPush);},
  'workflow.push-recheck':async input=>{window.__calls.push({name:'recheck',input});flow.managedPush={...flow.managedPush,state:window.__recheckState??'unknown',error:'원격 반영을 확인하지 못했습니다.'};return structuredClone(flow.managedPush);}
@@ -91,6 +91,12 @@ createRoot(document.getElementById('root')).render(<Dashboard theme={{colors}} h
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(`http://127.0.0.1:${server.address().port}`);
+    await page.getByTestId("workflow-archive-preview").click();
+    await page.getByText("따로 작업 공간 정리가 끝나지 않아 보관하지 않습니다", { exact: true }).waitFor();
+    await page.getByText("#7 미정리 작업", { exact: true }).waitFor();
+    assert.equal(await page.getByTestId("workflow-archive-apply").count(), 0);
+    assert.deepEqual(await page.evaluate(() => window.__calls), [{ name: "archive", input: { apply: false, ids: [] } }]);
+    await page.evaluate(() => { window.__calls = []; });
     const panel = page.getByTestId("managed-push-task");
     await panel
       .getByText("푸시할 대상을 확인하고 승인하면 앱이 실행 결과를 기록합니다.", { exact: true })

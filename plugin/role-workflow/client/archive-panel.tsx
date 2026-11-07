@@ -26,7 +26,7 @@ export function ArchivePanel({ archives = [], styles: s, button, run, notice, er
     setPreview(null);
     const result = await tidy({ apply: false, ids: [] });
     setPreview(result);
-    if (!result.rows.length) notice("보관할 완료 작업이 없습니다.");
+    if (!result.rows.length && !result.blocked?.length) notice("보관할 완료 작업이 없습니다.");
   }
   async function applyPreview() {
     if (!preview) return;
@@ -43,6 +43,12 @@ export function ArchivePanel({ archives = [], styles: s, button, run, notice, er
         <Text style={s.title}>끝난 작업 정리</Text>
         <Text style={s.muted}>저장된 유예 설정을 만족한 🟢 완료 작업을 확인한 뒤 보관합니다.</Text>
         {button("완료 정리", () => void run(readPreview, ""), "workflow-archive-preview")}
+        {preview?.blocked?.map(row => (
+          <View key={row.id}>
+            <Text style={s.text}>#{row.number} {row.title}</Text>
+            <Text style={s.muted}>{row.reason}</Text>
+          </View>
+        ))}
         {!!preview?.rows.length && (
           <View style={s.spacing}>
             <Text style={s.text}>완료 작업 {preview.rows.length}개를 보관합니다.</Text>

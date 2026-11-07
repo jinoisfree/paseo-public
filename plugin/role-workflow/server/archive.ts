@@ -29,6 +29,8 @@ export interface ArchiveFlow {
   mode: string;
   progress: string;
   status: string;
+  isolation?: string;
+  worktreeCleanup?: { stage: string } | null;
   plan: { id: string; workspaceId: string | null; compaction?: string | null } | null;
   execute: { id: string; workspaceId: string | null; compaction?: string | null } | null;
   pending?: unknown;
@@ -66,6 +68,14 @@ export function archiveMembersPresent(
   return members.every(member => conversations.some(a => a.id === member.id && a.workspaceId === member.workspaceId));
 }
 
+export function archiveBlockReason(w: Pick<ArchiveFlow, "isolation" | "worktreeCleanup">): string | null {
+  return w.isolation === "worktree" && w.worktreeCleanup?.stage !== "done"
+    ? "따로 작업 공간 정리가 끝나지 않아 보관하지 않습니다" : null;
+}
+export function archiveWorkspacePinned(workspace: ArchiveWorkspace): boolean {
+  return workspace.pinnedAt !== null;
+}
+
 /** Unknown pinning, activity or conversation state always preserves the workspace. */
 export function archiveCandidate(
   w: ArchiveFlow,
@@ -75,6 +85,7 @@ export function archiveCandidate(
   now = Date.now(),
 ): ArchiveCandidate | null {
   if (
+    !!archiveBlockReason(w) ||
     !isFinished(w) ||
     w.progress !== progress ||
     !Number.isSafeInteger(days) ||
@@ -142,7 +153,7 @@ function activeWorkspaceIds(
       continue;
     }
     if (
-      workspace.pinnedAt !== null ||
+      archiveWorkspacePinned(workspace) ||
       workspace.archiving ||
       !["done", "attention"].includes(workspace.status)
     )

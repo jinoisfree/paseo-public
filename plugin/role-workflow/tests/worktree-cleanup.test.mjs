@@ -53,7 +53,7 @@ async function fixture(t) {
       agents.set(m.id, { ...agents.get("P"), id: m.id, config: m.config });
       return "plan";
     },
-    placementPicker: async (agentId, workflowId, blocker) => cards.push({ agentId, workflowId, blocker }),
+    placementPicker: async (agentId, workflowId, blocker, generation) => cards.push({ agentId, workflowId, blocker, generation }),
     createWorktree: async () => { throw new Error("not selected in this test"); },
     send: async () => {}, quotaAccount: async () => null, quotaAvailable: async () => null,
   };
@@ -80,7 +80,7 @@ async function fixture(t) {
     dir, repo, tree, state, file, id, commit, port, probe, agents, spaces, calls, cards,
     get w() { return w; }, get engine() { return engine; },
     run: () => engine.worktreeCleanup.run(w),
-    advance: () => { now += CLEANUP_RETRY_MS + 1; },
+    advance: (ms = CLEANUP_RETRY_MS + 1) => { now += ms; },
     restart: async () => { await engine.save(); await engine.close(); engine = new WorkflowEngine(file, port, undefined, probe, () => now, runner); await engine.tick(); w = engine.database.workflows[0]; },
   };
 }
@@ -220,6 +220,7 @@ test(`AC-106: a new implementation after cleanup gets generation+1 and ${overlap
     assert.equal(f.w.isolation, "undecided");
     assert.equal(f.w.placement.stage, "choice");
     assert.equal(f.cards.length, 1);
+    assert.equal(f.cards[0].generation, 2);
     assert.equal(f.w.execute.workspaceId, null);
   } else {
     assert.equal(f.w.isolation, "shared");
@@ -252,4 +253,132 @@ test("AC-102: disabling cleanup during inspection is rechecked immediately befor
   await f.run();
   assert.deepEqual(f.calls, []);
   assert.equal(f.w.worktreeCleanup.stage, "skipped");
+});
+
+
+const newPlan = f => f.engine.ended("P", "new-plan", `<paseo-workflow>${JSON.stringify({ status: "plan", summary: "new plan", next: "new implementation", handoff: "next", checks: [] })}</paseo-workflow>`, null, "next goal", false, "새 구현을 시작해줘");
+
+test("AC-107/B-1: dirty skipped worktrees cannot bypass cleanup through automatic or manual archive", async t => {
+  const f = await fixture(t);
+  await f.engine.configure({ ...await f.engine.settings(), autoArchivePushed: true, archiveAfterDays: 0 });
+  await writeFile(path.join(f.tree, "feature.txt"), "uncommitted work must survive");
+  await f.run();
+  assert.equal(f.w.worktreeCleanup.stage, "skipped");
+  await f.engine.archives.checkArchives();
+  assert.deepEqual(f.calls, []);
+  const stale = [{ id: f.id, workspaceIds: ["plan", "tree"] }];
+  assert.deepEqual((await f.engine.archives.applyArchive(stale, "pushed")).archivedIds, []);
+  f.w.progress = "done";
+  const preview = await f.engine.archiveFinished();
+  assert.deepEqual(preview.rows, []);
+  assert.deepEqual(preview.blocked, [{ id: f.id, number: f.w.number, title: f.w.title, reason: "따로 작업 공간 정리가 끝나지 않아 보관하지 않습니다" }]);
+  assert.deepEqual((await f.engine.archiveFinished(true, [f.id])).archivedIds, []);
+  assert.deepEqual((await f.engine.archives.applyArchive(stale, "done")).archivedIds, []);
+  assert.deepEqual(f.calls, []);
+  assert.equal(f.agents.get("P").archived, false);
+  assert.equal(await readFile(path.join(f.tree, "feature.txt"), "utf8"), "uncommitted work must survive");
+});
+
+for (const stage of [null, "pending", "failed", "skipped"])
+test(`AC-107/B-1: unfinished cleanup ${stage} excludes both workspace halves`, async t => {
+  const f = await fixture(t);
+  await f.engine.configure({ ...await f.engine.settings(), archiveAfterDays: 0 });
+  if (stage) f.w.worktreeCleanup = { stage, attempts: 2, evidenceFiles: 1, at: new Date().toISOString(), detail: stage };
+  assert.deepEqual(await f.engine.archives.archiveRows("pushed"), []);
+  // done lifts only the cleanup gate; the normal safety checks still apply.
+  f.w.worktreeCleanup = { stage: "done", attempts: 1, evidenceFiles: 1, at: new Date().toISOString(), detail: "done" };
+  assert.deepEqual((await f.engine.archives.archiveRows("pushed"))[0].workspaceIds, ["plan", "tree"]);
+});
+
+for (const stage of ["pending", "failed", "skipped"])
+test(`AC-106/N-2: a new implementation cycle resets ${stage} cleanup including its retry budget and evidence`, async t => {
+  const f = await fixture(t);
+  f.w.worktreeCleanup = { stage, attempts: 3, detail: "old", at: new Date().toISOString(), evidenceFiles: 99 };
+  await newPlan(f);
+  assert.equal(f.w.worktreeCleanup, null);
+  assert.equal(f.w.execute.id, "E");
+  assert.equal(f.w.worktree.path, f.tree);
+  assert.equal(f.w.worktreeHistory.length, 0);
+  assert.notEqual(f.w.status, "error");
+});
+
+for (const missing of [false, true])
+test(`AC-106/N-3: manually archived executor with ${missing ? "missing" : "existing"} directory ${missing ? "is placed again" : "is preserved"}`, async t => {
+  const f = await fixture(t);
+  f.agents.get("E").archived = true;
+  f.spaces.delete("tree");
+  if (missing) await rm(f.tree, { recursive: true });
+  await newPlan(f);
+  if (missing) {
+    assert.equal(f.w.execute.generation, 2);
+    assert.notEqual(f.w.execute.id, "E");
+    assert.equal(f.w.execute.workspaceId, "plan");
+    assert.equal(f.w.isolation, "shared");
+    assert.deepEqual(f.w.worktreeHistory.map(w => w.workspaceId), ["tree"]);
+    assert.ok(f.w.history.includes("E"));
+    assert.equal(f.w.worktree, null);
+    assert.notEqual(f.w.status, "error");
+  } else {
+    assert.equal(f.w.execute.id, "E");
+    assert.equal(f.w.worktree.path, f.tree);
+    assert.deepEqual(f.w.worktreeHistory, []);
+  }
+  assert.equal(f.w.worktreeCleanup, null);
+  assert.deepEqual(f.calls, []);
+});
+
+for (const source of ["directory", "conversation", "Git", "after copy"])
+test(`AC-103/N-4: transient readiness ${source} failures stay pending without consuming attempts`, async t => {
+  const f = await fixture(t);
+  let fail = true;
+  const inspect = f.port.archiveInspection, snapshot = f.port.inspect, gitSnapshot = f.probe.snapshot;
+  let reads = 0;
+  if (source === "directory" || source === "after copy") f.port.archiveInspection = async ids => {
+    if (fail && (source === "directory" || ++reads % 2 === 0)) throw Error("temporary directory failure");
+    return inspect(ids);
+  };
+  if (source === "conversation") f.port.inspect = async id => { if (fail) throw Error("temporary conversation failure"); return snapshot(id); };
+  if (source === "Git") f.probe.snapshot = async cwd => { if (fail) throw Error("temporary Git failure"); return gitSnapshot(cwd); };
+  for (let i = 0; i < 4; i++) {
+    await f.run();
+    assert.equal(f.w.worktreeCleanup.stage, "pending");
+    assert.equal(f.w.worktreeCleanup.attempts, 0);
+    assert.deepEqual(f.calls, []);
+    f.advance();
+  }
+  fail = false;
+  await f.run();
+  assert.equal(f.w.worktreeCleanup.stage, "done");
+  assert.equal(f.w.worktreeCleanup.attempts, 1);
+});
+
+test("AC-103/N-4: archive failures wait at least sixty seconds before a retry", async t => {
+  const f = await fixture(t);
+  let calls = 0;
+  f.port.archiveWorkspace = async () => { calls++; throw Error("offline"); };
+  await f.run();
+  f.advance(59_999); await f.run();
+  assert.equal(calls, 1);
+  f.advance(1); await f.run();
+  assert.equal(calls, 2);
+  assert.ok(CLEANUP_RETRY_MS >= 60_000);
+});
+
+for (const pinnedAt of ["2026-11-08T00:00:00Z", undefined])
+test(`AC-102/N-5: ${pinnedAt ? "pinned" : "unknown pin"} workspace stays pending until explicitly unpinned`, async t => {
+  const f = await fixture(t);
+  const inspect = f.port.archiveInspection;
+  let pin = pinnedAt;
+  f.port.archiveInspection = async ids => {
+    const result = await inspect(ids);
+    result.workspaces.forEach(ws => { ws.pinnedAt = pin; });
+    return result;
+  };
+  await f.run();
+  assert.deepEqual(f.calls, []);
+  assert.equal(f.w.worktreeCleanup.stage, "pending");
+  assert.equal(f.w.worktreeCleanup.attempts, 0);
+  pin = null;
+  await f.run();
+  assert.equal(f.w.worktreeCleanup.stage, "done");
 });

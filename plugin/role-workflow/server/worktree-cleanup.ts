@@ -3,9 +3,9 @@ import path from "node:path";
 import type { Settings } from "../shared/contracts";
 import type { Workflow, WorkflowPort } from "./engine";
 import type { RepoProbe } from "./git";
-import { archiveMembersPresent, archiveWorkspaceShared } from "./archive";
+import { archiveMembersPresent, archiveWorkspacePinned, archiveWorkspaceShared } from "./archive";
 
-export const CLEANUP_RETRY_MS = 3000;
+export const CLEANUP_RETRY_MS = 60_000;
 export interface WorktreeCleanupHost {
   port(): WorkflowPort;
   probe(): RepoProbe | null;
@@ -75,6 +75,14 @@ export class WorktreeCleanup {
     return `따로 작업 공간을 정리했습니다(코드는 ${w.pushTargets.find(t => t.commit === w.integration?.commit)?.branch ?? "기준 브랜치"}에 반영됨).`;
   }
   private async readiness(w: Workflow): Promise<Readiness> {
+    try {
+      return await this.inspectReadiness(w);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return { stage: "pending", detail: `따로 작업 공간 상태를 확인하지 못해 보존합니다: ${reason}. 다음 점검 때 다시 확인합니다.` };
+    }
+  }
+  private async inspectReadiness(w: Workflow): Promise<Readiness> {
     const preserve = (detail: string, stage: "pending" | "skipped" = "skipped"): Readiness => ({ stage, detail });
     if (!(await this.host.settings()).autoArchiveWorktree) return preserve("따로 작업 공간 자동 정리 설정이 꺼져 있어 보존합니다.");
     const commit = w.integration?.commit;
@@ -105,6 +113,8 @@ export class WorktreeCleanup {
     const conversation = inspection.conversations.find(a => a.id === member.id)!;
     const workspace = inspection.workspaces.find(ws => ws.id === tree.workspaceId);
     if (!workspace) throw new Error("구현 작업 공간을 확인하지 못했습니다");
+    if (archiveWorkspacePinned(workspace))
+      return preserve("고정된 작업 공간은 보존합니다. 고정을 해제하면 따로 작업 공간 정리를 다시 확인합니다.", "pending");
     if (workspace.archiving || !["idle", "closed"].includes(conversation.status) || conversation.permission !== false ||
       conversation.activeTurn !== false || snapshot.permission || !["idle", "closed"].includes(snapshot.status))
       return preserve("구현 대화의 실행·권한 대기가 끝나면 따로 작업 공간 정리를 다시 확인합니다.", "pending");

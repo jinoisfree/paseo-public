@@ -9,6 +9,7 @@ import { verdictProblem, verdictView, VERDICT_REPAIR } from "./verdict";
 import { generalAnswers, configChoice, type GeneralQuestion } from "./general-agent";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
+import { lstat } from "node:fs/promises";
 import { z } from "zod";
 import type { AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import type { PaseoAgentConfig } from "@getpaseo/client";
@@ -399,7 +400,7 @@ export interface WorkflowPort {
   executorPicker?(agentId: string, workflowId: string): Promise<void>;
   /** Posts the work-mode card into an undecided conversation. */
   modePicker?(agentId: string, workflowId: string): Promise<void>;
-  placementPicker?(agentId: string, workflowId: string, blocker: { number: number; title: string }): Promise<void>;
+  placementPicker?(agentId: string, workflowId: string, blocker: { number: number; title: string }, generation?: number): Promise<void>;
   send(id: string, prompt: string, messageId: string): Promise<void>;
   /** Reads the latest turn. `through` is a message id the search must reach back to. */
   history(id: string, through?: string): Promise<History>;
@@ -3068,7 +3069,7 @@ export class WorkflowEngine {
             await this.save();
             if (w.placement.stage === "choice" && w.plan && !w.placement.cardPosted && this.port.placementPicker) {
               try {
-                await this.port.placementPicker(w.plan.id, w.id, { number: blocker.number, title: blocker.title });
+                await this.port.placementPicker(w.plan.id, w.id, { number: blocker.number, title: blocker.title }, w.worktreeHistory.length ? current.generation : undefined);
                 w.placement.cardPosted = true;
                 await this.save();
               } catch {
@@ -3781,7 +3782,16 @@ export class WorkflowEngine {
       w.lastPlan = report;
       w.lastInstruction = d.next;
       let generation = 1;
-      if (w.worktreeCleanup?.stage === "done" && w.worktree) {
+      // A user may have archived the executor directly; only a confirmed missing path
+      // permits replacing that worktree. Unknown filesystem/API state preserves it.
+      let manuallyCleaned = false;
+      if (w.worktree && w.execute && w.worktreeCleanup?.stage !== "done") {
+        const snapshot = await this.port.inspect(w.execute.id).catch(() => null);
+        if (snapshot?.archived === true && snapshot.workspaceId === w.worktree.workspaceId) {
+          manuallyCleaned = await lstat(w.worktree.path).then(() => false, error => (error as NodeJS.ErrnoException).code === "ENOENT");
+        }
+      }
+      if ((w.worktreeCleanup?.stage === "done" || manuallyCleaned) && w.worktree) {
         generation = (w.execute?.generation ?? 0) + 1;
         w.worktreeHistory.push(w.worktree);
         if (w.execute) w.history.push(w.execute.id);
@@ -3789,9 +3799,10 @@ export class WorkflowEngine {
         w.worktree = null;
         w.isolation = "undecided";
         w.placement = null;
-        w.worktreeCleanup = null;
         w.integration = null;
       }
+      // Every new implementation cycle gets a fresh cleanup budget/checkpoint.
+      w.worktreeCleanup = null;
       if (!w.execute) {
         const defaults = executorDefaults(settings, this.executorChoice.executorProvider(w));
         const selected = this.executorChoice.selectedExecutor(w);

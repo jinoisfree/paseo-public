@@ -2,7 +2,7 @@ import { unlink } from "node:fs/promises";
 import path from "node:path";
 import { capabilities } from "../shared/capabilities";
 import type { ArchiveCandidate, ArchiveEntry, Settings } from "../shared/contracts";
-import { archiveCandidates, isFinished } from "./archive";
+import { archiveBlockReason, archiveCandidates, isFinished } from "./archive";
 import type { Database, Workflow, WorkflowPort } from "./engine";
 
 /** What archiving finished tasks needs from the engine. */
@@ -98,7 +98,7 @@ export class Archives {
   async archiveRows(progress: "done" | "pushed", ids?: readonly string[]) {
     const db = await this.host.db();
     const workflows = db.workflows.filter(
-      (w) => isFinished(w) && w.progress === progress && (!ids || ids.includes(w.id)),
+      (w) => isFinished(w) && w.progress === progress && !archiveBlockReason(w) && (!ids || ids.includes(w.id)),
     );
     if (!workflows.length) return [];
     const workspaceIds = [
@@ -146,9 +146,14 @@ export class Archives {
   }
   archiveFinished(apply = false, ids: readonly string[] = []) {
     return this.host.serial(async () => {
-      if (apply && !ids.length) return { rows: [], archivedIds: [], errors: [] };
+      const blocked = (await this.host.db()).workflows.flatMap(w => {
+        const reason = archiveBlockReason(w);
+        return isFinished(w) && reason && (!apply || ids.includes(w.id))
+          ? [{ id: w.id, number: w.number, title: w.title, reason }] : [];
+      });
+      if (apply && !ids.length) return { rows: [], archivedIds: [], errors: [], blocked };
       const rows = await this.archiveRows("done", apply ? ids : undefined);
-      return apply ? this.applyArchive(rows, "done") : { rows, archivedIds: [], errors: [] };
+      return { ...(apply ? await this.applyArchive(rows, "done") : { rows, archivedIds: [], errors: [] }), blocked };
     });
   }
   async checkArchives() {

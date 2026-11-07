@@ -104,6 +104,7 @@ export const archiveFinished = defineRpc({
   }),
   output: z.object({
     rows: z.array(archiveCandidateSchema),
+    blocked: z.array(z.object({ id: z.string(), number: z.number(), title: z.string(), reason: z.string() })).default([]),
     archivedIds: z.array(z.string()),
     errors: z.array(z.object({ id: z.string(), error: z.string() })),
   }),

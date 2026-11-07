@@ -197,6 +197,9 @@ try {
     assert(installed.code === 0, `install failed: ${installed.stderr || installed.stdout}`);
     await waitFor("Plugin ready", async () => (await readyCount()) >= 1);
     assert(/role-workflow\s+running/.test((await cli("plugin", "ls")).stdout), "plugin is not running");
+    // Cleanup must respect user pins. Keep this isolated clean-archive fixture unpinned.
+    const { settings } = await rpc("workflow.status", {});
+    await rpc("workflow.configure", { ...settings, autoPinStarted: false, autoPinPushed: false });
   });
 
   await step("without overlap a federated executor opens in the planner workspace tab", async () => {
@@ -436,6 +439,29 @@ try {
     const results = codex.filter((call) => call.toolResult).map((call) => call.toolResult).join("\n");
     assert(/role-workflow-approval-required|role-workflow: 에이전트는 git push/.test(results), `push was not blocked: ${results.slice(0, 400)}`);
     assert((await run("git", ["ls-remote", remote])).stdout === "", "a commit reached the remote");
+  });
+
+  await step("AC-107/B-1: manual archive preserves an unfinished dirty worktree and its planner", async () => {
+    const flow = state().workflows.find(w => w.id === worktreeFlow?.id);
+    assert(flow?.worktree && flow.progress === "done", "worktree fixture is not ready for archive preview");
+    const { settings } = await rpc("workflow.status", {});
+    const dirty = join(flow.worktree.path, "must-preserve.txt");
+    writeFileSync(dirty, "uncommitted fixture data\n");
+    try {
+      await rpc("workflow.configure", { ...settings, archiveAfterDays: 0 });
+      const preview = await rpc("workflow.archive-finished", { apply: false, ids: [] });
+      assert(!preview.rows.some(row => row.id === flow.id), "dirty worktree became an archive candidate");
+      assert(preview.blocked.some(row => row.id === flow.id && row.reason === "따로 작업 공간 정리가 끝나지 않아 보관하지 않습니다"), "archive screen has no preservation reason");
+      const result = await rpc("workflow.archive-finished", { apply: true, ids: [flow.id] });
+      assert(!result.archivedIds.includes(flow.id), "unfinished worktree was archived");
+      const api = createPaseoApi(client);
+      assert(!(await api.agents.ref(flow.plan.id).refresh()).agent.archivedAt, "planner was archived");
+      assert(!(await api.agents.ref(flow.execute.id).refresh()).agent.archivedAt, "executor was archived");
+      assert(readFileSync(dirty, "utf8") === "uncommitted fixture data\n", "DATA LOSS RISK: dirty file disappeared");
+    } finally {
+      await rm(dirty, { force: true });
+      await rpc("workflow.configure", settings);
+    }
   });
 
   await step("AC-108: approved local push integrates and archives only the clean executor workspace", async () => {

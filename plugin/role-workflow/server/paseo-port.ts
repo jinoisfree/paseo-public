@@ -665,9 +665,9 @@ export function createPort(
           data: { workflowId },
         });
     },
-    async placementPicker(agentId, workflowId, blocker) {
+    async placementPicker(agentId, workflowId, blocker, generation) {
       await getApi().agents.ref(agentId).timeline.append({
-        id: `role-workflow-placement-picker:${workflowId}`,
+        id: `role-workflow-placement-picker:${workflowId}${generation === undefined ? "" : `:${generation}`}`,
         type: "plugin", kind: "placement-picker", version: 1,
         data: { workflowId, number: blocker.number, title: blocker.title },
       });

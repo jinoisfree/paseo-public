@@ -532,3 +532,12 @@ test("archive retains only the most recent 500 entries and survives a new engine
   assert.equal(state.archives[0].id, f.id);
   assert.ok(!state.archives.some((a) => a.id === "old-499"));
 });
+
+
+for (const stage of [null, "pending", "failed", "skipped", "done"])
+test(`AC-107/B-1: archiveCandidate requires completed worktree cleanup (${stage})`, () => {
+  const w = { ...flow(), isolation: "worktree", worktreeCleanup: stage ? { stage } : null };
+  assert.equal(!!archiveCandidate(w, inspection(), "pushed", 3, now), stage === "done");
+  w.isolation = "shared";
+  assert.ok(archiveCandidate(w, inspection(), "pushed", 3, now));
+});
