@@ -14,6 +14,7 @@ import type { ArchiveInspection, ArchiveConversation } from "./archive";
 import { turnEvidence } from "./push-evidence";
 import { appendTimelineCard, readTimelinePage, subscribeAgentEvents, type TimelinePage, type OperationalApi } from "./timeline-cards";
 import { createProjectTitleSync } from "./project-titles";
+import { withBudget } from "./call-budget";
 
 const ASYNC_ANSWER_PREFIX = "Answers to your questions:\n\n";
 
@@ -921,18 +922,7 @@ export function withCallBudgets(
   for (const [name, ms] of Object.entries(budgets)) {
     const call = Reflect.get(port, name);
     if (typeof call !== "function" || !ms) continue;
-    bounded[name] = (...args: unknown[]) => {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const expired = new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`Paseo 응답 시간 초과(${name}, ${Math.round(ms / 1000)}초)`)),
-          ms,
-        );
-      });
-      return Promise.race([Promise.resolve(call.apply(port, args)), expired]).finally(() =>
-        clearTimeout(timer),
-      );
-    };
+    bounded[name] = (...args: unknown[]) => withBudget(name, ms, call.apply(port, args));
   }
   return bounded as unknown as WorkflowPort;
 }

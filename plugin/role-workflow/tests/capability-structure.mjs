@@ -2,8 +2,9 @@
  * Catch accidental plugin policy bypasses; deliberate malicious in-process code is out of scope.
  * File allowlists cover raw SDK/pin imports and timeline/archive/pin handles, context.paseo
  * may flow only into attach, and lifecycle creation/registration, destructuring and prototype
- * access stay at their composition/operation boundaries. Ordinary computed data access and
- * Reflect.get are allowed: capability isolation, not a JavaScript sandbox, owns the policy.
+ * access stay at their composition/operation boundaries. String-literal Reflect.get reads
+ * obey the same member-name rules. Dynamic Reflect.get and ordinary computed data access
+ * are allowed: capability isolation, not a JavaScript sandbox, owns the policy.
  */
 import { parse } from "@babel/parser";
 
@@ -53,13 +54,19 @@ export function capabilityViolations(source, file) {
     if (node.type === "ImportDeclaration" && !lifecycle &&
       (node.source.value.includes("daemon-client") || node.specifiers.some(s => ["DaemonClient", "createWorkspacePins"].includes(s.imported?.name))))
       report(node, "raw pin import");
-    if (["MemberExpression", "OptionalMemberExpression"].includes(node.type)) {
-      const name = node.computed ? literal(node.property) : key(node.property);
+    const reflected = node.type === "CallExpression" && node.callee.type === "MemberExpression" &&
+      node.callee.object.name === "Reflect" && (node.callee.computed ? literal(node.callee.property) : key(node.callee.property)) === "get" &&
+      node.arguments[1]?.type === "StringLiteral";
+    const member = ["MemberExpression", "OptionalMemberExpression"].includes(node.type) ? node :
+      reflected ? { object: node.arguments[0], property: node.arguments[1], computed: false } : null;
+    if (member) {
+      const { object } = member;
+      const name = member.computed ? literal(member.property) : key(member.property);
       if (name === "paseo" && !lifecycle && !cards && !(file === "index.server.ts" && parent?.type === "CallExpression" && parent.callee.type === "Identifier" && parent.callee.name === "attach" && parent.arguments.includes(node)))
         report(node, "raw context API may only flow directly into attach");
-      if (node.computed && name === undefined && contextNames.has(node.object.name) && !lifecycle && !cards)
+      if (member.computed && name === undefined && contextNames.has(object.name) && !lifecycle && !cards)
         report(node, "dynamic raw context API access");
-      if (name === "prototype" && node.object.name === "WorkspaceLifecycle" && !lifecycle)
+      if (name === "prototype" && object.name === "WorkspaceLifecycle" && !lifecycle)
         report(node, "lifecycle prototype policy access");
       if (["lifecycle", "createLifecycle"].includes(name) && parent?.type === "CallExpression" && parent.callee === node &&
         (name === "lifecycle" ? parent.arguments.length > 0 : file !== "index.server.ts") && !lifecycle)
@@ -68,7 +75,7 @@ export function capabilityViolations(source, file) {
         report(node, "lifecycle policy registration outside engine constructor");
       if (!cards && name === "timeline") report(node, "raw timeline handle");
       if (!lifecycle && ["archiveWorkspace", "pin", "unpin", "setWorkspacePinned"].includes(name)) report(node, "raw workspace handle");
-      if (!lifecycle && name === "archive" && !(file === "server/archives.ts" && source.slice(node.object.start, node.object.end) === "this.host.lifecycle()"))
+      if (!lifecycle && name === "archive" && !(file === "server/archives.ts" && source.slice(object.start, object.end) === "this.host.lifecycle()"))
         report(node, "raw archive handle");
       if (name === "archiveCleaned" && file !== "server/worktree-cleanup.ts") report(node, "cleanup proof outside cleanup");
     }

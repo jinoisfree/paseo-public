@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CALL_BUDGETS_MS, withCallBudgets } from "../server/paseo-port.ts";
+import { withBudget } from "../server/call-budget.ts";
 
 test("a daemon call that never answers rejects at its budget instead of holding the queue", async () => {
   const port = {
@@ -32,4 +33,15 @@ test("every lifecycle-critical call has a budget, and sends are bounded tighter 
     assert.ok(CALL_BUDGETS_MS[name] > 0, name);
   assert.ok(CALL_BUDGETS_MS.send < CALL_BUDGETS_MS.create);
   assert.equal(CALL_BUDGETS_MS.compact, undefined, "compaction keeps its own 180-second bound");
+});
+
+test("AC-205 R8-2: the shared budget preserves response and rejection identity and clears both timers", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const cleared = t.mock.method(globalThis, "clearTimeout");
+  const value = { id: "workspace" };
+  assert.equal(await withBudget("inspect", 20_000, Promise.resolve(value)), value);
+  assert.equal(cleared.mock.calls.length, 1);
+  const error = new Error("daemon unavailable");
+  await assert.rejects(withBudget("inspect", 20_000, Promise.reject(error)), actual => actual === error);
+  assert.equal(cleared.mock.calls.length, 2);
 });

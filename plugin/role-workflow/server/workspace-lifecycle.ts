@@ -1,4 +1,5 @@
 import { CALL_BUDGETS_MS, readArchiveInspection } from "./paseo-port";
+import { withBudget } from "./call-budget";
 import type { ArchiveInspection } from "./archive";
 import { operationalApi } from "./timeline-cards";
 import { createRepoProbe } from "./git";
@@ -33,18 +34,7 @@ export class WorkspaceLifecycle {
   readonly #inspect: (ids: readonly string[]) => Promise<ArchiveInspection>;
   constructor(transport: LifecycleTransport = {}, inspect: (ids: readonly string[]) => Promise<ArchiveInspection> = async () => { throw new Error("작업 공간 조회를 지원하지 않습니다."); }) {
     this.#transport = transport;
-    this.#inspect = async ids => {
-      const ms = CALL_BUDGETS_MS.archiveInspection;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const expired = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`Paseo 응답 시간 초과(archiveInspection, ${Math.round(ms / 1000)}초)`)), ms);
-      });
-      try {
-        return await Promise.race([inspect(ids), expired]);
-      } finally {
-        clearTimeout(timer);
-      }
-    };
+    this.#inspect = async ids => withBudget("archiveInspection", CALL_BUDGETS_MS.archiveInspection, inspect(ids));
     policyBindings.set(this, policy => {
       if (this.#policy) throw new Error("작업 공간 정책은 한 번만 연결할 수 있습니다.");
       this.#policy = Object.freeze({ db: policy.db, cleanupReadiness: policy.cleanupReadiness });

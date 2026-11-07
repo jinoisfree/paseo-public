@@ -21,7 +21,7 @@ test("AC-201 C-1: all server modules and the server entrypoint obey capability f
   const violations = (await Promise.all(files.map(async file => capabilityViolations(await readFile(file, "utf8"), path.relative(root, file))))).flat();
   assert.deepEqual(violations, []);
 });
-for (const name of ["workspace-chain", "reflect", "template", "concatenation", "daemon-pin", "timeline-alias", "timeline-destructure", "computed-cleanup", "lifecycle-destructure", "lifecycle-prototype", "context-archive-data", "context-entries", "context-unknown-data", "context-values", "context-descriptor", "context-alias"])
+for (const name of ["workspace-chain", "reflect", "template", "concatenation", "daemon-pin", "timeline-alias", "timeline-destructure", "computed-cleanup", "lifecycle-destructure", "lifecycle-prototype", "context-archive-data", "context-entries", "context-unknown-data", "context-values", "context-descriptor", "context-alias", "reflect-archive", "reflect-context", "reflect-cleanup"])
   test(`AC-201 C-1: negative fixture ${name} must fail in both server and entrypoint`, async () => {
     const source = await readFile(new URL(`./fixtures/capability-bypasses/${name}.ts`, import.meta.url), "utf8");
     for (const file of ["server/bypass.ts", "index.server.ts"]) {
@@ -30,6 +30,9 @@ for (const name of ["workspace-chain", "reflect", "template", "concatenation", "
       if (name.startsWith("context-") || name === "reflect") assert.ok(violations.some(v => /raw context API/.test(v)), `${name} must be caught at its API source`);
       if (name === "lifecycle-destructure") assert.ok(violations.some(v => /destructured capability/.test(v)));
       if (name === "lifecycle-prototype") assert.ok(violations.some(v => /prototype/.test(v)));
+      if (name === "reflect-archive") assert.ok(violations.some(v => /raw archive handle/.test(v)));
+      if (name === "reflect-context") assert.ok(violations.some(v => /raw context API/.test(v)));
+      if (name === "reflect-cleanup") assert.ok(violations.some(v => /cleanup proof/.test(v)));
     }
   });
 
@@ -145,6 +148,35 @@ test("AC-202 R7-1: an ordinary archive inspection also stops at sixty seconds wi
   const rejected = assert.rejects(pending, /archiveInspection, 60초/);
   t.mock.timers.tick(60_000);
   await rejected;
+  assert.deepEqual(f.calls, []);
+});
+
+test("AC-202/AC-205 R8-2: port and lifecycle inspections keep identical sixty-second errors", async t => {
+  const { withCallBudgets } = await import("../server/paseo-port.ts");
+  const f = fixture(); f.w.isolation = "shared";
+  let started;
+  const called = new Promise(resolve => { started = resolve; });
+  const reads = [];
+  f.port.archiveInspection = (...args) => {
+    reads.push(structuredClone(args));
+    if (reads.length === 2) started();
+    return new Promise(() => {});
+  };
+  const port = withCallBudgets(f.port);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let results;
+  const pending = Promise.allSettled([port.archiveInspection(["tree"]), f.gate.archive("tree")])
+    .then(value => { results = value; });
+  await called;
+  assert.deepEqual(reads, [[["tree"]], [["tree"]]]);
+  t.mock.timers.tick(60_000);
+  await new Promise(setImmediate);
+  assert.ok(results, "both consumers must finish at their original deadline");
+  await pending;
+  for (const result of results) {
+    assert.equal(result.status, "rejected");
+    assert.equal(result.reason.message, "Paseo 응답 시간 초과(archiveInspection, 60초)");
+  }
   assert.deepEqual(f.calls, []);
 });
 
@@ -327,6 +359,28 @@ test("AC-201 R7-2: Reflect.get is allowed for ordinary data while raw context fl
     assert.deepEqual(capabilityViolations('const value = Reflect.get(port, name);', file), []);
     assert.ok(capabilityViolations('Reflect.get(context.paseo.workspaces.ref("x"), "archive")();', file).some(v => /raw context API/.test(v)));
   }
+});
+
+test("AC-201 R8-1: string-literal Reflect.get shares member rules and their file exceptions", () => {
+  const rules = {
+    timeline: /raw timeline handle/, archive: /raw archive handle/,
+    archiveWorkspace: /raw workspace handle/, pin: /raw workspace handle/,
+    unpin: /raw workspace handle/, setWorkspacePinned: /raw workspace handle/,
+    archiveCleaned: /cleanup proof/, paseo: /raw context API/,
+  };
+  for (const file of ["server/bypass.ts", "index.server.ts"]) {
+    for (const [name, reason] of Object.entries(rules)) {
+      for (const expression of [`obj.${name}`, `Reflect.get(obj, "${name}")`])
+        assert.ok(capabilityViolations(`${expression};`, file).some(v => reason.test(v)), `${file}: ${expression}`);
+    }
+    assert.deepEqual(capabilityViolations('Reflect.get(port, name); Reflect.get(labels, "title");', file), []);
+  }
+  for (const name of ["archive", "archiveWorkspace", "pin", "unpin", "setWorkspacePinned"])
+    assert.deepEqual(capabilityViolations(`Reflect.get(transport, "${name}");`, "server/workspace-lifecycle.ts"), []);
+  assert.deepEqual(capabilityViolations('Reflect.get(agent, "timeline");', "server/timeline-cards.ts"), []);
+  assert.deepEqual(capabilityViolations('Reflect.get(this.host.lifecycle(), "archive")("x");', "server/archives.ts"), []);
+  assert.deepEqual(capabilityViolations('Reflect.get(gate, "archiveCleaned")(w);', "server/worktree-cleanup.ts"), []);
+  assert.deepEqual(capabilityViolations('attach(Reflect.get(context, "paseo"));', "index.server.ts"), []);
 });
 
 test("AC-201 C-1-R1: every lifecycle policy operation rejects destructured and prototype bypass syntax", () => {
