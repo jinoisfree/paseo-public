@@ -1,6 +1,6 @@
 import { compressionDecision, type ContextUsage } from "../shared/compression";
-import { EXECUTOR_QUESTIONS, executorSelectionSchema, selectionStageLabel, type SelectionStage } from "../shared/executor-selection";
-import { applyLegacySelection, applySelectionBatch, validateSelection, selectionQuestions, selectionAnswers, pendingFields, timelineSelections, timelineMode, explicitSelection } from "./executor-selection";
+import { executorSelectionSchema, selectionStageLabel, type SelectionStage } from "../shared/executor-selection";
+import { applySelectionBatch, selectionAnswers, pendingFields, timelineSelections, timelineMode, explicitSelection } from "./executor-selection";
 import type { ExecutorModel } from "./protocol";
 import { capabilities } from "../shared/capabilities";
 import { planConflictSchema } from "../shared/plan-disposition";
@@ -80,6 +80,7 @@ import { quotaPauseSchema } from "./quota";
 import { transientPauseSchema } from "./transient";
 import { Recovery } from "./recovery";
 import { Compaction } from "./compaction";
+import { ExecutorChoice } from "./executor-choice";
 
 const memberSchema = z.object({
   id: z.string(),
@@ -560,6 +561,12 @@ export class WorkflowEngine {
   private readonly scopeCache = new Map<string, Promise<string>>();
   private readonly managedRunner: ManagedPushRunner;
   private readonly managedExecutions = new Map<string, ManagedPush>();
+  private readonly executorChoice = new ExecutorChoice({
+    port: () => this.port,
+    save: () => this.save(),
+    touch: (w, detail) => this.touch(w, detail),
+    settings: () => this.settings(),
+  });
   private readonly compaction = new Compaction({
     port: () => this.port,
     save: () => this.save(),
@@ -677,7 +684,7 @@ export class WorkflowEngine {
     // Contract 5 offers the picker as soon as the flow is federated, not after the plan.
     const pickers = db.workflows.filter(
       (w) => capabilities(w).screenSelection && !w.pickerPosted && w.plan && !w.execute &&
-        w.status !== "completed" && !this.selectedExecutor(w),
+        w.status !== "completed" && !this.executorChoice.selectedExecutor(w),
     );
     for (const w of pickers) w.pickerPosted = true;
     const serialized = JSON.stringify(db);
@@ -789,7 +796,7 @@ export class WorkflowEngine {
     const key = path.resolve(w.cwd);
     const saved = { ...db.projects[key], mode: w.mode };
     if (executor && w.execute) {
-      const provider = this.executorProvider(w);
+      const provider = this.executorChoice.executorProvider(w);
       saved[provider] = {
         model: w.execute.config.provider,
         thinking: w.execute.config.thinkingOptionId ?? "",
@@ -842,9 +849,9 @@ export class WorkflowEngine {
       if (state.pending) { state.answered.push(state.pending.id); state.pending = null; }
       try {
         await applySelectionBatch(state, { provider: choice.provider, model: choice.model,
-          thinking: choice.thinking || "추론 없음" }, provider => this.catalog(w, provider));
+          thinking: choice.thinking || "추론 없음" }, provider => this.executorChoice.catalog(w, provider));
       } catch (error) { state.error = error instanceof Error ? error.message : String(error); }
-      const selected = this.selectedExecutor(w);
+      const selected = this.executorChoice.selectedExecutor(w);
       if (!selected) {
         this.touch(w, state.error);
         await this.save();
@@ -1511,7 +1518,7 @@ export class WorkflowEngine {
         w.selection!.explicitRead = true;
         const explicit = explicitSelection(userText(goal || request));
         if (Object.keys(explicit).length) {
-          await this.acceptSelection(w, "explicit", explicit, undefined, true);
+          await this.executorChoice.acceptSelection(w, "explicit", explicit, undefined, true);
         }
       }
       if (capabilities(w).executorSelection && w.plan?.id === agentId &&
@@ -1792,7 +1799,7 @@ export class WorkflowEngine {
     w.planFingerprint = "";
     w.repeatedPlans = 0;
     w.status = "active";
-    if (w.execute && w.execute.workspaceId === null) await this.restoreExecutor(w);
+    if (w.execute && w.execute.workspaceId === null) await this.executorChoice.restoreExecutor(w);
     return true;
   }
   /**
@@ -2688,95 +2695,6 @@ export class WorkflowEngine {
       return rows;
     });
   }
-  private catalog(w: Workflow, provider: "codex" | "claude") {
-    if (!this.port.models) return Promise.reject(new Error("모델 카탈로그를 읽을 수 없습니다. 재조회 후 선택하세요."));
-    return this.port.models(provider, w.cwd);
-  }
-  private async acceptSelection(w: Workflow, id: string, values: Partial<Record<SelectionStage, string>>,
-    fields = selectionQuestions({questions:Object.keys(values).map(stage => ({question:EXECUTOR_QUESTIONS[stage as SelectionStage].question}))}),
-    explicit = false) {
-    const state = w.selection!;
-    id = id.replace(/^permission-/, "");
-    if (state.answered.includes(id) || (state.pending && state.pending.id !== id) || (!state.pending && state.stage === "ready" && !explicit)) return;
-    const pending = state.pending;
-    const scope = pending ? pendingFields(pending) : fields;
-    const received = pending?.received ?? [];
-    const fresh = Object.fromEntries(scope.filter(f => !received.includes(f.stage) && values[f.stage] !== undefined)
-      .map(f => [f.stage, values[f.stage]])) as Partial<Record<SelectionStage, string>>;
-    if (!Object.keys(fresh).length) return;
-    try {
-      // Already-open v4 sequential questions retain their zero/one option semantics.
-      // Bundled questions and their follow-ups always require explicit thinking answers.
-      if (!state.responses && scope.length === 1 && !explicit) {
-        const stage = scope[0].stage;
-        if (["provider", "model", "thinking", "ready"].indexOf(stage) > ["provider", "model", "thinking", "ready"].indexOf(state.stage)) return;
-        await applyLegacySelection(state, stage, fresh[stage]!, provider => this.catalog(w, provider));
-      } else await applySelectionBatch(state, fresh, provider => this.catalog(w, provider));
-    } catch (error) { state.error = error instanceof Error ? error.message : String(error); }
-    const completed = [...new Set([...received, ...Object.keys(fresh) as SelectionStage[]])];
-    if (scope.every(f => completed.includes(f.stage))) {
-      state.answered.push(id); state.pending = null;
-    } else state.pending = {id, fields:scope, received:completed};
-    if (this.selectedExecutor(w)) {
-      w.asker = null;
-      if (w.status === "needs_input") w.status = "active";
-      this.touch(w, `구현 담당 선택 확인: ${state.provider}/${state.model} · 추론 ${state.thinking || "없음"}. 최초 담당 설정은 유지합니다.`);
-    } else this.touch(w, state.error || `구현 담당 선택: ${selectionStageLabel[state.stage]} 답변을 기다립니다.`);
-    await this.save();
-  }
-  private rememberSelectionQuestion(w: Workflow, id: string, input: unknown) {
-    const state = w.selection!;
-    const fields = selectionQuestions(input);
-    if (!fields.length || state.answered.includes(id)) return;
-    if (state.pending?.id === id) return;
-    if (state.pending) {
-      // A replacement question retires the old partial envelope; late answers cannot
-      // overwrite fields already accepted by the replacement request.
-      if (!(state.pending.received?.length)) { state.error = "다른 선택 질문의 답변을 기다리고 있습니다."; return; }
-      state.answered.push(state.pending.id);
-    }
-    state.pending = {id, fields, received:[]};
-  }
-  private async selectionReady(w: Workflow): Promise<boolean> {
-    const state = w.selection!;
-    try {
-      if (!state.pending && await validateSelection(state, provider => this.catalog(w, provider))) return true;
-    } catch (error) { state.error = error instanceof Error ? error.message : String(error); }
-    w.status = "needs_input";
-    w.asker = "plan";
-    this.touch(w, capabilities(w).screenSelection
-      ? `${state.error ? state.error + " " : ""}대화의 구현 담당 선택 카드나 자동 작업 화면에서 구현 제품·모델·추론을 선택하세요. 선택하면 보관한 계획을 바로 전달합니다.`
-      : state.error || `구현 담당 ${selectionStageLabel[state.stage]} 선택을 실제 답변으로 확정해야 합니다. 질문 도구로 선택하거나 실행 가능한 모델/추론을 직접 입력하세요.`);
-    await this.save();
-    return false;
-  }
-  private selectedExecutor(w: Workflow): GeneralAgent | null {
-    if (capabilities(w).current) {
-      const s = w.selection;
-      return s?.stage === "ready" && !s.pending && s.provider && s.thinking !== null
-        ? { provider: s.provider, model: s.model, thinking: s.thinking } : null;
-    }
-    return w.contract >= 3 ? w.generalState.selected : null;
-  }
-  private executorProvider(w: Workflow) {
-    const selected = this.selectedExecutor(w);
-    if (selected) return selected.provider;
-    // Existing standalone executors have no planner and keep their provider.
-    return w.plan
-      ? oppositeProvider(w.plan.config.provider)
-      : oppositeProvider(oppositeProvider(w.execute!.config.provider));
-  }
-  private async restoreExecutor(w: Workflow) {
-    const member = w.execute!;
-    if (capabilities(w).executorSelection && !(await this.selectionReady(w))) return;
-    const defaults = executorDefaults(await this.settings(), this.executorProvider(w));
-    const selected = this.selectedExecutor(w);
-    member.config.provider = selected ? (selected.model ? `${selected.provider}/${selected.model}` : selected.provider) : defaults.model;
-    member.config.modeId = defaults.mode;
-    const thinking = selected ? selected.thinking : defaults.thinking;
-    if (thinking) member.config.thinkingOptionId = thinking;
-    else delete member.config.thinkingOptionId;
-  }
   private dispatch(event: NotificationEvent) {
     void Promise.resolve()
       .then(() => this.notify(event))
@@ -2806,7 +2724,7 @@ export class WorkflowEngine {
       }
       const questionId = request.id.replace(/^permission-/, "");
       if (w && capabilities(w).executorSelection && w.plan?.id === agentId && request.kind === "question") {
-        this.rememberSelectionQuestion(w, questionId, request.input);
+        this.executorChoice.rememberSelectionQuestion(w, questionId, request.input);
         await this.save();
       } else await this.rememberGeneralQuestion(w, agentId, request, db.settings);
       if (w?.plan?.id === agentId && request.kind === "question") {
@@ -2862,7 +2780,7 @@ export class WorkflowEngine {
         const pending = workflow.selection?.pending;
         if (pending?.id === requestId.replace(/^permission-/, "") && resolution.behavior === "allow") {
           const values = selectionAnswers(resolution.updatedInput, pendingFields(pending));
-          await this.acceptSelection(workflow, requestId, values);
+          await this.executorChoice.acceptSelection(workflow, requestId, values);
         }
       } else await this.resolveGeneralQuestion(agentId, requestId, resolution);
       const question = this.modeQuestions.get(key);
@@ -3019,12 +2937,12 @@ export class WorkflowEngine {
         if (mode) { w.mode = mode; await this.rememberProject(w); await this.save(); }
         if (!capabilities(w).executorSelection) return;
         for (const answer of selectionEvents ?? timelineSelections(items))
-          await this.acceptSelection(w, answer.id, answer.values, answer.fields);
+          await this.executorChoice.acceptSelection(w, answer.id, answer.values, answer.fields);
         // A native question can predate mode enrollment, and permission events are not
         // replayed on reload. Reconcile the still-open host question by exact identity.
         const snapshot = await this.port.inspect(agentId).catch(() => null);
         for (const question of snapshot?.questions ?? []) {
-          this.rememberSelectionQuestion(w, question.id.replace(/^permission-/, ""), question.input);
+          this.executorChoice.rememberSelectionQuestion(w, question.id.replace(/^permission-/, ""), question.input);
         }
         await this.save();
         return;
@@ -3450,7 +3368,7 @@ export class WorkflowEngine {
       if (member?.compaction && !this.compacting.has(member.id)) member.compaction = null;
     }
     w.status = "active";
-    if (w.execute && w.execute.workspaceId === null) await this.restoreExecutor(w);
+    if (w.execute && w.execute.workspaceId === null) await this.executorChoice.restoreExecutor(w);
     if (w.planIssue) {
       const issue = w.planIssue;
       if (w.pending?.id === issue.pendingId &&
@@ -3957,7 +3875,7 @@ export class WorkflowEngine {
     const current = w[role]!;
     if (!current.workspaceId) {
       if (role === "execute" && capabilities(w).executorSelection) {
-        await this.restoreExecutor(w);
+        await this.executorChoice.restoreExecutor(w);
         if (w.status !== "active") return;
       }
       await this.ensureNumber(w);
@@ -4249,9 +4167,9 @@ export class WorkflowEngine {
       d.status === "plan" &&
       !w.execute &&
       d.executorModel &&
-      d.executorModel.split("/")[0] !== this.executorProvider(w)
+      d.executorModel.split("/")[0] !== this.executorChoice.executorProvider(w)
     )
-      return `실행 모델은 ${this.executorProvider(w)} 제공자여야 합니다.`;
+      return `실행 모델은 ${this.executorChoice.executorProvider(w)} 제공자여야 합니다.`;
     return null;
   }
   private async consume(w: Workflow) {
@@ -4609,7 +4527,7 @@ export class WorkflowEngine {
     replaces: boolean,
   ) {
     const settings = await this.startSettings(w.cwd, w.plan?.config.provider ?? "claude");
-    if (capabilities(w).executorSelection && !(await this.selectionReady(w))) {
+    if (capabilities(w).executorSelection && !(await this.executorChoice.selectionReady(w))) {
       if (capabilities(w).screenSelection) {
         // Like the cycle limit, keep the plan unread so the screen choice dispatches it once.
         if (w.processed.at(-1) === inbox.key) w.processed.pop();
@@ -4648,8 +4566,8 @@ export class WorkflowEngine {
       w.lastPlan = report;
       w.lastInstruction = d.next;
       if (!w.execute) {
-        const defaults = executorDefaults(settings, this.executorProvider(w));
-        const selected = this.selectedExecutor(w);
+        const defaults = executorDefaults(settings, this.executorChoice.executorProvider(w));
+        const selected = this.executorChoice.selectedExecutor(w);
         const model = selected
           ? (selected.model ? `${selected.provider}/${selected.model}` : selected.provider)
           : d.executorModel ?? defaults.model;
