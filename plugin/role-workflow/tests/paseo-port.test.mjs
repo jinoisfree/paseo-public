@@ -189,7 +189,7 @@ test("archive port bounds an unanswered timeline read and keeps reading the rest
     ],
   );
 });
-test("archive port verifies archive RPC success and preserves archived snapshots without a workspace", async () => {
+test("AC-103: archive port verifies archive RPC success and preserves archived snapshots without a workspace", async () => {
   const api = {
     workspaces: {
       ref: () => ({
@@ -212,6 +212,10 @@ test("archive port verifies archive RPC success and preserves archived snapshots
   await assert.rejects(port.archiveWorkspace("ws"), /blocked/);
   api.workspaces.ref = () => ({
     archive: async () => ({ workspaceId: "ws", error: null, archivedAt: null }),
+  });
+  await assert.rejects(port.archiveWorkspace("ws"), /확인하지/);
+  api.workspaces.ref = () => ({
+    archive: async () => ({ workspaceId: "wrong", error: null, archivedAt: "now" }),
   });
   await assert.rejects(port.archiveWorkspace("ws"), /확인하지/);
 });
@@ -1321,4 +1325,20 @@ test("a turn records which provider turn each user message belongs to", () => {
   const bare = readTurn([{ type: "user_message", text: "hi", messageId: "m" }]);
   assert.deepEqual(bare.messageTurns, {});
   assert.equal(bare.turnId, undefined);
+});
+
+
+test("AC-106: a cleaned placement uses a fresh worktree key and branch while retrying the same generation is stable", async () => {
+  const calls = [];
+  const api = { workspaces: { create: async options => { calls.push(options); return { id: "new-workspace", refresh: async () => ({ workspaceDirectory: "/example/worktree" }) }; } } };
+  const port = createPort(() => api);
+  const w = { id: "12345678-task", number: 1, cwd: "/example/repo", projectId: "project", title: "task", progress: "active", worktreeHistory: [], execute: { generation: 1, config: { provider: "codex/test" } } };
+  await port.createWorktree(w, "main");
+  assert.equal(calls[0].idempotencyKey, "role-workflow:12345678-task:worktree");
+  assert.equal(calls[0].source.branchName, "role-workflow/1-12345678");
+  w.worktreeHistory = [{ workspaceId: "old" }]; w.execute.generation = 2;
+  await port.createWorktree(w, "main"); await port.createWorktree(w, "main");
+  assert.equal(calls[1].idempotencyKey, "role-workflow:12345678-task:worktree:2");
+  assert.equal(calls[1].source.branchName, "role-workflow/1-12345678-2");
+  assert.deepEqual(calls[1], calls[2]);
 });

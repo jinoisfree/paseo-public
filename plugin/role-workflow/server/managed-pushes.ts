@@ -26,6 +26,7 @@ export interface ManagedPushHost {
   setPushUnverified(w: Workflow, value: boolean): void;
   renameWorkspaces(w: Workflow, marker: boolean): Promise<unknown>;
   queuePushReview(w: Workflow): Promise<void>;
+  cleanupWorktree(w: Workflow): Promise<void>;
   quiet(snapshot: Snapshot): boolean;
   busyWriter(w: Workflow): Promise<Workflow | null>;
 }
@@ -214,6 +215,7 @@ export class ManagedPushes {
     w.progress = "pushed";
     w.artifactNotice = "";
     await integrateWorktree(w, this.host.probe(), record);
+    await this.host.cleanupWorktree(w);
     await this.host.queuePushReview(w);
   }
   async syncManagedPush(w: Workflow) {

@@ -55,6 +55,17 @@ function hasUnsettledWork(w: ArchiveFlow): boolean {
   );
 }
 
+/** Shared ownership and member identity checks used by both archive paths. */
+export function archiveWorkspaceShared(workflows: readonly ArchiveFlow[], ownerId: string, ids: readonly string[]) {
+  return workflows.some(other => other.id !== ownerId && [other.plan, other.execute].some(member =>
+    member?.workspaceId && ids.includes(member.workspaceId)));
+}
+export function archiveMembersPresent(
+  members: { id: string; workspaceId: string | null }[], conversations: ArchiveConversation[],
+) {
+  return members.every(member => conversations.some(a => a.id === member.id && a.workspaceId === member.workspaceId));
+}
+
 /** Unknown pinning, activity or conversation state always preserves the workspace. */
 export function archiveCandidate(
   w: ArchiveFlow,
@@ -80,9 +91,7 @@ export function archiveCandidate(
     workspaceIds.includes(a.workspaceId),
   );
   if (
-    members.some(
-      (m) => !conversations.some((a) => a.id === m.id && a.workspaceId === m.workspaceId),
-    )
+    !archiveMembersPresent(members, conversations)
   )
     return null;
   const activeIds = activeWorkspaceIds(workspaceIds, inspection, conversations);
@@ -111,14 +120,8 @@ export function archiveCandidates(
 ): ArchiveCandidate[] {
   return workflows.flatMap((w) => {
     if (ids && !ids.includes(w.id)) return [];
-    const shared = workflows.some(
-      (other) =>
-        other.id !== w.id &&
-        [other.plan, other.execute].some(
-          (m) =>
-            m?.workspaceId && [w.plan?.workspaceId, w.execute?.workspaceId].includes(m.workspaceId),
-        ),
-    );
+    const shared = archiveWorkspaceShared(workflows, w.id,
+      [w.plan?.workspaceId, w.execute?.workspaceId].filter((id): id is string => !!id));
     const row = shared ? null : archiveCandidate(w, inspection, progress, days, now);
     return row ? [row] : [];
   });

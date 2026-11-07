@@ -58,6 +58,7 @@ import {
   inspectVerification,
 } from "./artifacts";
 import { resolvedFolder, pathsOverlap } from "./workspaces";
+import { WorktreeCleanup } from "./worktree-cleanup";
 import { placeExecutor, workFolder, worktreeContext } from "./worktree";
 import { quotaPauseSchema } from "./quota";
 import { transientPauseSchema } from "./transient";
@@ -158,6 +159,11 @@ const workflowSchema = z.object({
     .object({ path: z.string(), branch: z.string(), base: z.string(), workspaceId: z.string() })
     .nullable()
     .default(null),
+  worktreeHistory: z.array(z.object({ path: z.string(), branch: z.string(), base: z.string(), workspaceId: z.string() })).default([]),
+  worktreeCleanup: z.object({
+    stage: z.enum(["pending", "done", "skipped", "failed"]), attempts: z.number().int().nonnegative(),
+    detail: z.string(), at: z.string(), evidenceFiles: z.number().int().nonnegative().nullable().default(null),
+  }).nullable().default(null),
   /** Commit sets already notified about a required base merge; survives restart and retargeting. */
   worktreeMergeNotices: z.array(z.string()).default([]),
   /** Result of moving the planner's checkout to the pushed, verified commit. */
@@ -589,6 +595,11 @@ export class WorkflowEngine {
     captureArtifacts: (w, text, evidence, agentId, turnKey) => this.captureArtifacts(w, text, evidence, agentId, turnKey),
     busyWriter: (w) => this.busyWriter(w),
   });
+  private readonly worktreeCleanup = new WorktreeCleanup({
+    port: () => this.port, probe: () => this.probe, db: () => this.db(), save: () => this.save(),
+    settings: () => this.settings(), now: () => this.now(), stateFolder: () => path.dirname(this.store.file),
+    touch: (w, detail) => this.touch(w, detail),
+  });
   private readonly managedPushes = new ManagedPushes({
     // Read late: the runner is assigned in the constructor, after field initializers.
     runner: () => this.managedRunner,
@@ -606,6 +617,7 @@ export class WorkflowEngine {
     invalidatePush: (w, progress) => this.invalidatePush(w, progress),
     setPushUnverified: (w, value) => this.setPushUnverified(w, value),
     renameWorkspaces: (w, marker) => this.renameWorkspaces(w, marker),
+    cleanupWorktree: (w) => this.worktreeCleanup.run(w),
     queuePushReview: (w) => this.queuePushReview(w),
     quiet: (snapshot) => this.quiet(snapshot),
     busyWriter: (w) => this.busyWriter(w),
@@ -1264,6 +1276,8 @@ export class WorkflowEngine {
         placement: null,
         worktree: null,
         worktreeMergeNotices: [],
+        worktreeHistory: [],
+        worktreeCleanup: null,
         integration: null,
         pushTargets: [],
         pushEpoch: 0,
@@ -1907,7 +1921,7 @@ export class WorkflowEngine {
         if (row.phase === "withdrawn") row.phase = "queued";
       return;
     }
-    const ids = [w.plan?.workspaceId, w.execute?.workspaceId].filter((id): id is string => !!id);
+    const ids = [w.plan?.workspaceId, w.worktreeCleanup?.stage === "done" ? null : w.execute?.workspaceId].filter((id): id is string => !!id);
     w.pushReview = {
       key,
       workspaces: [...new Set(ids)].map((id) => ({ id, phase: "queued", ownedPinAt: null })),
@@ -2803,6 +2817,7 @@ export class WorkflowEngine {
   private async syncWorkflow(w: Workflow) {
     await this.syncStartPin(w);
     await this.managedPushes.syncManagedPush(w);
+    await this.worktreeCleanup.run(w);
     if (this.pendingTitles.has(w.id))
       await this.renameWorkspaces(w, (await this.settings()).titleMarker);
     if (await this.syncPushReview(w))
@@ -2849,6 +2864,7 @@ export class WorkflowEngine {
       const snapshot = await this.port.inspect(member.id);
       // Finished work is being collected, possibly with only one legacy half archived.
       // It must neither resume nor produce a stopped notification because of that archive.
+      if (member === w.execute && w.worktreeCleanup?.stage === "done") continue;
       if (snapshot?.archived && isFinished(w)) return false;
       if (!snapshot || snapshot.archived) {
         member.usage = null;
@@ -3036,7 +3052,7 @@ export class WorkflowEngine {
       }
       await this.ensureNumber(w);
       if (role === "execute") {
-        const blocker = w.placement || (w.isolation === "undecided" && capabilities(w).executorSelection && current.generation === 1)
+        const blocker = w.placement || (w.isolation === "undecided" && capabilities(w).executorSelection && (current.generation === 1 || w.worktreeHistory.length > 0))
           ? await this.placementBlocker(w) : null;
         if (await placeExecutor(w, this.probe, this.port, await this.settings(), blocker)) await this.save();
         if (w.placement) {
@@ -3764,6 +3780,18 @@ export class WorkflowEngine {
       }
       w.lastPlan = report;
       w.lastInstruction = d.next;
+      let generation = 1;
+      if (w.worktreeCleanup?.stage === "done" && w.worktree) {
+        generation = (w.execute?.generation ?? 0) + 1;
+        w.worktreeHistory.push(w.worktree);
+        if (w.execute) w.history.push(w.execute.id);
+        w.execute = null;
+        w.worktree = null;
+        w.isolation = "undecided";
+        w.placement = null;
+        w.worktreeCleanup = null;
+        w.integration = null;
+      }
       if (!w.execute) {
         const defaults = executorDefaults(settings, this.executorChoice.executorProvider(w));
         const selected = this.executorChoice.selectedExecutor(w);
@@ -3776,7 +3804,7 @@ export class WorkflowEngine {
         w.execute = {
           id: randomUUID(),
           workspaceId: null,
-          generation: 1,
+          generation,
           config: {
             provider: model,
             ...(thinking ? { thinkingOptionId: thinking } : {}),

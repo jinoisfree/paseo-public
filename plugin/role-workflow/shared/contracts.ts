@@ -19,6 +19,7 @@ export const settingsSchema = z.object({
   autoPinStarted: z.boolean().default(true),
   autoPinPushed: z.boolean().default(true),
   autoArchivePushed: z.boolean().default(true),
+  autoArchiveWorktree: z.boolean().default(true),
   archiveAfterDays: z.number().int().nonnegative().default(3),
   notifyPermission: z.boolean().default(true),
   notifyStopped: z.boolean().default(true),

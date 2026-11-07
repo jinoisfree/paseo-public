@@ -25,7 +25,7 @@ export async function placeExecutor(
     return false;
   }
   if (w.isolation === "shared") return false;
-  if (!capabilities(w).executorSelection || w.execute?.generation !== 1 || (!blocker && !choice)) {
+  if (!capabilities(w).executorSelection || (w.execute?.generation !== 1 && !w.worktreeHistory.length) || (!blocker && !choice)) {
     w.isolation = "shared";
     w.placement = null;
     return true;

@@ -60,6 +60,10 @@
 
 `placeExecutor`는 첫 배치에서 겹치는 미완료 쓰기 작업이 없으면 `isolation: shared`를 저장합니다. 겹치면 `executorPlacement` 설정에 따라 worktree를 만들거나, 선택 대기(`placement.stage: choice`, isolation undecided), 기다리기(`placement.stage: waiting`, isolation shared)로 남깁니다. worktree를 만들 수 없으면 사유와 함께 기다립니다. `prepareMember`는 대기 중 실행 대화 생성을 보류하고 매번 writer/scopes로 미완료 겹침을 다시 계산합니다. `selectPlacement` RPC는 선택 대기에서만 결정을 저장하고 진행합니다. 겹침이 사라지면 탭을 생성·전달하며, 기존 `clearToExecute`의 실행 중 충돌 보호도 이어서 적용합니다. 기존 shared/worktree 결정과 교체 실행 담당은 다시 선택하지 않습니다.
 
+### worktree 자동 정리
+
+`WorktreeCleanup.run`은 승인된 푸시·ff 반영 뒤와 tick 복구에서 같은 판단을 사용합니다. `worktreeCleanup`은 pending → done/skipped/failed이며 failed는 3초 이상 간격으로 최대 3회 시도합니다. evidenceFiles는 보관 전에 상태 폴더 복사가 끝났음을 나타내는 복구 체크포인트입니다. 보관 응답이 유실돼도 재조회로 완료를 확인하며 done/skipped는 재실행하지 않습니다. 새 plan에서 done인 worktree는 worktreeHistory에 남기고 generation+1 실행 담당의 배치를 다시 결정합니다.
+
 ## 5. 진입점
 
 | 진입점 | 연결 | 주요 전이 |
@@ -81,6 +85,7 @@
 | Recovery | `server/recovery.ts` | 사용 한도·일시 오류 기록, 예산 안의 자동 재개와 중단 안내 | 없음(workflow 필드) |
 | Compaction | `server/compaction.ts` | 유휴 대화 압축, 결과 기록, 재시도 | 엔진(`compacting`, `compressionReasons`) |
 | ExecutorChoice | `server/executor-choice.ts` | 구현 제품·모델·추론 선택, 카탈로그 검증, 실행 설정 적용 | 없음 |
+| WorktreeCleanup | `server/worktree-cleanup.ts` | 안전 조건 재확인·증거 복사·구현 작업 공간 보관·재시작 복구 | workflow.worktreeCleanup |
 | ManagedPushes | `server/managed-pushes.ts` | 승인된 푸시의 준비·실행·재확인과 결과 적용 | 엔진(실행 기록기, 진행 맵) |
 | GeneralMode | `server/general-mode.ts` | 일반개발 담당 선택, 연합 → 일반 전환과 결과 전달 | 없음 |
 | PushAudit | `server/push-audit.ts` | 응답 뒤 셸 푸시 감사(직렬 큐 밖, 1건씩) | 모듈(진행 중 감사) |

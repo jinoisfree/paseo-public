@@ -321,6 +321,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
             ["askExecutorModel", "이전 작업의 실행 모델 질문"],
             ["rememberProjectChoices", "프로젝트별 선택 재사용"],
             ["autoArchivePushed", "🔵 푸시 작업 자동 보관"],
+            ["autoArchiveWorktree", "푸시 후 따로 작업 공간 자동 정리"],
             ["autoPinStarted", "📌 새 작업 시작 시 상단 고정"],
             ["autoPinPushed", "🔵 푸시 완료 시 확인할 때까지 상단 고정"],
           ] as const

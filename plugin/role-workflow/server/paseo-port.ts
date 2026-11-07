@@ -596,21 +596,22 @@ export function createPort(
           projectName: await readProjectName(api, w.projectId, w.cwd),
           number: w.number,
           progress: w.progress,
-          generation: 1,
+          generation: w.execute?.generation ?? 1,
         }),
       )
         .slice(0, 120)
         .join("");
-      // One worktree per task; the key returns the same workspace when creation is retried.
+      // A cleaned placement gets a fresh workspace; retries of that generation keep its key.
+      const generation = w.worktreeHistory.length ? `:${w.execute?.generation ?? 1}` : "";
       const workspace = await api.workspaces.create({
-        idempotencyKey: `role-workflow:${w.id}:worktree`,
+        idempotencyKey: `role-workflow:${w.id}:worktree${generation}`,
         source: {
           kind: "worktree",
           cwd: w.cwd,
           projectId: w.projectId,
           action: "branch-off",
           baseBranch,
-          branchName: `role-workflow/${w.number}-${w.id.slice(0, 8)}`,
+          branchName: `role-workflow/${w.number}-${w.id.slice(0, 8)}${generation.replace(":", "-")}`,
         },
         title,
       });

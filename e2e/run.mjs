@@ -4,7 +4,7 @@
 // The harness shape follows babo-jeonguk/paseo-usage-auto-resume (MIT).
 // usage: node e2e/run.mjs [--paseo <cli>] [--keep]
 import { execFile, spawn } from "node:child_process";
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -264,6 +264,7 @@ try {
   });
 
   let worktreeFlow;
+  let cleanupObservation;
   await step("a federated executor works in its own worktree of the same repository", async () => {
     writeFileSync(
       control,
@@ -437,6 +438,62 @@ try {
     assert((await run("git", ["ls-remote", remote])).stdout === "", "a commit reached the remote");
   });
 
+  await step("AC-108: approved local push integrates and archives only the clean executor workspace", async () => {
+    const flow = state().workflows.find(w => w.id === worktreeFlow?.id);
+    assert(flow?.worktree, "worktree scenario did not finish");
+    const { settings } = await rpc("workflow.status", {});
+    await rpc("workflow.configure", { ...settings, autoArchivePushed: false, autoArchiveWorktree: true, autoPinPushed: false });
+    const common = (await run("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: work })).stdout.trim();
+    appendFileSync(join(common, "info", "exclude"), "\nevidence/\n");
+    await mkdir(join(flow.worktree.path, "evidence"), { recursive: true });
+    writeFileSync(join(flow.worktree.path, "evidence", "cleanup.log"), "fixture evidence must survive archive\n");
+    writeFileSync(join(flow.worktree.path, "cleanup-feature.txt"), "committed code must survive archive\n");
+    const added = await run("git", ["add", "cleanup-feature.txt"], { cwd: flow.worktree.path });
+    assert(added.code === 0, added.stderr);
+    const committed = await run("git", ["-c", "user.email=e2e@example.invalid", "-c", "user.name=e2e", "commit", "-q", "-m", "fixture implementation ready for cleanup"], { cwd: flow.worktree.path });
+    assert(committed.code === 0, committed.stderr);
+    const newCommit = (await run("git", ["rev-parse", "HEAD"], { cwd: flow.worktree.path })).stdout.trim();
+    const cleanupTargets = [{ ...flow.pushTargets[0], commit: newCommit }];
+    const verdict = join(root, "fixture-verdict.md");
+    writeFileSync(verdict, "fixture only: 완료 / 단일 모델\n");
+    writeFileSync(control, JSON.stringify({ mode: "text", text: `푸시대상: ${JSON.stringify(cleanupTargets)}\n<paseo-workflow>${JSON.stringify({ status: "complete", summary: "fixture ready", next: "", handoff: "fixture", checks: [], verdict: { path: verdict, judgement: "완료", condition: "단일 모델" } })}</paseo-workflow>` }));
+    try {
+      const completed = await cli("send", flow.plan.id, "이 fixture의 검증을 끝내고 푸시 승인을 기다려줘.");
+      assert(completed.code === 0, completed.stderr);
+      await waitFor("settled fixture review", async () => state().workflows.find(w => w.id === flow.id && w.status === "completed" && !w.asker && !w.pending && !w.inbox));
+      const prepared = await rpc("workflow.push-prepare", { id: flow.id });
+      // Test-only approval for the isolated local bare remote, never a user's repository.
+      const result = await rpc("workflow.push-execute", { id: flow.id, requestId: prepared.id, approved: true });
+      assert(result.state === "pushed", `fixture push failed: ${result.error}`);
+      const cleaned = await waitFor("worktree cleanup done", async () => {
+        const w = state().workflows.find(w => w.id === flow.id);
+        if (w?.worktreeCleanup?.stage === "skipped") throw new Error(w.worktreeCleanup.detail);
+        return w?.worktreeCleanup?.stage === "done" ? w : null;
+      }, 60_000);
+      assert(cleaned.integration?.ok, "planner checkout was not integrated");
+      assert(readFileSync(join(work, "cleanup-feature.txt"), "utf8") === "committed code must survive archive\n", "DATA LOSS RISK: implementation is missing from planner checkout");
+      const api = createPaseoApi(client);
+      const plan = (await api.agents.ref(flow.plan.id).refresh()).agent;
+      const executor = (await api.agents.ref(flow.execute.id).refresh()).agent;
+      const spaces = await api.workspaces.list({ page: { limit: 200 } });
+      assert(!plan.archivedAt, "planner conversation was archived");
+      assert(executor.archivedAt, "executor conversation is not archived");
+      assert(spaces.entries.some(ws => ws.id === flow.plan.workspaceId), "planner workspace disappeared");
+      assert(!spaces.entries.some(ws => ws.id === flow.worktree.workspaceId), "executor workspace is still in the sidebar directory");
+      const copied = join(home, "role-workflow", "evidence", flow.id, "worktree", flow.worktree.workspaceId, "cleanup.log");
+      assert(readFileSync(copied, "utf8") === "fixture evidence must survive archive\n", "evidence was not preserved");
+      const branch = await run("git", ["show-ref", "--verify", "--quiet", `refs/heads/${flow.worktree.branch}`], { cwd: work });
+      assert(branch.code === 0 || branch.code === 1, "could not observe the branch after archive");
+      const included = await run("git", ["merge-base", "--is-ancestor", cleaned.integration.commit, "HEAD"], { cwd: work });
+      assert(included.code === 0, "DATA LOSS RISK: integrated commit is missing from planner checkout");
+      cleanupObservation = { workflowId: flow.id, workspaceId: flow.worktree.workspaceId, directoryExists: existsSync(flow.worktree.path), branchExists: branch.code === 0, executorArchived: !!executor.archivedAt, plannerArchived: !!plan.archivedAt, evidenceFiles: cleaned.worktreeCleanup.evidenceFiles, attempts: cleaned.worktreeCleanup.attempts, at: cleaned.worktreeCleanup.at, integratedCommit: cleaned.integration.commit, workspaceRestoreApi: "not exposed by 0.15 public API; archived agent record remains readable" };
+      writeFileSync(join(root, "worktree-cleanup-observation.json"), JSON.stringify(cleanupObservation, null, 2));
+      console.log(`observation ${JSON.stringify(cleanupObservation)}`);
+    } finally {
+      writeFileSync(control, JSON.stringify({ mode: "text", text: "2" }));
+    }
+  });
+
   await step("state and plugin survive a daemon restart", async () => {
     const flows = state().workflows.length;
     await client?.close().catch(() => {});
@@ -449,6 +506,11 @@ try {
     assert(state().workflows.length === flows, "workflows changed across the restart");
     const flow = state().workflows.find((w) => w.plan?.id === generalAgent);
     assert(flow?.mode === "general", "general mode was not kept");
+    if (cleanupObservation) {
+      const cleaned = state().workflows.find(w => w.id === cleanupObservation.workflowId);
+      assert(cleaned?.worktreeCleanup?.stage === "done", "cleanup completion was lost on restart");
+      assert(cleaned.worktreeCleanup.attempts === cleanupObservation.attempts && cleaned.worktreeCleanup.at === cleanupObservation.at, "restart attempted cleanup again");
+    }
   });
 
   await step("the plugin logged no errors", async () => {
