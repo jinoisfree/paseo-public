@@ -310,6 +310,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
             ["autoResumeQuota", "사용 한도 해소 시 자동 재개"],
             ["autoResumeTransient", "일시 오류 자동 재개"],
             ["shellPushGuard", "에이전트 셸 git push 차단"],
+            ["executorWorktree", "연합개발 구현 담당 별도 worktree"],
             ["notifyCompleted", "작업 완료 알림"],
             ["koreanTitle", "한글 제목"],
             ["titleMarker", "제목 상태 색 표식"],

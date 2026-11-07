@@ -10,6 +10,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pluginDir = resolve(here, "../plugin/role-workflow");
@@ -55,7 +56,7 @@ const [daemonPort, modelPort] = [await freePort(), await freePort()];
 const target = `127.0.0.1:${daemonPort}`;
 const baseEnv = { ...process.env };
 for (const key of Object.keys(baseEnv))
-  if (/^(PASEO_|ANTHROPIC_|CLAUDE_)/.test(key)) delete baseEnv[key];
+  if (/^(PASEO_|ANTHROPIC_|CLAUDE_|GIT_CONFIG)/.test(key)) delete baseEnv[key];
 const env = { ...baseEnv, PASEO_HOME: home };
 const cli = (...args) => run(paseo, [...args, "--home", home], { env });
 
@@ -133,6 +134,22 @@ const runAgent = async (prompt) => {
   if (!id) throw new Error(`agent did not start: ${result.stdout}${result.stderr}`.slice(0, 600));
   return id;
 };
+let client = null;
+const rpc = async (method, input = {}) => {
+  client ??= await waitFor("plugin RPC connection", async () => {
+    const candidate = new DaemonClient({ url: `ws://${target}/ws`, clientId: "rw-e2e", clientType: "cli", reconnect: { enabled: false } });
+    try {
+      await candidate.connect();
+      return candidate;
+    } catch {
+      await candidate.close().catch(() => {});
+      return null;
+    }
+  });
+  return client.invokePluginRpc("role-workflow", method, input);
+};
+const workflowBlock = (status, next) =>
+  `<paseo-workflow>${JSON.stringify({ status, summary: status, next, handoff: "e2e", checks: [] })}</paseo-workflow>`;
 const assert = (ok, message) => {
   if (!ok) throw new Error(message);
 };
@@ -197,8 +214,63 @@ try {
     assert((await run("git", ["ls-remote", remote])).stdout === "", "a commit reached the remote");
   });
 
+  await step("a federated executor works in its own worktree of the same repository", async () => {
+    writeFileSync(
+      control,
+      JSON.stringify({
+        mode: "role",
+        plan: [workflowBlock("plan", "feature.txt를 추가한다"), workflowBlock("input", "e2e 확인 끝")],
+        execute: [workflowBlock("result", "구현 완료")],
+      }),
+    );
+    try {
+      const planner = await runAgent("연합개발로 진행해줘. feature.txt를 추가하는 계획을 세워줘.");
+      let flow = await waitFor("federated workflow", async () => {
+        const found = state().workflows.find((w) => w.plan?.id === planner);
+        return found?.mode === "federated" ? found : null;
+      });
+      if (!flow.selectionPlan) {
+        // The turn that names the mode only sets it; the next planner turn carries the plan.
+        await cli("send", planner, "계획을 확정해줘.", "--wait", "--wait-timeout", "120s");
+        flow = await waitFor("held plan", async () => {
+          const found = state().workflows.find((w) => w.id === flow.id);
+          return found?.selectionPlan ? found : null;
+        });
+      }
+      const { models } = await rpc("workflow.models", { provider: "claude" });
+      const model = models.find((m) => m.isDefault) ?? models[0];
+      assert(model, "no Claude model in the catalog");
+      const thinking = model.thinkingOptions.find((o) => o.isDefault)?.id ?? model.thinkingOptions[0]?.id ?? "";
+      const selected = await rpc("workflow.select-executor", { id: flow.id, provider: "claude", model: model.id, thinking });
+      assert(selected.ok, `executor selection failed: ${selected.detail}`);
+      flow = await waitFor("executor in a worktree", async () => {
+        const found = state().workflows.find((w) => w.id === flow.id);
+        return found?.worktree && found.execute?.workspaceId ? found : null;
+      }, 60_000);
+      assert(flow.isolation === "worktree", `isolation ${flow.isolation}`);
+      const worktrees = (await run("git", ["worktree", "list", "--porcelain"], { cwd: work })).stdout;
+      assert(worktrees.includes(`worktree ${flow.worktree.path}`), `worktree missing:\n${worktrees}`);
+      const common = async (cwd) =>
+        (await run("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd })).stdout.trim();
+      assert((await common(flow.worktree.path)) === (await common(work)), "the worktree belongs to another repository");
+      assert(/^role-workflow\//.test(flow.worktree.branch), `branch ${flow.worktree.branch}`);
+      const executorFile = await waitFor("executor agent file", async () => agentFile(flow.execute.id));
+      const executorCwd = JSON.parse(readFileSync(executorFile, "utf8")).cwd;
+      assert(executorCwd === flow.worktree.path, `executor cwd ${executorCwd}`);
+      await waitFor("review back to the planner", async () => {
+        const found = state().workflows.find((w) => w.id === flow.id);
+        // The executor's result was processed and the planner answered the review.
+        return found?.lastResult && found.status === "needs_input" ? found : null;
+      }, 120_000);
+    } finally {
+      writeFileSync(control, JSON.stringify({ mode: "text", text: "2" }));
+    }
+  });
+
   await step("state and plugin survive a daemon restart", async () => {
     const flows = state().workflows.length;
+    await client?.close().catch(() => {});
+    client = null;
     await stop(daemon);
     await startDaemon();
     // Plugin logs belong to one daemon run, so a fresh "Plugin ready" proves the reload.
@@ -215,6 +287,7 @@ try {
     assert(errors.length === 0, errors.join("\n").slice(0, 800));
   });
 } finally {
+  await client?.close().catch(() => {});
   for (const child of children.reverse()) await stop(child);
   const failed = results.filter((r) => !r.ok).length;
   writeFileSync(join(root, "results.json"), JSON.stringify({ paseo, results }, null, 2));

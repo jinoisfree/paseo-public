@@ -2,11 +2,14 @@
 // file re-read per request, a JSONL request log) follows babo-jeonguk/paseo-usage-auto-resume (MIT).
 // Control file: { "mode": "text" | "limit" | "tool", "text": "reply", "command": "shell command" }
 // "tool" asks the agent to run `command` with its Bash tool once, then replies with `text`.
+// "role" replies with the next entry of `plan` or `execute` (by the role in the system prompt) on
+// each main-loop request, repeating the last entry when the list runs out.
 // usage: node fake-models.mjs <port> <controlFile> <logFile>
 import { createServer } from "node:http";
 import { appendFileSync, readFileSync } from "node:fs";
 
 const [port, controlFile, logFile] = process.argv.slice(2);
+const turns = { plan: 0, execute: 0 };
 const control = () => {
   try {
     return JSON.parse(readFileSync(controlFile, "utf8"));
@@ -33,7 +36,15 @@ createServer((req, res) => {
     };
     if (!req.url.startsWith("/v1/messages")) return json(404, { error: "fixture" });
     if (req.url.includes("count_tokens")) return json(200, { input_tokens: 10 });
-    const { mode = "text", text = "Done.", command = "" } = control();
+    const settings = control();
+    const { mode = "text", command = "" } = settings;
+    let { text = "Done." } = settings;
+    const system = JSON.stringify(parsed.system ?? "");
+    const role = system.includes("당신은 이 사용자의 구현 역할이다") ? "execute" : "plan";
+    if (mode === "role" && (parsed.tools ?? []).length) {
+      const list = settings[role] ?? [text];
+      text = list[Math.min(turns[role]++, list.length - 1)];
+    }
     const lastUser = (parsed.messages ?? []).filter((m) => m.role === "user").at(-1);
     const last = textOf(lastUser?.content);
     const toolResult = Array.isArray(lastUser?.content)
@@ -45,7 +56,8 @@ createServer((req, res) => {
       JSON.stringify({
         at: new Date().toISOString(),
         mode,
-        system: JSON.stringify(parsed.system ?? "").length,
+        system: system.length,
+        role,
         last: last.slice(-2000),
         toolResult: toolResult ? JSON.stringify(toolResult.content).slice(0, 4000) : undefined,
         callsTool,

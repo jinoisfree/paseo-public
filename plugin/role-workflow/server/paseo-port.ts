@@ -560,9 +560,14 @@ export function createPort(
         .slice(0, 120)
         .join("");
       // The executor opens as a tab beside its planner, so the pair is one row in every
-      // client's sidebar. A workspace of its own is only for a conversation without one.
-      const beside = role === "execute" ? (w.plan?.workspaceId ?? null) : null;
-      const workspace = beside
+      // client's sidebar, unless it works in its own worktree workspace.
+      // A workspace of its own is only for a conversation without one.
+      const isolated =
+        role === "execute" && w.isolation === "worktree" ? (w.worktree?.workspaceId ?? null) : null;
+      const beside = role === "execute" && !isolated ? (w.plan?.workspaceId ?? null) : null;
+      const workspace = isolated
+        ? api.workspaces.ref(isolated)
+        : beside
         ? api.workspaces.ref(beside)
         : await api.workspaces.create({
             idempotencyKey: `role-workflow:${w.id}:${role}:${member.generation}`,
@@ -583,6 +588,36 @@ export function createPort(
       });
       if (agent.id !== member.id) throw new Error("생성된 대화 ID가 인계 대상과 다릅니다.");
       return workspace.id;
+    },
+    async createWorktree(w, baseBranch, marker = false) {
+      const api = getApi();
+      const title = Array.from(
+        decorateTitle(w.execute?.config.provider.split("/")[0] ?? "codex", "execute", w.title, marker, {
+          projectName: await readProjectName(api, w.projectId, w.cwd),
+          number: w.number,
+          progress: w.progress,
+          generation: 1,
+        }),
+      )
+        .slice(0, 120)
+        .join("");
+      // One worktree per task; the key returns the same workspace when creation is retried.
+      const workspace = await api.workspaces.create({
+        idempotencyKey: `role-workflow:${w.id}:worktree`,
+        source: {
+          kind: "worktree",
+          cwd: w.cwd,
+          projectId: w.projectId,
+          action: "branch-off",
+          baseBranch,
+          branchName: `role-workflow/${w.number}-${w.id.slice(0, 8)}`,
+        },
+        title,
+      });
+      const snapshot = await workspace.refresh();
+      const folder = snapshot?.workspaceDirectory;
+      if (!folder) throw new Error("구현 worktree의 경로를 확인하지 못했습니다.");
+      return { workspaceId: workspace.id, path: folder };
     },
     async createGeneral(w, transfer, mode) {
       const api = getApi();

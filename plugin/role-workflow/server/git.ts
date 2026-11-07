@@ -28,6 +28,17 @@ export interface RepoProbe {
   repository?(cwd: string): Promise<string | null>;
   /** Resolve only a hash observed in a successful push; never substitute HEAD. */
   commit?(cwd: string, hash: string): Promise<string | null>;
+  /** Checkout identity: top level, HEAD, current branch ("" when detached) and shared Git dir. */
+  identity?(cwd: string): Promise<RepoIdentity | null>;
+  /** Moves the checked-out branch to `commit` only as a fast-forward. Never merges or resets. */
+  fastForward?(cwd: string, commit: string): Promise<{ ok: boolean; detail: string }>;
+}
+
+export interface RepoIdentity {
+  root: string;
+  head: string;
+  branch: string;
+  common: string;
 }
 
 const execute = promisify(execFile);
@@ -180,6 +191,34 @@ export function createRepoProbe(run: typeof git = git): RepoProbe {
   const noChanges =
     "실행 전과 비교해 달라진 파일이 감지되지 않았다. 보고된 변경이 실제로 있는지 확인할 것.";
   return {
+    async identity(cwd) {
+      try {
+        const [root, head, branch, common] = await Promise.all([
+          run(cwd, ["rev-parse", "--show-toplevel"]),
+          run(cwd, ["rev-parse", "--verify", "HEAD^{commit}"]),
+          run(cwd, ["branch", "--show-current"]),
+          run(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+        ]);
+        return {
+          root: await resolvedFolder(root.trim()),
+          head: head.trim(),
+          branch: branch.trim(),
+          common: await resolvedFolder(common.trim()),
+        };
+      } catch {
+        return null;
+      }
+    },
+    async fastForward(cwd, commit) {
+      if (!/^[a-f0-9]{40,64}$/.test(commit)) return { ok: false, detail: "전체 커밋 해시가 아닙니다." };
+      try {
+        await run(cwd, ["merge", "--ff-only", "--no-edit", commit]);
+        return { ok: true, detail: "" };
+      } catch (error) {
+        const stderr = (error as { stderr?: string }).stderr ?? "";
+        return { ok: false, detail: stderr.trim().split("\n").slice(-2).join(" ") || String(error) };
+      }
+    },
     async commit(cwd, hash) {
       if (!/^[a-f0-9]{7,64}$/.test(hash)) return null;
       try {
