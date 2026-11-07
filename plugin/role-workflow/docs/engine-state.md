@@ -68,18 +68,19 @@
 | 3초 주기 | `tick` → `tidyWorkflow`(푸시 재시도, 일반 전환, quota·transient) → `stepWorkflow`(`observe`/`recover`/`advance`) | |
 | RPC | `control`, `selectExecutor`, `configure`, 관리형 푸시 3종, `setProgress`, `setRepositories`, `archiveFinished`, `list` | |
 
-## 6. 분리 후보
+## 6. 모듈 구성
 
-모든 모듈은 `serial`, `db()`, `save()`, `touch()`를 함께 쓰므로, 이 넷을 담은 코어 컨텍스트를 주입받는 형태가 전제입니다. 표의 앞쪽일수록 경계가 분명합니다.
+엔진은 상태 저장(`db`/`save`), 직렬 큐(`serial`), 상태 머신의 핵심(턴 접수·판정, 전달, 제목·진행 표시, 푸시 증거)을 맡습니다. 아래 모듈은 각자의 host 인터페이스로 필요한 엔진 기능만 받습니다. 상태 맵의 소유권은 표에 적힌 쪽에 있습니다.
 
-| 모듈 | 옮길 메서드 | 필요한 공유 상태 |
-|---|---|---|
-| worktree (분리 완료: `server/worktree.ts`) | `placeExecutor`, `integrateWorktree`, `workFolder`, `worktreeContext` | probe, port, settings |
-| quota/transient | `quotaFailure` ~ `retryTransient` 구간 | `resume`, `now`, `compacting` |
-| compaction | `prepareCompaction`, `startCompaction`, `finishCompaction`, `retryCompaction`, `maintainStandalone`, `maintenanceEnded` | `compacting`, `compressionReasons` |
-| executor selection | `selectExecutor`, `acceptSelection`, `selectionReady`, `selectedExecutor`, `restoreExecutor`, `catalog` | `advance` |
-| general mode | `returnToGeneral`, `transition*`, `deliverGeneral`, `generalize`, `*GeneralChoice` | `busyWriter`, `renameWorkspaces` |
-| push / managed push | 관리형 푸시, 증거, 감사, 영수증 | `pushTargets`, `pushEpoch`, `renameWorkspaces` |
-| delivery | `queue`, `deliver`, `confirmDelivery`, `resend`, `clearToExecute`, `busyWriter`, `scopes`, `recover`, `context` | `port`, `scopeCache` |
-| turn intake·decision | `admitTurn`, `consume`, `answered`, `driven`, `beside`, `overrule`, `read`, `record`, `act`, `complete`, `plan` | delivery, quota |
-| view/titles/archive | `list`, `renameWorkspaces`, `retitle`, 보관 | db |
+| 모듈 | 파일 | 맡는 일 | 상태 소유 |
+|---|---|---|---|
+| Recovery | `server/recovery.ts` | 사용 한도·일시 오류 기록, 예산 안의 자동 재개와 중단 안내 | 없음(workflow 필드) |
+| Compaction | `server/compaction.ts` | 유휴 대화 압축, 결과 기록, 재시도 | 엔진(`compacting`, `compressionReasons`) |
+| ExecutorChoice | `server/executor-choice.ts` | 구현 제품·모델·추론 선택, 카탈로그 검증, 실행 설정 적용 | 없음 |
+| ManagedPushes | `server/managed-pushes.ts` | 승인된 푸시의 준비·실행·재확인과 결과 적용 | 엔진(실행 기록기, 진행 맵) |
+| GeneralMode | `server/general-mode.ts` | 일반개발 담당 선택, 연합 → 일반 전환과 결과 전달 | 없음 |
+| PushAudit | `server/push-audit.ts` | 응답 뒤 셸 푸시 감사(직렬 큐 밖, 1건씩) | 모듈(진행 중 감사) |
+| Archives | `server/archives.ts` | 보관된 대화 정리, 끝난 작업 보관 | 모듈(점검 시각) |
+| worktree | `server/worktree.ts` | 구현 worktree 배치·확인, 푸시 후 ff-only 반영 | 없음 |
+
+남은 분리 후보는 전달(`queue`, `deliver`, `confirmDelivery`, `resend`, `busyWriter`, `context`)과 턴 접수·판정(`admitTurn`, `consume`, `act`, `plan`, `complete`)입니다. 이 둘은 상태 전이의 중심이고 서로 강하게 얽혀 있어, 나누면 오히려 흐름을 추적하기 어려워집니다. 분리는 회귀 테스트를 더 갖춘 뒤에 검토합니다.
