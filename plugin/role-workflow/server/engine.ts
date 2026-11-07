@@ -37,11 +37,6 @@ import { executorDefaults, oppositeProvider } from "../shared/assignment";
 import { requestedMode, requestsFederation } from "../shared/mode-request";
 import { JsonStore } from "./store";
 import { ManagedPushRunner } from "./managed-push";
-import {
-  inspectPushRecovery,
-  type PushRecoveryInput,
-  type PushRecoveryResult,
-} from "./push-recovery";
 import { managedPushSchema, type ManagedPush } from "../shared/managed-push";
 import type { RepoProbe } from "./git";
 import { pushPending, type TurnEvidence } from "./push-evidence";
@@ -74,6 +69,7 @@ import { Compaction } from "./compaction";
 import { ExecutorChoice } from "./executor-choice";
 import { ManagedPushes } from "./managed-pushes";
 import { GeneralMode } from "./general-mode";
+import { PushAudit } from "./push-audit";
 
 const memberSchema = z.object({
   id: z.string(),
@@ -511,14 +507,6 @@ function numbering(db: Database, unmanaged: readonly Unmanaged[], renumber: bool
   return { sequences, of: (key: string) => assigned.get(key) ?? 0 };
 }
 
-const PUSH_AUDIT_VERSION = 1;
-const PUSH_AUDIT_TIMEOUT_MS = 30_000;
-const PUSH_AUDIT_INTERVAL_MS = 600_000;
-interface PushAuditTicket {
-  workflowId: string;
-  fingerprint: string;
-  input: PushRecoveryInput;
-}
 
 /** Reported targets beyond the edit scope that this flow has not already receipted. */
 function outsideScope(w: Workflow, next: PushTarget[]) {
@@ -554,6 +542,18 @@ export class WorkflowEngine {
   private readonly scopeCache = new Map<string, Promise<string>>();
   private readonly managedRunner: ManagedPushRunner;
   private readonly managedExecutions = new Map<string, ManagedPush>();
+  private readonly pushAudit = new PushAudit({
+    port: () => this.port,
+    probe: () => this.probe,
+    stopped: () => this.stopped,
+    now: () => this.now(),
+    save: () => this.save(),
+    serial: (work) => this.serial(work),
+    db: () => this.db(),
+    setPushUnverified: (w, value) => this.setPushUnverified(w, value),
+    queuePushReview: (w) => this.queuePushReview(w),
+    pendingTitles: () => this.pendingTitles,
+  });
   private readonly generalMode = new GeneralMode({
     port: () => this.port,
     db: () => this.db(),
@@ -618,8 +618,6 @@ export class WorkflowEngine {
     compacting: (agentId) => this.compacting.has(agentId),
   });
   private readonly managedChecking = new Set<string>();
-  private pushAuditFlight: object | null = null;
-  private cancelPushAudit: (() => void) | null = null;
   constructor(
     file: string,
     private readonly port: WorkflowPort,
@@ -790,7 +788,7 @@ export class WorkflowEngine {
   }
   async close() {
     this.stopped = true;
-    this.cancelPushAudit?.();
+    this.pushAudit.stop();
     await Promise.allSettled(this.compacting.values());
     await this.tail;
   }
@@ -922,7 +920,7 @@ export class WorkflowEngine {
   }
   private newPushPhase(w: Workflow) {
     w.pushApprovalPending = false;
-    this.invalidatePushAudit(w);
+    this.pushAudit.invalidatePushAudit(w);
     this.setPushUnverified(w, false);
     if (!w.managedPush) return;
     // The durable execution journal is never deleted when a new phase begins.
@@ -1328,7 +1326,7 @@ export class WorkflowEngine {
       if (!w) return;
       if (w.processed.includes(key) || w.inbox?.key === key || w.planIssue?.response.key === key) return;
       if (canceled) w.transientPause = null;
-      this.invalidatePushAudit(w);
+      this.pushAudit.invalidatePushAudit(w);
       await this.recordTurnEvidence(w, text, failed, evidence, agentId, key);
       await this.refreshConflicts();
       const turn = {
@@ -1960,185 +1958,9 @@ export class WorkflowEngine {
           "원격 반영 재확인이 끝났습니다. 작업 저장소와 푸시 대상 커밋을 확인하세요.";
     }
   }
-  private invalidatePushAudit(w: Workflow) {
-    if (w.mode === "undecided") return;
-    w.pushAuditGeneration++;
-    w.pushAudit = null;
+  auditPushes() {
+    return this.pushAudit.auditPushes();
   }
-  private pushAuditEligible(w: Workflow) {
-    const blocked = [
-      w.managedPush,
-      w.pending,
-      w.inbox,
-      w.generalTransition,
-      w.invalidTargets,
-      w.conflict,
-      w.plan?.compaction,
-      w.execute?.compaction,
-    ];
-    return (
-      w.progress === "done" &&
-      w.mode !== "undecided" &&
-      ["active", "completed"].includes(w.status) &&
-      !blocked.some(Boolean) &&
-      !!(w.plan || w.execute)
-    );
-  }
-  private pushAuditFingerprint(w: Workflow) {
-    return createHash("sha256")
-      .update(
-        JSON.stringify([
-          w.pushAuditGeneration,
-          w.cwd,
-          w.mode,
-          w.status,
-          w.phase,
-          w.progress,
-          [...w.repositories].sort(),
-          pushReviewKey(w.pushTargets),
-          [w.plan, w.execute].map(
-            (member) => member && [member.id, member.generation, member.config.provider],
-          ),
-        ]),
-      )
-      .digest("hex");
-  }
-  private async beginPushAudit(): Promise<PushAuditTicket | null> {
-    if (this.stopped || !this.port.pushAuditHistory || !this.probe) return null;
-    const candidates = (await this.db()).workflows
-      .filter((w) => this.pushAuditEligible(w))
-      .sort((a, b) => this.pushAuditDue(a) - this.pushAuditDue(b));
-    for (const w of candidates) {
-      const fingerprint = this.pushAuditFingerprint(w);
-      const previous =
-        w.pushAudit?.version === PUSH_AUDIT_VERSION && w.pushAudit.fingerprint === fingerprint
-          ? w.pushAudit
-          : null;
-      if (previous && previous.after > this.now()) continue;
-      const retrying = previous && ["retry", "checking"].includes(previous.outcome);
-      if (retrying && previous.attempts >= 5) {
-        this.exhaustPushAudit(w);
-        await this.save();
-        continue;
-      }
-      w.pushAudit = {
-        version: PUSH_AUDIT_VERSION,
-        fingerprint,
-        attempts: retrying ? previous.attempts + 1 : 1,
-        after: this.now() + PUSH_AUDIT_TIMEOUT_MS,
-        outcome: "checking",
-      };
-      const members: PushRecoveryInput["members"] = [];
-      if (w.plan) members.push({ id: w.plan.id, role: "plan" });
-      if (w.execute) members.push({ id: w.execute.id, role: "execute" });
-      await this.save();
-      return {
-        workflowId: w.id,
-        fingerprint,
-        input: {
-          cwd: w.cwd,
-          mode: w.mode as "general" | "federated",
-          repositories: [...w.repositories],
-          targets: structuredClone(w.pushTargets),
-          members,
-        },
-      };
-    }
-    return null;
-  }
-  private pushAuditDue(w: Workflow) {
-    return w.pushAudit?.version === PUSH_AUDIT_VERSION &&
-      w.pushAudit.fingerprint === this.pushAuditFingerprint(w)
-      ? w.pushAudit.after
-      : 0;
-  }
-  private exhaustPushAudit(w: Workflow) {
-    if (!w.pushAudit) return;
-    w.pushAudit.outcome = "retry";
-    w.pushAudit.after = Number.MAX_SAFE_INTEGER;
-    if (w.pushUnverified || w.pushReceipt || w.pushTargets.length) this.setPushUnverified(w, true);
-    w.artifactNotice =
-      "푸시 기록 자동 재확인을 완료하지 못했습니다. 새 작업 기록이 도착하면 다시 확인합니다.";
-  }
-  private async applyPushAudit(ticket: PushAuditTicket, result: PushRecoveryResult) {
-    if (this.stopped) return;
-    const w = (await this.db()).workflows.find((row) => row.id === ticket.workflowId);
-    if (
-      !w ||
-      !this.pushAuditEligible(w) ||
-      this.pushAuditFingerprint(w) !== ticket.fingerprint ||
-      w.pushAudit?.fingerprint !== ticket.fingerprint
-    )
-      return;
-    const audit = w.pushAudit;
-    audit.outcome = result.state;
-    audit.after = this.now() + PUSH_AUDIT_INTERVAL_MS;
-    if (result.state === "pushed") {
-      w.pushTargets = result.targets;
-      w.pushReceipt = result.receipt;
-      w.pushCheck = result.check;
-      w.pushRetry = null;
-      w.progress = "pushed";
-      this.setPushUnverified(w, false);
-      w.artifactNotice = "";
-      await this.queuePushReview(w);
-      this.pendingTitles.add(w.id);
-    } else {
-      if (result.state === "retry") {
-        audit.after =
-          audit.attempts >= 5
-            ? Number.MAX_SAFE_INTEGER
-            : this.now() + Math.min(30_000 * 2 ** (audit.attempts - 1), 300_000);
-      }
-      if (result.state === "unverified") this.setPushUnverified(w, true);
-      if (result.state !== "none") w.artifactNotice = result.reason;
-      if (result.state === "retry" && audit.attempts >= 5) this.exhaustPushAudit(w);
-    }
-    await this.save();
-  }
-  /** Claim work briefly, perform every history/Git read outside the shared workflow queue. */
-  async auditPushes() {
-    if (this.stopped || this.pushAuditFlight) return;
-    const flight = {};
-    this.pushAuditFlight = flight;
-    let retained = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      const ticket = await this.serial(() => this.beginPushAudit());
-      if (!ticket) return;
-      const work = inspectPushRecovery(ticket.input, this.port, this.probe!).catch(() => ({
-        state: "retry" as const,
-        reason: "푸시 기록 조회를 완료하지 못해 잠시 뒤 다시 확인합니다.",
-      }));
-      const timeout = new Promise<null>((resolve) => {
-        this.cancelPushAudit = () => resolve(null);
-        timer = setTimeout(() => resolve(null), PUSH_AUDIT_TIMEOUT_MS);
-      });
-      const result = await Promise.race([work, timeout]);
-      if (result === null) {
-        // A timed-out RPC may still be running. Keep its slot until it settles, and drop its result.
-        retained = true;
-        void work.finally(() => {
-          if (this.pushAuditFlight === flight) this.pushAuditFlight = null;
-        });
-      }
-      await this.serial(() =>
-        this.applyPushAudit(
-          ticket,
-          result ?? {
-            state: "retry",
-            reason:
-              "푸시 기록 조회 시간이 초과되었습니다. 실행을 반복하지 않고 확인만 재시도합니다.",
-          },
-        ),
-      );
-    } finally {
-      clearTimeout(timer);
-      this.cancelPushAudit = null;
-      if (!retained && this.pushAuditFlight === flight) this.pushAuditFlight = null;
-    }
-  }
-  /** A planner's complete counts even while the flow is paused and its inbox is unread. */
   private declared(
     w: Workflow,
     agentId: string,
@@ -3447,7 +3269,7 @@ export class WorkflowEngine {
         (entry) => entry.plan?.id === agentId || entry.execute?.id === agentId,
       );
       if (!w) return;
-      this.invalidatePushAudit(w);
+      this.pushAudit.invalidatePushAudit(w);
       // A later user turn supersedes the deferred colour change, even before it replies.
       w.pushRetry = null;
       const automatic =
