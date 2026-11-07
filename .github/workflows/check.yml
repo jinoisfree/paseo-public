@@ -1,0 +1,39 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # The installer and its tests target macOS (launchd, the Paseo.app layout).
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: npm ci
+      - run: npx playwright install chromium
+      - run: npm run typecheck
+      - run: npm test
+      - run: python -W error::SyntaxWarning -m unittest discover -s scripts -p 'test_*.py'
+      # The private deny list never leaves the maintainer's machine; CI runs the public patterns.
+      - run: python scripts/privacy_scan.py > privacy-scan.json || (cat privacy-scan.json; exit 1)
+      - name: Generated rules match their sources
+        working-directory: plugin/role-workflow
+        run: npm run rules:sync && git diff --exit-code -- server/rules-content.ts

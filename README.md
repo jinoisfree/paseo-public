@@ -227,6 +227,14 @@ python3 scripts/privacy_scan.py --staged
 ```
 
 Playwright 브라우저는 개발 테스트에만 필요합니다.
+GitHub Actions(`.github/workflows/check.yml`)가 푸시와 PR마다 macOS·Node 22에서 위 검사와
+생성 규칙 동기화 여부를 확인합니다. 개인 차단 목록은 CI에 없으므로 공용 패턴만 검사합니다.
+
+실제 Paseo 데몬 검증은 수동으로 실행합니다. `npm run e2e`는 임시 `PASEO_HOME`과 무작위 포트로
+데몬을 따로 띄우고, 이 체크아웃의 플러그인을 설치해 가짜 Claude 모델과 대화시킵니다.
+실제 계정·사용량을 쓰지 않으며 사용 중인 데몬과 설정은 건드리지 않습니다. 기본 CLI는
+`/Applications/Paseo.app/Contents/Resources/bin/paseo`이고 `--paseo <경로>`로 바꿀 수 있습니다.
+실패하면 실행 폴더(로그·`results.json`)를 남기며 `--keep`으로 성공 때도 남깁니다.
 배포 파일에는 운영 로그·백업·빌드·사용자 설정·계정 인증 파일·node_modules를 넣지 않습니다.
 테스트의 `example.invalid` 주소와 루프백 주소는 가상 입력입니다.
 

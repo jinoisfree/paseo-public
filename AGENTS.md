@@ -12,7 +12,8 @@
 
 - 이 저장소에서 role-workflow 플러그인과 공용 스크립트·패치를 직접 개발한다. 개인 설정과 실행 데이터는 저장소 밖에서 읽는다.
 - 준비: `npm install`, `git config core.hooksPath .githooks`.
-- 검사: `npm test`, `npm run typecheck`, `python3 -m unittest discover -s scripts -p 'test_*.py'`.
+- 검사: `npm test`, `npm run typecheck`, `python3 -m unittest discover -s scripts -p 'test_*.py'`. CI(`.github/workflows/check.yml`)가 같은 검사를 돌린다.
+- 실제 데몬 검증: `npm run e2e`(격리 데몬·가짜 모델, 수동). 훅·상태 저장·재시작 동작을 바꾸면 실행한다.
 - 규칙 문서를 고치면 `cd plugin/role-workflow && npm run rules:sync`로 생성 모듈을 갱신한다.
 - 개인정보 검사는 `.githooks/pre-commit`이 `python3 scripts/privacy_scan.py --staged`로 실행한다. 개인 차단 목록은 `PASEO_PUBLIC_DENY_FILE` 또는 `~/.config/paseo-public/sync-deny.txt`에만 둔다.
 - 커밋 후 저장소·원격·브랜치·전체 해시와 검증 결과를 제시하고 푸시 승인을 기다린다.

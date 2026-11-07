@@ -1,0 +1,209 @@
+#!/usr/bin/env node
+// Manual end-to-end check: an isolated Paseo daemon (temporary PASEO_HOME, random port) loads this
+// checkout's role-workflow and talks to a fake Claude model, so no real account or quota is used.
+// The harness shape follows babo-jeonguk/paseo-usage-auto-resume (MIT).
+// usage: node e2e/run.mjs [--paseo <cli>] [--keep]
+import { execFile, spawn } from "node:child_process";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const pluginDir = resolve(here, "../plugin/role-workflow");
+const argv = process.argv.slice(2);
+const option = (name) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined);
+const paseo = option("--paseo") ?? "/Applications/Paseo.app/Contents/Resources/bin/paseo";
+const keep = argv.includes("--keep");
+
+const root = await mkdtemp(join(tmpdir(), "rw-e2e-"));
+const home = join(root, "home");
+const work = join(root, "work");
+const control = join(root, "control.json");
+const modelLog = join(root, "models.jsonl");
+const daemonLog = join(root, "daemon.out");
+await mkdir(home, { recursive: true });
+await mkdir(work, { recursive: true });
+
+const freePort = () =>
+  new Promise((done) => {
+    const server = createServer().listen(0, "127.0.0.1", () => {
+      const { port } = server.address();
+      server.close(() => done(port));
+    });
+  });
+const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+const run = (file, args, options = {}) =>
+  new Promise((done) =>
+    execFile(file, args, { timeout: 180_000, maxBuffer: 16 << 20, ...options }, (error, stdout, stderr) =>
+      done({ code: error ? (typeof error.code === "number" ? error.code : 1) : 0, stdout, stderr }),
+    ),
+  );
+async function waitFor(what, check, ms = 20_000) {
+  const until = Date.now() + ms;
+  for (;;) {
+    const value = await check().catch(() => null);
+    if (value) return value;
+    if (Date.now() > until) throw new Error(`timed out waiting for ${what}`);
+    await sleep(500);
+  }
+}
+
+const [daemonPort, modelPort] = [await freePort(), await freePort()];
+const target = `127.0.0.1:${daemonPort}`;
+const baseEnv = { ...process.env };
+for (const key of Object.keys(baseEnv))
+  if (/^(PASEO_|ANTHROPIC_|CLAUDE_)/.test(key)) delete baseEnv[key];
+const env = { ...baseEnv, PASEO_HOME: home };
+const cli = (...args) => run(paseo, [...args, "--home", home], { env });
+
+writeFileSync(control, JSON.stringify({ mode: "text", text: "2" }));
+await run("git", ["init", "-q"], { cwd: work });
+await run("git", ["-c", "user.email=e2e@example.invalid", "-c", "user.name=e2e", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: work });
+writeFileSync(
+  join(home, "config.json"),
+  JSON.stringify({
+    version: 1,
+    daemon: { listen: target, relay: { enabled: false }, mcp: { enabled: false } },
+    pluginsEnabled: true,
+    features: { webUi: { enabled: false }, dictation: { enabled: false }, voiceMode: { enabled: false } },
+    agents: {
+      providers: {
+        claude: {
+          env: {
+            CLAUDE_CODE_OAUTH_TOKEN: "e2e-fixture-only",
+            ANTHROPIC_BASE_URL: `http://127.0.0.1:${modelPort}`,
+            CLAUDE_CONFIG_DIR: join(root, "claude-config"),
+            CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+            DISABLE_TELEMETRY: "1",
+            DISABLE_AUTOUPDATER: "1",
+            DISABLE_ERROR_REPORTING: "1",
+          },
+        },
+      },
+    },
+  }),
+);
+
+const children = [];
+const detached = (file, args, extra = {}) => {
+  const out = openSync(extra.log ?? "/dev/null", "a");
+  const child = spawn(file, args, { stdio: ["ignore", out, out], detached: true, env: extra.env ?? baseEnv });
+  closeSync(out);
+  children.push(child);
+  return child;
+};
+const stop = async (child) => {
+  if (child.exitCode !== null) return;
+  try {
+    process.kill(-child.pid, "SIGTERM");
+  } catch {}
+  for (let i = 0; i < 20 && child.exitCode === null; i++) await sleep(250);
+  try {
+    process.kill(-child.pid, "SIGKILL");
+  } catch {}
+};
+let daemon;
+const startDaemon = async () => {
+  daemon = detached(paseo, ["daemon", "run", "--home", home], {
+    log: daemonLog,
+    env: { ...env, PASEO_LISTEN: target, PASEO_RELAY_ENABLED: "false", PASEO_WEB_UI_ENABLED: "false" },
+  });
+  await waitFor("daemon", async () => (await cli("ls", "--json")).code === 0);
+};
+const readyCount = async () =>
+  ((await cli("plugin", "logs", "role-workflow")).stdout.match(/Plugin ready/g) ?? []).length;
+const state = () => JSON.parse(readFileSync(join(home, "role-workflow", "state.json"), "utf8"));
+const agentFile = (id) => {
+  const walk = (dir) =>
+    readdirSync(dir).flatMap((name) => {
+      const file = join(dir, name);
+      return statSync(file).isDirectory() ? walk(file) : name === `${id}.json` ? [file] : [];
+    });
+  return walk(join(home, "agents"))[0];
+};
+const runAgent = async (prompt) => {
+  const result = await cli("run", "--provider", "claude", "--cwd", work, "--wait-timeout", "120s", "--json", prompt);
+  const id = /"agentId":\s*"([^"]+)"/.exec(result.stdout)?.[1];
+  if (!id) throw new Error(`agent did not start: ${result.stdout}${result.stderr}`.slice(0, 600));
+  return id;
+};
+const assert = (ok, message) => {
+  if (!ok) throw new Error(message);
+};
+
+const results = [];
+async function step(name, fn) {
+  const started = Date.now();
+  try {
+    await fn();
+    results.push({ name, ok: true, ms: Date.now() - started });
+    console.log(`ok   ${name}`);
+  } catch (error) {
+    results.push({ name, ok: false, error: String(error?.message ?? error) });
+    console.log(`FAIL ${name}: ${error?.message ?? error}`);
+  }
+}
+
+let questionAgent = "";
+let generalAgent = "";
+try {
+  detached(process.execPath, [join(here, "fake-models.mjs"), String(modelPort), control, modelLog]);
+  await startDaemon();
+  const version = (await run(paseo, ["--version"])).stdout.trim();
+  console.log(`paseo ${version}, root ${root}`);
+
+  await step("plugin installs and becomes ready", async () => {
+    const installed = await cli("plugin", "install", pluginDir);
+    assert(installed.code === 0, `install failed: ${installed.stderr || installed.stdout}`);
+    await waitFor("Plugin ready", async () => (await readyCount()) >= 1);
+    assert(/role-workflow\s+running/.test((await cli("plugin", "ls")).stdout), "plugin is not running");
+  });
+
+  await step("a question is answered and the conversation is enrolled with the injected prompt", async () => {
+    questionAgent = await runAgent("1+1은? 숫자만 답하세요.");
+    const saved = readFileSync(agentFile(questionAgent), "utf8");
+    assert(saved.includes("paseo-work-mode-v4"), "work-mode block missing from the system prompt");
+    assert(saved.includes("실제 변경을 시작하기 전에"), "mode question is not limited to real changes");
+    const flow = await waitFor("enrollment", async () => state().workflows.find((w) => w.plan?.id === questionAgent));
+    assert(flow.mode === "undecided", `expected undecided, got ${flow.mode}`);
+    assert(readFileSync(modelLog, "utf8").includes("1+1은"), "the fake model never saw the prompt");
+  });
+
+  await step("a turn naming the mode is processed after it ends", async () => {
+    generalAgent = await runAgent("일반개발로 진행해줘. 1+1은? 숫자만 답하세요.");
+    await waitFor("general mode", async () => {
+      const flow = state().workflows.find((w) => w.plan?.id === generalAgent);
+      return flow?.mode === "general" && flow.processed.length > 0;
+    });
+  });
+
+  await step("state and plugin survive a daemon restart", async () => {
+    const flows = state().workflows.length;
+    await stop(daemon);
+    await startDaemon();
+    // Plugin logs belong to one daemon run, so a fresh "Plugin ready" proves the reload.
+    await waitFor("Plugin ready after restart", async () => (await readyCount()) >= 1);
+    assert(/role-workflow\s+running/.test((await cli("plugin", "ls")).stdout), "plugin is not running");
+    assert(state().workflows.length === flows, "workflows changed across the restart");
+    const flow = state().workflows.find((w) => w.plan?.id === generalAgent);
+    assert(flow?.mode === "general", "general mode was not kept");
+  });
+
+  await step("the plugin logged no errors", async () => {
+    const logs = (await cli("plugin", "logs", "role-workflow")).stdout;
+    const errors = logs.split("\n").filter((line) => /\bstderr\b|role-workflow:/.test(line));
+    assert(errors.length === 0, errors.join("\n").slice(0, 800));
+  });
+} finally {
+  for (const child of children.reverse()) await stop(child);
+  const failed = results.filter((r) => !r.ok).length;
+  writeFileSync(join(root, "results.json"), JSON.stringify({ paseo, results }, null, 2));
+  console.log(`${results.length - failed}/${results.length} passed`);
+  if (failed || keep) console.log(`kept ${root}`);
+  else await rm(root, { recursive: true, force: true });
+  process.exitCode = failed || results.length === 0 ? 1 : 0;
+}
+if (!existsSync(paseo)) console.error(`Paseo CLI not found: ${paseo}`);
