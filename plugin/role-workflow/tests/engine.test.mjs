@@ -3913,6 +3913,30 @@ for (const blocked of ["asker", "held", "quota", "not-automatic", "cycle-limit",
   });
 }
 
+for (const limit of ["cycles", "turns"]) {
+  test(`quota auto resume stops at exhausted ${limit} instead of resetting the limit`, async (t) => {
+    const f = await quotaFixture(t);
+    await f.fail();
+    const w = f.engine.database.workflows[0];
+    const settings = await f.engine.settings();
+    w[limit] = limit === "cycles" ? settings.maxCycles : settings.maxTurns;
+    const before = { cycles: w.cycles, turns: w.turns };
+    f.available(true);
+    f.advance(60_000);
+    await f.engine.tick();
+    const stopped = await stored(f);
+    assert.equal(stopped.status, "paused");
+    assert.equal(stopped.quotaPause, null);
+    assert.deepEqual({ cycles: stopped.cycles, turns: stopped.turns }, before);
+    assert.match(stopped.detail, /왕복 한도 도달/);
+    assert.match(stopped.detail, /직접 재개/);
+    assert.equal(f.sent.length, 1);
+    f.advance(120 * 60_000);
+    await f.engine.tick();
+    assert.equal(f.sent.length, 1);
+  });
+}
+
 test("a transient turn prepares one retry ID and resumes exactly once after one minute", async (t) => {
   const f = await quotaFixture(t);
   const delivered = f.sent[0].messageId;

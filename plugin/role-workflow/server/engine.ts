@@ -3409,7 +3409,8 @@ export class WorkflowEngine {
       w.repeatedPlans = 0;
     }
     const settings = await this.settings();
-    if (w.cycles >= settings.maxCycles || w.turns >= settings.maxTurns) {
+    // Only the user may grant a fresh budget; automatic retries stop at the limit instead.
+    if (!automatic && (w.cycles >= settings.maxCycles || w.turns >= settings.maxTurns)) {
       w.cycles = 0;
       w.turns = 0;
     }
@@ -3671,7 +3672,13 @@ export class WorkflowEngine {
   private async retryQuota(w: Workflow) {
     const record = w.quotaPause;
     if (!record || w.status !== "paused" || !automates(w)) return;
-    if (!(await this.settings()).autoResumeQuota) return;
+    const settings = await this.settings();
+    if (!settings.autoResumeQuota) return;
+    if (w.cycles >= settings.maxCycles || w.turns >= settings.maxTurns) {
+      w.quotaPause = null;
+      this.touch(w, `${this.limitDetail(w)}\n한도에 도달해 사용 한도 자동 재개를 멈췄습니다. 한도를 확인하고 직접 재개하세요.`);
+      return;
+    }
     const now = this.now();
     if (!quotaCheckDue(record, now)) return;
     record.lastCheckedAt = now;

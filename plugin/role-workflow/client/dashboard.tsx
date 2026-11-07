@@ -571,7 +571,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
               () =>
                 void run(
                   () => saveProgress({ number: w.number, project: w.cwd, progress: "no_push" }),
-                  "푸시 불필요로 완료했습니다. 파란색으로 표시하고 완료 접기에 포함합니다.",
+                  "푸시 불필요로 완료했습니다. 파란색으로 표시합니다.",
                 ),
             )}
           </>

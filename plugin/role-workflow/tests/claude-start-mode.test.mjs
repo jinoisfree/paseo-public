@@ -144,7 +144,7 @@ for (const provider of ["claude", "codex"])
           // Contract 5 leaves the executor to the plugin screen; no catalog enters the prompt.
           assert.doesNotMatch(result.config.systemPrompt,new RegExp(`${executor}/saved`));
           assert.match(result.config.systemPrompt,/플러그인 화면에서 고른다/);
-        } else assert.doesNotMatch(result.config.systemPrompt,/첫 응답 전에 질문 도구로 진행 방식/);
+        } else assert.doesNotMatch(result.config.systemPrompt,/질문 도구로 진행 방식을 단독 질문/);
         const saved = await f.enroll(result);
         assert.equal(saved.workflows[0].mode, askMode ? "undecided" : mode);
         assert.equal(saved.settings.askMode, askMode);
