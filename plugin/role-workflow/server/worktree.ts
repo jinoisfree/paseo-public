@@ -40,12 +40,12 @@ export async function placeExecutor(
   else if (origin.root !== await resolvedFolder(w.cwd)) reason = "저장소 안의 하위 폴더에서는 따로 작업 공간을 만들 수 없어 기다립니다.";
   const decision = reason ? "wait" : choice ?? settings.executorPlacement;
   if (decision === "ask") {
-    w.placement = { stage: "choice", number: blocker!.number, title: blocker!.title, reason: "" };
+    w.placement = { stage: "choice", number: blocker!.number, title: blocker!.title, reason: "", cardPosted: w.placement?.cardPosted ?? false };
     return true;
   }
   if (decision === "wait") {
     w.isolation = "shared";
-    w.placement = { stage: "waiting", number: blocker?.number ?? 0, title: blocker?.title ?? "", reason };
+    w.placement = { stage: "waiting", number: blocker?.number ?? 0, title: blocker?.title ?? "", cardPosted: false, reason };
     return true;
   }
   const made = await port.createWorktree!(w, origin!.branch, settings.titleMarker);
@@ -89,8 +89,8 @@ export function worktreeContext(w: Workflow) {
 
 /** Read-only approval gate: both known base tips must already be in every proposed commit. */
 export async function checkWorktreeBase(w: Workflow, probe: RepoProbe | null, targets: PushTarget[]) {
-  if (w.isolation !== "worktree" || w.mode !== "federated") return { ok: true, detail: "" };
-  const unreadable = { ok: false, detail: "기준 브랜치를 확인하지 못했습니다. 저장소와 기준 브랜치를 확인한 뒤 푸시 대상을 다시 준비하세요." };
+  if (w.isolation !== "worktree" || w.mode !== "federated") return { ok: true, detail: "", needsMerge: false };
+  const unreadable = { ok: false, needsMerge: false, detail: "기준 브랜치를 확인하지 못했습니다. 저장소와 기준 브랜치를 확인한 뒤 푸시 대상을 다시 준비하세요. 기준 브랜치가 원격에 없거나 추적 브랜치가 없으면 기준 브랜치를 원격에 한 번 푸시하거나 upstream을 설정하세요." };
   try {
     if (!w.worktree || !probe?.identity || !probe.branchTips || !probe.isAncestor || !targets.length) return unreadable;
     const origin = await probe.identity(w.cwd);
@@ -105,10 +105,10 @@ export async function checkWorktreeBase(w: Workflow, probe: RepoProbe | null, ta
         const included = await probe.isAncestor(w.cwd, tip, target.commit);
         if (included === null) return unreadable;
         if (!included)
-          return { ok: false, detail: `기준 브랜치 ${origin.branch}가 ${tip.slice(0, 12)}로 앞서 있어 먼저 합쳐야 합니다.` };
+          return { ok: false, needsMerge: true, detail: `기준 브랜치 ${origin.branch}가 ${tip.slice(0, 12)}로 앞서 있어 먼저 합쳐야 합니다.` };
       }
     }
-    return { ok: true, detail: "" };
+    return { ok: true, detail: "", needsMerge: false };
   } catch {
     return unreadable;
   }

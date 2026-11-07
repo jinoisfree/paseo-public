@@ -42,7 +42,7 @@ async function fixture(t, { placement = "worktree", overlap = true, foreign = fa
     quotaAccount: async () => null,
     quotaAvailable: async () => null,
     executorPicker: async () => {},
-    placementPicker: async (agentId, workflowId, blocker) => cards.push({ agentId, workflowId, ...blocker }),
+    placementPicker: async (agentId, workflowId, blocker) => cards.push({ agentId, workflowId, blocker }),
     // Stands in for Paseo: a branch-off worktree from the named branch.
     createWorktree: async (w, baseBranch) => {
       worktrees.push({ baseBranch, id: w.id });
@@ -107,7 +107,7 @@ async function fixture(t, { placement = "worktree", overlap = true, foreign = fa
     await finish("A", "plan", { next: "기능 구현" });
     return engine.selectExecutor(id, { provider: "codex", model: "builder", thinking: "high" });
   };
-  return { dir, repo, other, base, id, file, get engine() { return engine; }, probe, agents, blocker, addBlocker, cards, created, sent, worktrees, state, finish, start,
+  return { dir, repo, other, base, id, file, port, get engine() { return engine; }, probe, agents, blocker, addBlocker, cards, created, sent, worktrees, state, finish, start,
     restart: async () => { await engine.close(); engine = new WorkflowEngine(file, port, undefined, probe); await engine.tick(); },
   };
 }
@@ -256,7 +256,8 @@ test("AC-02/AC-03/AC-09: idle overlap waits durably for a single choice, then cr
   assert.equal(w.placement.stage, "choice");
   assert.match(w.detail, /그 작업을 완료 표시하거나 보관하면 바로 시작합니다\.$/);
   assert.equal(f.created.length, 0);
-  assert.equal(f.cards[1].workflowId, f.cards[0].workflowId, "re-attachment uses the same timeline identity");
+  assert.equal(f.cards.length, 1, "restart does not reattach an already posted card");
+  assert.deepEqual(Object.keys(f.cards[0].blocker).sort(), ["number", "title"]);
   assert.equal((await f.engine.selectPlacement(f.id, "worktree")).ok, true);
   assert.equal((await f.state()).isolation, "worktree");
   assert.equal(f.created.length, 1);
@@ -512,7 +513,8 @@ test(`AC-14: unreadable ${missing} blocks approval without guessing`, async t =>
   await assert.rejects(f.engine.prepareManagedPush(f.id), /기준 브랜치를 확인하지 못했습니다/);
   assert.equal((await f.state()).managedPush, null);
   assert.match((await f.state()).detail, /기준 브랜치를 확인하지 못했습니다/);
-  assert.equal(f.sent.length, 1);
+  assert.equal(f.sent.length, 0);
+  assert.deepEqual((await f.state()).worktreeMergeNotices, []);
 });
 
 test("AC-15: worktree context assigns pre-approval merge, retest and review to the two roles", async t => {
@@ -560,4 +562,50 @@ test("AC-12/AC-14: base inspection uses only read-only Git commands and fails cl
   });
   assert.equal(await broken.isAncestor(f.repo, f.base, w.pushTargets[0].commit), null);
   assert.equal((await checkWorktreeBase(w, broken, w.pushTargets)).ok, false);
+});
+
+
+test("AC-02 F-1/F-5/F-6: minimal card payload retries failures and survives restart without reposting", async t => {
+  const f = await fixture(t, { placement: "ask" });
+  let calls = 0;
+  f.port.placementPicker = async (agentId, workflowId, blocker) => {
+    calls++;
+    assert.deepEqual(Object.keys(blocker).sort(), ["number", "title"]);
+    if (calls === 1) throw new Error("timeline unavailable");
+    f.cards.push({ agentId, workflowId, blocker });
+  };
+  await f.start();
+  assert.equal((await f.state()).status, "active");
+  assert.equal((await f.state()).placement.cardPosted, false);
+  await f.engine.tick();
+  assert.equal((await f.state()).placement.cardPosted, true);
+  assert.equal(calls, 2);
+  await f.restart();
+  assert.equal(calls, 2);
+  assert.equal(f.cards.length, 1);
+});
+
+test("AC-12 F-2: base advancement after preparation blocks execution and invalidates the preview", async t => {
+  const f = await fixture(t);
+  const { w } = await readyWorktreePush(f);
+  const record = await f.engine.prepareManagedPush(f.id);
+  const ahead = await git(f.repo, "commit-tree", `${f.base}^{tree}`, "-p", f.base, "-m", "late advance");
+  await git(f.repo, "update-ref", "refs/heads/main", ahead);
+  await assert.rejects(f.engine.executeManagedPush(f.id, record.id, true), /앞서 있어/);
+  assert.equal((await f.state()).managedPush, null);
+  assert.equal(await git(f.other, "rev-parse", "HEAD"), await git(f.other, "rev-parse", "main"));
+  assert.equal(f.engine.managedExecutions.size, 0);
+});
+
+test("AC-02/AC-10 F-8: writers without a workspace are never inspected by either overlap gate", async t => {
+  const f = await fixture(t);
+  f.blocker.plan.workspaceId = null;
+  const inspect = f.port.inspect;
+  f.port.inspect = async id => {
+    assert.notEqual(id, f.blocker.plan.id, "uncreated writer must not be inspected");
+    return inspect(id);
+  };
+  const w = f.engine.database.workflows[0];
+  assert.equal(await f.engine.placementBlocker(w), null);
+  assert.equal(await f.engine.busyWriter(w), null);
 });

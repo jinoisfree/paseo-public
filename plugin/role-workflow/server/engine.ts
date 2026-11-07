@@ -152,7 +152,7 @@ const workflowSchema = z.object({
   /** Decided once, when the first executor is created; a replacement never moves its work. */
   isolation: z.enum(["undecided", "worktree", "shared"]).default("undecided"),
   placement: z.object({
-    stage: z.enum(["choice", "waiting"]), number: z.number(), title: z.string(), reason: z.string(),
+    stage: z.enum(["choice", "waiting"]), number: z.number(), title: z.string(), reason: z.string(), cardPosted: z.boolean().default(false),
   }).nullable().default(null),
   worktree: z
     .object({ path: z.string(), branch: z.string(), base: z.string(), workspaceId: z.string() })
@@ -3050,9 +3050,14 @@ export class WorkflowEngine {
               " 그 작업을 완료 표시하거나 보관하면 바로 시작합니다.";
             if (w.detail !== explained) this.touch(w, explained);
             await this.save();
-            if (w.placement.stage === "choice" && w.plan && !this.placementCards.has(w.id) && this.port.placementPicker) {
-              await this.port.placementPicker(w.plan.id, w.id, blocker);
-              this.placementCards.add(w.id);
+            if (w.placement.stage === "choice" && w.plan && !w.placement.cardPosted && this.port.placementPicker) {
+              try {
+                await this.port.placementPicker(w.plan.id, w.id, { number: blocker.number, title: blocker.title });
+                w.placement.cardPosted = true;
+                await this.save();
+              } catch {
+                // A timeline failure leaves the choice pending and retries on the next tick.
+              }
             }
             return;
           }
@@ -3192,13 +3197,12 @@ export class WorkflowEngine {
     }
     return true;
   }
-  private placementCards = new Set<string>();
   /** Unlike busyWriter, an unfinished writer between turns still owns this folder. */
   private async placementBlocker(w: Workflow): Promise<Workflow | null> {
     const scopes = await this.scopes(w);
     for (const other of (await this.db()).workflows) {
       const writer = this.writer(other);
-      if (other.id === w.id || !writer || other.status === "completed" || isFinished(other)) continue;
+      if (other.id === w.id || !writer?.workspaceId || other.status === "completed" || isFinished(other)) continue;
       const snapshot = await this.port.inspect(writer.id);
       if (!snapshot || snapshot.archived) continue;
       const others = await this.scopes(other);
@@ -3209,8 +3213,9 @@ export class WorkflowEngine {
   private async busyWriter(w: Workflow): Promise<Workflow | null> {
     const scopes = await this.scopes(w);
     for (const other of (await this.db()).workflows) {
-      if (other.id === w.id || !this.writer(other)) continue;
-      const active = await this.port.inspect(this.writer(other)!.id);
+      const writer = this.writer(other);
+      if (other.id === w.id || !writer?.workspaceId) continue;
+      const active = await this.port.inspect(writer.id);
       if (
         !active ||
         active.archived ||

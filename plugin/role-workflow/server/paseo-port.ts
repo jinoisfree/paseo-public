@@ -668,7 +668,7 @@ export function createPort(
       await getApi().agents.ref(agentId).timeline.append({
         id: `role-workflow-placement-picker:${workflowId}`,
         type: "plugin", kind: "placement-picker", version: 1,
-        data: { workflowId, ...blocker },
+        data: { workflowId, number: blocker.number, title: blocker.title },
       });
     },
     async modePicker(agentId, workflowId) {

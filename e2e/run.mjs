@@ -303,6 +303,7 @@ try {
         return (page.entries ?? page.items ?? []).map(entry => entry.item ?? entry).find(item => item.type === "plugin" && item.kind === "placement-picker");
       });
       assert(card.data?.workflowId === flow.id, "placement card belongs to another task");
+      assert(JSON.stringify(Object.keys(card.data).sort()) === JSON.stringify(["number", "title", "workflowId"]), "placement card leaked workflow fields");
       const placement = await rpc("workflow.select-placement", { id: flow.id, placement: "worktree" });
       assert(placement.ok, `placement failed: ${placement.detail}`);
       flow = await waitFor("executor in a worktree", async () => {
