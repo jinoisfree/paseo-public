@@ -26,10 +26,16 @@ home=Path(os.environ['PASEO_HOME'])
 file=home/'config.json'
 with Path(os.environ['FIXTURE_EVENTS']).open('a') as out: out.write(json.dumps([Path(sys.argv[0]).name,*args])+'\\n')
 if '--version' in args: print('v26.0.0' if Path(sys.argv[0]).name=='node' else '0.15.3'); sys.exit(0)
-if Path(sys.argv[0]).name=='launchctl' and args[:1]==['bootstrap']:
- import plistlib
- spec=plistlib.loads(Path(args[-1]).read_bytes())
- if any(not Path(spec[key]).parent.is_dir() for key in ('StandardOutPath','StandardErrorPath') if key in spec): sys.exit(1)
+if Path(sys.argv[0]).name=='launchctl':
+ # Remember booted-out labels so callers that wait for launchd teardown see it finish.
+ state=home.parent/'launchd-unloaded.json'; unloaded=set(json.loads(state.read_text())) if state.exists() else set()
+ if args[:1]==['bootout']: unloaded.add(args[-1].rsplit('/',1)[-1]); state.write_text(json.dumps(sorted(unloaded)))
+ if args[:1]==['print'] and args[-1].rsplit('/',1)[-1] in unloaded: sys.exit(113)
+ if args[:1]==['bootstrap']:
+  import plistlib
+  spec=plistlib.loads(Path(args[-1]).read_bytes())
+  if any(not Path(spec[key]).parent.is_dir() for key in ('StandardOutPath','StandardErrorPath') if key in spec): sys.exit(1)
+  unloaded.discard(spec.get('Label','')); state.write_text(json.dumps(sorted(unloaded)))
 if args[:3]==['daemon','config','set']:
  data=json.loads(file.read_text()); data[args[3]]=json.loads(args[4]); file.write_text(json.dumps(data));sys.exit(0)
 if args[:2]==['plugin','ls']:

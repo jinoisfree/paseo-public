@@ -127,12 +127,40 @@ def install_agent(label, generated, home):
     for key in ('StandardOutPath', 'StandardErrorPath'):
         if job.get(key): Path(job[key]).parent.mkdir(parents=True, exist_ok=True)
     if file.exists() and file.read_bytes() == generated and file.stat().st_mode & 0o777 == 0o600:
-        run(['/bin/launchctl', 'print', f'gui/{os.getuid()}/{label}'], home)
+        # C36/F6: an unchanged file whose job was unloaded must be loaded again, not reported as an error.
+        if not agent_loaded(label, home):
+            bootstrap_agent(file, label, home)
         return
     if file.exists():
         run(['/bin/launchctl', 'bootout', f'gui/{os.getuid()}/{label}'], home, check=False)
+        wait_unloaded(label, home)
     atomic_bytes(file, generated)
-    run(['/bin/launchctl', 'bootstrap', f'gui/{os.getuid()}', file], home)
+    bootstrap_agent(file, label, home)
+
+
+LAUNCHD_WAIT_SECONDS = 30
+LAUNCHD_POLL_SECONDS = 1
+BOOTSTRAP_ATTEMPTS = 5
+
+
+def agent_loaded(label, home):
+    return run(['/bin/launchctl', 'print', f'gui/{os.getuid()}/{label}'], home, check=False).returncode == 0
+
+
+def wait_unloaded(label, home):
+    # bootout returns before launchd finishes tearing a KeepAlive job down; bootstrapping then fails with 5.
+    deadline = time.monotonic() + LAUNCHD_WAIT_SECONDS
+    while agent_loaded(label, home) and time.monotonic() < deadline:
+        time.sleep(LAUNCHD_POLL_SECONDS)
+
+
+def bootstrap_agent(file, label, home):
+    # C36/F5: retry the transient launchd I/O error so a reload never leaves the job (and the daemon) unloaded.
+    for attempt in range(BOOTSTRAP_ATTEMPTS):
+        result = run(['/bin/launchctl', 'bootstrap', f'gui/{os.getuid()}', file], home, check=False)
+        if result.returncode == 0 or agent_loaded(label, home):
+            break
+        time.sleep(LAUNCHD_POLL_SECONDS * (attempt + 1))
     run(['/bin/launchctl', 'print', f'gui/{os.getuid()}/{label}'], home)
 
 

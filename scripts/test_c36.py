@@ -101,5 +101,48 @@ class C36Tests(unittest.TestCase):
         self.assertNotIn(str(self.home/'.local/bin'), fixtures.setup.stable_path('/a/node', '/b/python3').split(':'))
 
 
+    def launchd(self, bootstrap_failures=0, teardown_polls=0, loaded=True):
+        """A launchd stand-in: bootout finishes after some polls; bootstrap fails with 5 meanwhile."""
+        state = {'loaded': loaded, 'tearing': 0, 'failures': bootstrap_failures, 'calls': []}
+        def run(command, home, check=True, capture=True):
+            args = list(map(str, command)); state['calls'].append(args[1])
+            code = 0
+            if args[1] == 'bootout':
+                state['tearing'] = teardown_polls
+            elif args[1] == 'print':
+                if state['tearing']:
+                    state['tearing'] -= 1
+                    if not state['tearing']: state['loaded'] = False
+                code = 0 if state['loaded'] else 113
+            elif args[1] == 'bootstrap':
+                if state['tearing'] or state['failures']:
+                    state['failures'] = max(0, state['failures'] - 1); code = 5
+                else:
+                    state['loaded'] = True
+            if check and code: raise RuntimeError(f'명령 실패: launchctl (종료 코드 {code})')
+            return subprocess.CompletedProcess(args, code, stdout='', stderr='')
+        return state, run
+
+    def test_F5_reload_waits_for_teardown_and_retries_transient_bootstrap_errors(self):
+        setup = fixtures.setup
+        label = setup.PREFIX + 'fixture'; agents = self.home/'Library/LaunchAgents'; agents.mkdir(parents=True, exist_ok=True)
+        (agents/(label + '.plist')).write_bytes(plistlib.dumps({'Label': label, 'Old': True}))
+        state, run = self.launchd(bootstrap_failures=2, teardown_polls=2)
+        with mock.patch.object(setup, 'run', side_effect=run), mock.patch.object(setup.time, 'sleep'):
+            setup.install_agent(label, plistlib.dumps({'Label': label}), self.home)
+        self.assertTrue(state['loaded'])
+        self.assertEqual(state['calls'].count('bootstrap'), 3)
+
+    def test_F6_unchanged_but_unloaded_job_is_bootstrapped(self):
+        setup = fixtures.setup
+        label = setup.PREFIX + 'fixture'; agents = self.home/'Library/LaunchAgents'; agents.mkdir(parents=True, exist_ok=True)
+        content = plistlib.dumps({'Label': label}); file = agents/(label + '.plist')
+        file.write_bytes(content); file.chmod(0o600)
+        state, run = self.launchd(loaded=False)
+        with mock.patch.object(setup, 'run', side_effect=run), mock.patch.object(setup.time, 'sleep'):
+            setup.install_agent(label, content, self.home)
+        self.assertTrue(state['loaded']); self.assertIn('bootstrap', state['calls']); self.assertNotIn('bootout', state['calls'])
+
+
 if __name__ == '__main__':
     unittest.main()
