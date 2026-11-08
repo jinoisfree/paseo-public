@@ -5,8 +5,8 @@ Paseo용 한국어 개발 워크플로 플러그인입니다.
 
 ## 기능
 
-- Paseo 0.15.x 전용(`>=0.15.0 <0.16.0`). 서버 이벤트를 `addHook`으로 등록하고, 0.15 미만 CLI로는
-  설치하지 않습니다.
+- Paseo 0.15.x에서 검증했습니다. 서버 이벤트를 `addHook`으로 등록합니다. 검증 범위 밖의 앱 버전은
+  경고만 남기며 설치·실행을 계속합니다. 호환성 알림은 버전마다 한 번이고 기록은 `$PASEO_HOME/airport/runtime/`에 둡니다.
 - 설치 보강: 다른 경로(사본)의 `role-workflow` 등록은 `--replace-registration`으로 백업·복원을
   갖추고 전환하며, 앱 안의 CLI를 쓰고 doctor에서 PATH의 별도 CLI를 점검합니다. 설치 뒤 플러그인과
   자동 업데이트의 실제 상태를 확인하고, 자동 업데이트는 등록 불일치를 한 번 알립니다.
@@ -35,7 +35,7 @@ Paseo용 한국어 개발 워크플로 플러그인입니다.
 
 ## 설치
 
-macOS, Node.js 22 이상과 npm, Python 3.12 이상, 실행 중인 Paseo 0.15.x가 필요합니다.
+macOS, Node.js 22 이상과 npm, Python 3.12 이상, 실행 중인 Paseo 앱이 필요합니다(검증 버전 0.15.x).
 운영은 개발 폴더와 별도의 내장 디스크 clone을 사용합니다. 앱·제품 설치, 로그인과 macOS 권한은 사람이 1회 처리합니다.
 
 ```sh
@@ -59,9 +59,23 @@ archive-rotate는 오래된 제품 세션을 `$PASEO_HOME/archive`에 보관한 
 
 기존 등록·state·옛 공용 설정·공항 LaunchAgent 중 하나라도 있는데 profile 결정이 없으면 인자 없는 install은 **쓰기 전에 종료 2**로 멈춥니다.
 `./install.sh --profile server|desktop`으로 명시하세요. 새 홈에서만 desktop과 프로필 권장 설비를 기본으로 허가합니다.
-기존 홈에서는 설비를 자동 허가하지 않습니다. `decisions.modules`의 설비별 `{ "enabled": true, "date": "2026-01-01", "variant": "A" }`로 선택합니다.
+기존 홈에서는 설비를 자동 허가하지 않습니다. `enable`·`disable`은 지시서 `decisions.modules`에 날짜와 revision을 기록하고, 이어지는 install이 적용합니다.
 같은 기능의 비공항 설비가 발견되면 허가돼 있어도 설치하지 않고 dry-run·check·doctor에 사유를 표시합니다.
-실제 설비 교체는 기존 설비를 정리한 뒤 단계별로 진행하세요. A/B 실제 재기동 수락은 별도 시험입니다.
+4차 설비 교체는 `enable` → 충돌 확인 → 기존 설비 정리 → `install` 순서로 하나씩 진행합니다.
+
+```sh
+python3 scripts/setup.py enable daemon-service --variant A --dry-run
+python3 scripts/setup.py enable daemon-service --variant A
+./install.sh --profile server --dry-run
+# 충돌로 표시된 기존 설비를 확인하고 해제한 뒤
+./install.sh --profile server
+# 공항 설비를 해제할 때
+python3 scripts/setup.py disable daemon-service
+./install.sh --profile server
+```
+
+허가 후에도 충돌하면 '허가됨·충돌로 미설치'로 표시합니다. disable 뒤 install은 그 설비의 공항 설치물과
+공항이 바꾼 설정만 원복하며, 다른 설비의 공유 파일·인증·사장 자료는 보존합니다. A/B 실제 재기동 수락은 별도 시험입니다.
 
 Claude 설정은 명세서 `presets/claude-home/settings.json`에 날짜 있는 `decisions.claudeHome.settings` 차이를 합칩니다.
 본체 스킬과 `decisions.claudeHome.manuals`에서 고른 매뉴얼만 분리 홈에 링크합니다. 제공자 env의 CLAUDE_CONFIG_DIR도 같은 절대경로를 씁니다.
@@ -69,7 +83,7 @@ Claude 설정은 명세서 `presets/claude-home/settings.json`에 날짜 있는 
 
 `check --json`은 공항 커밋·앱/제품 버전·차이(키, 기대값, 실제값, 원본 칸)를 출력합니다. 차이 0이면 종료 0,
 있으면 1입니다. 비밀 값은 가립니다. `doctor`는 읽기 전용으로 CLI·로그인·키체인 항목 존재·모델·스킬·포트·cask 기록·업데이트를
-점검하고, 사람이 할 일을 안내합니다. 막는 문제가 있으면 종료 1입니다. 모든 동작은 `--dry-run`을 지원합니다.
+점검하고, 사람이 할 일을 안내합니다. 막는 문제가 있으면 종료 1입니다. 버전 호환성 경고만으로는 종료 1이 되지 않습니다. 모든 동작은 `--dry-run`을 지원합니다.
 
 ### 사장 칸과 데이터
 

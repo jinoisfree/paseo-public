@@ -23,6 +23,9 @@ from airport_schema import validate_schema, SCHEMAS
 from equipment import plan as equipment_plan
 from claude_home import desired as claude_desired
 
+sys.path.insert(0, str(ROOT/'modules'))
+from launcher_runtime import tested_version, warn_version
+
 PREFIX = 'io.github.jinoisfree.paseo-public.'
 STABLE_PATHS = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin']
 
@@ -56,8 +59,10 @@ def cli_path(config):
 def verify_cli(paseo, home):
     result = run([paseo, '--version'], home, check=False)
     version = re.search(r'\b(\d+)\.(\d+)\.(\d+)\b', result.stdout or '')
-    if result.returncode or not version or tuple(map(int, version.groups()[:2])) != (0, 15):
-        raise RuntimeError('Paseo 앱 CLI 지원 범위는 0.15.x입니다. 앱 자체 업데이트를 확인하세요.')
+    if result.returncode or not version:
+        raise RuntimeError('Paseo 앱 CLI 버전을 읽지 못했습니다. 앱 설치를 확인하세요.')
+    warn_version(version[0], paseo_home(home), notify=lambda message: run(
+        ['/usr/bin/osascript', '-e', 'display notification '+json.dumps(message)+' with title "Paseo 호환성"'], home, check=False))
 
 
 def read_paseo(home):
@@ -300,6 +305,78 @@ class Airport:
     def module_config(self):
         return {**self.config, 'moduleVariants': {m['id']: m['variant'] for m in self.module_plan()}}
 
+    def set_module(self, module_id, enabled, variant=None, dry_run=False):
+        if not module_id or not re.fullmatch(r'[a-z][a-z0-9-]*', module_id):
+            raise RuntimeError('알 수 없는 설비입니다.')
+        manifest = ROOT/'modules'/module_id/'module.json'
+        if not manifest.is_file():
+            raise RuntimeError('알 수 없는 설비입니다: '+module_id)
+        data = read_json(manifest)
+        validate_schema(data, read_json(SCHEMAS/'module.schema.json'))
+        if data['id'] != module_id:
+            raise RuntimeError('설비 id가 디렉터리와 다릅니다.')
+        policy = copy.deepcopy(self.policy)
+        grants = policy['decisions'].setdefault('modules', {})
+        grant = {**grants.get(module_id, {}), 'enabled': enabled, 'date': today()}
+        if variant: grant['variant'] = variant
+        grants[module_id] = grant
+        if not dry_run:
+            self.policy = save_owner(self.policy_file, 'policy', policy, self.policy['revision'])
+        return {'module': module_id, 'decision': grant, 'dryRun': dry_run,
+                'instruction': 'install을 실행하면 적용됩니다.'}
+
+    def remove_disabled_modules(self, keep_rows, *, files_only=False):
+        """C31/C17: restore opt-outs and dependent jobs, retaining shared and unowned files."""
+        disabled = [name for name, grant in self.policy['decisions'].get('modules', {}).items() if not grant['enabled']]
+        selected = {row['id'] for row in self.module_plan() if row['install']}
+        disabled = sorted(set(disabled) | {row['id'] for row in self.record.get('equipment', []) if row['install'] and row['id'] not in selected})
+        if not disabled: return
+        if files_only:
+            keep = {str(row['target']) for row in keep_rows}
+            installed = self.record.setdefault('generatedFiles', [])
+            files = {str(row['target']): row['target'] for row in module_files(disabled, self.home, self.module_config())
+                     if str(row['target']) in installed and str(row['target']) not in keep}
+            agents = (self.home/'Library/LaunchAgents').resolve()
+            # Stop dependent jobs before their supervisor, and all jobs before shared code removal.
+            for file in sorted(files.values(), key=lambda f: (f.parent != agents, f.stem == PREFIX+'daemon-service')):
+                if file.parent == agents and file.exists():
+                    run(['/bin/launchctl', 'bootout', f'gui/{os.getuid()}/{file.stem}'], self.home, check=False)
+                file.unlink(missing_ok=True)
+                installed.remove(str(file))
+            atomic_json(self.record_file, self.record)
+            return
+        account = read_paseo(self.home)
+        before = copy.deepcopy(account.get('agents', {}))
+        providers = account.get('agents', {}).get('providers', {})
+        commands = self.record.get('providerCommands', {})
+        environments = self.record.get('providerEnvironment', {})
+        for product in ('claude', 'codex'):
+            provider = providers.get(product, {})
+            if product+'-launcher' in disabled and product in commands:
+                path = str(self.directory/'airport/modules'/f'{product}-launcher/launcher.py')
+                if path in (provider.get('command') or []):
+                    previous = commands[product]
+                    if previous is None: provider.pop('command', None)
+                    else: provider['command'] = previous
+                commands.pop(product)
+            keys = []
+            if product == 'claude' and 'claude-home' in disabled: keys.append('CLAUDE_CONFIG_DIR')
+            if product == 'codex' and 'codex-launcher' in disabled: keys.append('CODEX_HOME')
+            for key in keys:
+                record = environments.get(product, {}).pop(key, None)
+                env = provider.get('env', {})
+                if record and env.get(key) == record['installed']:
+                    if record['before'] is None: env.pop(key, None)
+                    else: env[key] = record['before']
+        # Restore the command before deleting its executable; preserve subsequent user edits.
+        if account.get('agents', {}) != before:
+            self.command('daemon', 'config', 'set', 'agents', json.dumps(account['agents']))
+        if 'claude-home' in disabled:
+            self.restore_claude()
+            for key in ('claudeSettingsBefore', 'claudeSettingsHash', 'claudeSkillLinks'):
+                self.record.pop(key, None)
+        atomic_json(self.record_file, self.record)
+
     def tools(self):
         node = node_executable(self.config)
         python = self.config.get('python') or os.environ.get('PASEO_PUBLIC_PYTHON') or sys.executable
@@ -384,6 +461,8 @@ class Airport:
         vault['paths'] = {**vault.get('paths', {}), 'node': node, 'python': python, 'app': str(app_path(self.config))}
         self.vault = save_owner(self.vault_file, 'vault', vault, self.vault['revision'])
         self.config.update(self.vault['paths'])
+        self.remove_disabled_modules(rows)
+        account = read_paseo(self.home)
         self.dependencies()
         self.capture_providers(core, account)
         if 'claude-home' in ids:
@@ -407,6 +486,10 @@ class Airport:
         desired_plugins = {**plugins, 'role-workflow': desired}
         if 'codex-usage' in ids:
             desired_plugins['codex-usage'] = {'source': 'directory', 'path': str(ROOT/'plugin/codex-usage'), 'enabled': True}
+        if self.policy['decisions'].get('modules', {}).get('codex-usage', {}).get('enabled') is False:
+            usage = desired_plugins.get('codex-usage', {})
+            if usage.get('source') == 'directory' and Path(usage.get('path', '')).resolve() == (ROOT/'plugin/codex-usage').resolve():
+                desired_plugins.pop('codex-usage')
         changed_registration = plugins != desired_plugins
         if changed_registration:
             self.ensure_idle()
@@ -423,8 +506,10 @@ class Airport:
             verify_registration(paseo, self.home, plugin_id='codex-usage')
         if activated: self.record['activatedCommit'] = activated
         self.install_modules([row for row in rows if row['target'].parent == agent_directory])
-        self.record['equipment'] = self.module_plan()
+        # A variant B bootout can stop the daemon: finish every CLI mutation first.
         self.agents(args.with_auto_update)
+        self.remove_disabled_modules(rows, files_only=True)
+        self.record['equipment'] = self.module_plan()
         atomic_json(self.record_file, self.record)
         checked = self.check()
         if checked['differences']:
@@ -490,6 +575,7 @@ class Airport:
             raise RuntimeError('등록 경로가 달라 refresh를 건너뜁니다.')
         self.ensure_idle()
         rows = module_files(self.expected()[2], self.home, self.module_config())
+        verify_cli(cli_path(self.config), self.home)
         self.dependencies()
         self.install_modules(rows)
         if 'claude-home' in self.expected()[2]:
@@ -605,10 +691,11 @@ class Airport:
 
     def doctor(self):
         checks = []
-        def add(key, ok, instruction, manual=False):
-            checks.append({'key': key, 'ok': bool(ok), 'manual': manual, 'instruction': instruction})
+        def add(key, ok, instruction, manual=False, blocking=True):
+            checks.append({'key': key, 'ok': bool(ok), 'manual': manual, 'instruction': instruction, 'blocking': blocking, 'severity': 'error' if blocking else 'warning'})
         versions = self.versions()
-        add('app.cli', bool(versions['app'] and versions['app'].startswith('0.15.')), '앱 설치·업데이트: 지원 0.15.x', True)
+        add('app.cli', bool(versions['app']), '앱 내장 CLI를 확인하세요.', True)
+        add('app.compatibility', tested_version(versions['app']), '검증 범위는 0.15.x입니다. 범위 밖에서도 실행을 계속합니다.', blocking=False)
         app = app_path(self.config)
         try:
             info = plistlib.loads((app/'Contents/Info.plist').read_bytes())
@@ -768,7 +855,9 @@ def verify_registration(paseo, home, after='install', plugin_id='role-workflow')
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['install', 'refresh', 'check', 'doctor', 'uninstall'])
+    parser.add_argument('action', choices=['install', 'refresh', 'check', 'doctor', 'uninstall', 'enable', 'disable'])
+    parser.add_argument('module', nargs='?')
+    parser.add_argument('--variant', choices=['A', 'B'])
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--profile', choices=['server', 'desktop'])
     parser.add_argument('--json', action='store_true')
@@ -776,6 +865,10 @@ def main(argv=None):
     parser.add_argument('--replace-registration', action='store_true')
     parser.add_argument('--purge-owner', action='store_true')
     args = parser.parse_args(argv)
+    if (args.action in ('enable', 'disable')) != bool(args.module):
+        parser.error('enable·disable에는 설비 id가 필요하며 다른 동작에는 쓰지 않습니다.')
+    if args.variant and args.action != 'enable':
+        parser.error('--variant는 enable 전용입니다.')
     if args.replace_registration and args.action != 'install':
         parser.error('--replace-registration은 install 전용입니다.')
     if args.purge_owner and (args.action != 'uninstall' or args.with_auto_update):
@@ -797,6 +890,12 @@ def main(argv=None):
         except ProfileRequired as error:
             print(json.dumps({'error': str(error), 'exitCode': 2}, ensure_ascii=False))
             return 2
+    if args.action in ('enable', 'disable'):
+        if not args.dry_run and os.geteuid() == 0:
+            raise RuntimeError('sudo 없이 실행하세요.')
+        result = airport.set_module(args.module, args.action == 'enable', args.variant, args.dry_run)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
     if args.dry_run:
         result = {'action': args.action, 'dryRun': True, 'profile': airport.profile(args.profile),
                   'equipment': airport.module_plan(args.profile), 'cleanup': [str(p) for p in generated_cleanup(airport.home)], 'notices': airport.notices(),
@@ -812,7 +911,7 @@ def main(argv=None):
         code = int(bool(result['differences']))
     elif args.action == 'doctor':
         result = airport.doctor()
-        code = int(any(not row['ok'] for row in result['checks']))
+        code = int(any(not row['ok'] and row.get('blocking', True) for row in result['checks']))
     else:
         if os.geteuid() == 0:
             raise RuntimeError('sudo 없이 실행하세요.')

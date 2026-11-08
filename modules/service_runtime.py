@@ -4,14 +4,13 @@ import fcntl
 import json
 import os
 from pathlib import Path
-import plistlib
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
-from launcher_runtime import paseo_cli, find_cli
+from launcher_runtime import paseo_cli, find_cli, app_version, warn_version
 
 PREFIX = 'io.github.jinoisfree.paseo-public.'
 
@@ -66,11 +65,9 @@ class Service:
             self.event('notification', 'failed')
 
     def supported(self):
-        info = plistlib.loads((self.app/'Contents/Info.plist').read_bytes())
-        version = info.get('CFBundleShortVersionString', '')
-        if not re.fullmatch(r'0\.15\.\d+(?:[-+].*)?', version):
-            self.event('version', 'unsupported');self.notify('지원 범위 밖 Paseo 앱 버전입니다. 공항 호환성을 확인하세요.')
-            return None
+        version = app_version(self.app)
+        # C30 supersedes C23's hard range gate: app updates must keep the supervisor alive.
+        warn_version(version, self.home, notify=self.notify)
         return version
 
     def busy(self):
@@ -83,7 +80,7 @@ class Service:
         if result.returncode: raise RuntimeError('공항 데몬 설비 kickstart 실패')
 
     def daemon_service(self):
-        if not self.supported(): return
+        self.supported()
         variant = self.owner.get("decisions", {}).get("modules", {}).get("daemon-service", {}).get("variant", "A")
         args = ["start"] if variant == "A" else ["daemon", "run"]
         env = dict(os.environ);env.pop("PASEO_HOST", None);env["PASEO_HOME"] = str(self.home)
@@ -91,7 +88,6 @@ class Service:
 
     def update_watch(self):
         version = self.supported()
-        if not version: return
         status = self.command('daemon', 'status', '--json', check=False)
         if status.returncode:
             self.event('update-watch', 'daemon-unavailable');return
@@ -108,7 +104,7 @@ class Service:
         self.notify('업데이트된 Paseo 데몬 supervisor를 다시 시작했습니다.')
 
     def watchdog(self):
-        if not self.supported(): return
+        self.supported()
         status = self.command('daemon', 'status', '--json', check=False)
         if status.returncode or not (json.loads(status.stdout).get('workerPid') or json.loads(status.stdout).get('pid')):
             self.kickstart();self.event('paseo-watchdog', 'daemon-restarted');return

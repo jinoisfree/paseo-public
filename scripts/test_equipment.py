@@ -106,7 +106,9 @@ class EquipmentTests(unittest.TestCase):
         (directory/'state.json').write_text(json.dumps({'workflows':[{'status':'active','pending':{'stage':'sending'}}]}))
         service,commands=self.service();service.update_watch();self.assertFalse(any('stop' in c for c in commands))
         (self.app/'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleShortVersionString':'0.16.0'}))
-        commands.clear();service.update_watch();self.assertFalse(any('stop' in c for c in commands));self.assertTrue(any('osascript' in c[0] for c in commands))
+        # C30 replaces the old range rejection: clear busy state, then upgrade across ranges.
+        (directory/'state.json').write_text(json.dumps({'workflows':[]}))
+        commands.clear();service.update_watch();self.assertTrue(any('stop' in c for c in commands));self.assertTrue(any('osascript' in c[0] for c in commands))
 
     def test_C24_watchdog_restart_and_per_plugin_three_attempt_hour_limit(self):
         service,commands=self.service(plugins=[{'id':'fixture','enabled':True,'source':'directory','status':'failed'},{'id':'built-in','enabled':True,'source':'builtin','status':'failed'}])

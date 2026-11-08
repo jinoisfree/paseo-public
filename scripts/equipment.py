@@ -75,7 +75,7 @@ def plan(root, home, account, recommended, policy, profile, fresh):
         grant = grants.get(module_id, {})
         allowed = grant.get('enabled', fresh and module_id in recommended['profiles'][profile]['modules'])
         blocked = conflicts(manifest, home, account)
-        reason = '기존 구현과 충돌하여 설치 안 함' if blocked else '설비 허가 없음' if not allowed else '설치'
+        reason = ('허가됨·충돌로 미설치' if allowed else '기존 구현과 충돌하여 설치 안 함') if blocked else '설비 허가 없음' if not allowed else '설치'
         result.append({'id': module_id, 'enabled': bool(allowed), 'variant': grant.get('variant', 'A'),
                        'install': bool(allowed and not blocked), 'reason': reason, 'conflicts': blocked})
     daemon = next((m for m in result if m['id'] == 'daemon-service'), None)

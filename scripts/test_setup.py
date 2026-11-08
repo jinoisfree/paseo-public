@@ -265,11 +265,12 @@ class SetupTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'다른 저장소'):self.execute('install','--with-auto-update')
         self.assertEqual(self.snapshot(),before)
 
-    def test_unsupported_cli_and_node_stop_before_owner_or_backup_write(self):
-        for executable,version in [(self.cli,'0.14.0'),(self.bin/'node','20.0.0')]:
+    def test_unsupported_node_stops_before_owner_or_backup_write(self):
+        # C30: app versions outside 0.15.x warn and proceed; Node's minimum remains mandatory.
+        for executable,version in [(self.bin/'node','20.0.0')]:
             original=executable.read_text();executable.write_text('#!'+sys.executable+'\nprint("'+version+'")\n')
             before=self.snapshot()
-            with self.assertRaisesRegex(RuntimeError,'지원 범위|22 이상'):self.execute('install')
+            with self.assertRaisesRegex(RuntimeError,'22 이상'):self.execute('install')
             self.assertEqual(self.snapshot(),before)
             executable.write_text(original)
 
