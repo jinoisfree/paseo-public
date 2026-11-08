@@ -8,8 +8,8 @@ export const folderRootsSchema = z
       .trim()
       .min(1)
       .max(4096)
-      .refine(
-        (value) => value === "~" || value.startsWith("~/") || value.startsWith("/"),
+      .regex(
+        /^(?:~(?:\/|$)|\/)/,
         "절대 경로 또는 ~/로 시작하는 경로를 입력하세요.",
       ),
   )

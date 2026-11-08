@@ -1,3 +1,4 @@
+import { isolateOwnerHome, configureFixture } from "./owner-fixture.mjs";
 import { gitTestEnvironment } from "./git-test-environment.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -99,6 +100,7 @@ async function hooks(t, settings) {
   const dir = await directory(t, "push-guard-hook-");
   const previous = process.env.PASEO_ROLE_WORKFLOW_STATE_DIR;
   process.env.PASEO_ROLE_WORKFLOW_STATE_DIR = dir;
+  isolateOwnerHome(t, dir);
   const registered = new Map(),
     rpcs = new Map(),
     responses = [];
@@ -124,7 +126,7 @@ async function hooks(t, settings) {
     if (previous === undefined) delete process.env.PASEO_ROLE_WORKFLOW_STATE_DIR;
     else process.env.PASEO_ROLE_WORKFLOW_STATE_DIR = previous;
   });
-  await rpcs.get("workflow.configure")(settingsSchema.parse({ autoStart: false, ...settings }), context);
+  await configureFixture(rpcs, context, settingsSchema.parse({ autoStart: false, ...settings }));
   const open = (provider) =>
     registered.get("agent.open.before")(
       { request: { agentId: "A", provider, reason: "resume", env: { KEEP: "1" } } },

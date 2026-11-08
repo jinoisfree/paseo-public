@@ -701,6 +701,8 @@ test("thinking creation errors persist and resume restores model and thinking se
 });
 test("completed uncreated executor resets thinking on a new plan", async (t) => {
   const f = await fixture(t);
+  // C4: executable settings now come from policy, not the frozen rollback snapshot.
+  await f.engine.configure({...await f.engine.settings(),executorModel:"codex/fixed",executorThinking:""});
   await f.engine.close();
   const db = JSON.parse(await readFile(f.file, "utf8"));
   const w = db.workflows[0];
@@ -711,8 +713,6 @@ test("completed uncreated executor resets thinking on a new plan", async (t) => 
     workspaceId: null,
     config: { provider: "codex/bad", thinkingOptionId: "bad" },
   };
-  db.settings.executorModel = "codex/fixed";
-  db.settings.executorThinking = "";
   await writeFile(f.file, JSON.stringify(db));
   const restarted = new WorkflowEngine(f.file, f.port);
   t.after(() => restarted.close());
@@ -1417,7 +1417,8 @@ test("GPT planner uses and repairs only Claude settings then preserves assignmen
   const db = JSON.parse(await readFile(f.file, "utf8"));
   assert.equal(db.workflows[0].plan.config.provider, "codex/planner-model");
   assert.equal(db.workflows[0].execute.config.provider, "claude/fixed");
-  assert.equal(db.settings.executorModel, "codex/keep");
+  // C4: the current executor default is read from policy after reload.
+  assert.equal((await restored.settings()).executorModel, "codex/keep");
   f.agents.get("planner").status = "idle";
   await restored.ended("planner", "p2", decision("complete"), null);
   assert.equal((await restored.list()).workflows[0].status, "completed");
@@ -3873,7 +3874,9 @@ test("AC-07 a disabled saved schedule clears on reload without sending", async (
   await f.fail("capacity", capacityError);
   await f.engine.close();
   const db = JSON.parse(await readFile(f.file, "utf8"));
-  db.settings.autoResumeTransient = false;
+  // C4: simulate an owner edit while the engine is closed; keep state.settings frozen.
+  const currentPolicy = await f.engine.policy.load();
+  await f.engine.policy.save({...currentPolicy.settings,autoResumeTransient:false},currentPolicy.policy.revision);
   await writeFile(f.file, JSON.stringify(db));
   const restored = new WorkflowEngine(f.file, f.port, undefined, null, f.now);
   t.after(() => restored.close());

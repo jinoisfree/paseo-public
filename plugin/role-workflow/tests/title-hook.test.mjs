@@ -1,3 +1,4 @@
+import { isolateOwnerHome, configureFixture } from "./owner-fixture.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
@@ -5,10 +6,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import contribute from "../index.server.ts";
 import { settingsSchema } from "../shared/contracts.ts";
-test("title prompt follows toggle and skips managed or nonautomated conversations", async () => {
+test("title prompt follows toggle and skips managed or nonautomated conversations", async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), "title-hook-"));
   const previous = process.env.PASEO_ROLE_WORKFLOW_STATE_DIR;
   process.env.PASEO_ROLE_WORKFLOW_STATE_DIR = dir;
+  isolateOwnerHome(t, dir);
   const hooks = new Map(),
     rpcs = new Map();
   const close = contribute({
@@ -21,9 +23,8 @@ test("title prompt follows toggle and skips managed or nonautomated conversation
   const context = { paseo: {} };
   try {
     for (const enabled of [false, true]) {
-      await rpcs.get("workflow.configure")(
+      await configureFixture(rpcs, context,
         settingsSchema.parse({ koreanTitle: enabled, askExecutorModel: false }),
-        context,
       );
       const request = { config: { provider: "claude", cwd: dir } };
       const result = await hooks.get("agent.create.before")({ request }, context);
@@ -46,9 +47,8 @@ test("title prompt follows toggle and skips managed or nonautomated conversation
       );
     }
     for (const titleMarker of [true, false]) {
-      await rpcs.get("workflow.configure")(
+      await configureFixture(rpcs, context,
         settingsSchema.parse({ titleMarker, askExecutorModel: false }),
-        context,
       );
       for (const provider of ["claude", "codex"]) {
         const request = { config: { provider, cwd: dir } };
@@ -65,10 +65,11 @@ test("title prompt follows toggle and skips managed or nonautomated conversation
   }
 });
 
-test("model RPC lists selectable models and thinking defaults, returns failures without throwing", async () => {
+test("model RPC lists selectable models and thinking defaults, returns failures without throwing", async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), "models-hook-"));
   const previous = process.env.PASEO_ROLE_WORKFLOW_STATE_DIR;
   process.env.PASEO_ROLE_WORKFLOW_STATE_DIR = dir;
+  isolateOwnerHome(t, dir);
   const rpcs = new Map();
   const close = contribute({
     addHook: () => () => {},
@@ -144,10 +145,11 @@ test("dashboard model choice preserves compatible thinking and clears incompatib
   assert.equal(selectedModel(catalog, "codex").id, "a");
 });
 
-test("both initial providers plan, managed executors keep their role, and model RPC uses requested provider", async () => {
+test("both initial providers plan, managed executors keep their role, and model RPC uses requested provider", async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), "reverse-hook-"));
   const previous = process.env.PASEO_ROLE_WORKFLOW_STATE_DIR;
   process.env.PASEO_ROLE_WORKFLOW_STATE_DIR = dir;
+  isolateOwnerHome(t, dir);
   const hooks = new Map(),
     rpcs = new Map(),
     calls = [];
@@ -230,13 +232,14 @@ test("Claude dashboard selections leave GPT execution settings untouched", async
   );
 });
 
-test("the start setting decides the question, the enrolled mode and which blocks are conditional", async () => {
+test("the start setting decides the question, the enrolled mode and which blocks are conditional", async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), "start-mode-"));
   const previous = {
     state: process.env.PASEO_ROLE_WORKFLOW_STATE_DIR,
     home: process.env.PASEO_HOME,
   };
   process.env.PASEO_ROLE_WORKFLOW_STATE_DIR = dir;
+  isolateOwnerHome(t, dir);
   process.env.PASEO_HOME = dir;
   const hooks = new Map(),
     events = new Map(),
@@ -274,7 +277,7 @@ test("the start setting decides the question, the enrolled mode and which blocks
     },
   };
   const start = async (agentId, settings) => {
-    await rpcs.get("workflow.configure")(settingsSchema.parse(settings), context);
+    await configureFixture(rpcs, context, settingsSchema.parse(settings));
     const created = await hooks.get("agent.create.before")(
       { request: { config: { provider: "claude", cwd: dir, systemPrompt: "x".repeat(3000) } } },
       context,
@@ -349,6 +352,7 @@ test("failed rules publication preserves new conversation creation without the g
   const dir = await mkdtemp(path.join(tmpdir(), "rules-hook-"));
   const previous = process.env.PASEO_ROLE_WORKFLOW_STATE_DIR;
   process.env.PASEO_ROLE_WORKFLOW_STATE_DIR = dir;
+  isolateOwnerHome(t, dir);
   await writeFile(path.join(dir, "rules"), "blocked");
   const errors = t.mock.method(console, "error", () => {});
   const hooks = new Map();

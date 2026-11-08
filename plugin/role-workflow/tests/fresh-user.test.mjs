@@ -1,3 +1,4 @@
+import { configureFixture } from "./owner-fixture.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -60,13 +61,14 @@ async function freshUser(
     paseo: catalog
       ? {
           providers: {
+            listAvailable: async()=>({providers:[{provider:"claude",available:true},{provider:"codex",available:true}]}),
             async listModels(provider, options) {
               calls.push(structuredClone([provider, options]));
               return { models: [{ id: "sample-model", label: "Sample model", isDefault: true }] };
             },
           },
         }
-      : {},
+      : {providers:{listAvailable:async()=>({providers:[{provider:"claude",available:true},{provider:"codex",available:true}]}),listModels:async()=>({models:[{id:"fixture"}]})}},
   };
   close = contribute({
     addHook: (name, fn) => {
@@ -76,19 +78,19 @@ async function freshUser(
     handle: (contract, fn) => rpcs.set(contract.name, fn),
   });
   const initial = await rpcs.get("workflow.status")({}, context);
-  assert.equal(initial.error, null);
+  if (blocked) assert.match(initial.error, /지시서/);
+  else assert.equal(initial.error, null);
   assert.deepEqual(initial.settings, defaults);
   assert.deepEqual(initial.projects, {});
   assert.deepEqual(initial.workflows, []);
   if (general || !ask) {
     // This scenario alone represents a saved general-mode choice in the temporary state.
-    await rpcs.get("workflow.configure")(
+    await configureFixture(rpcs, context,
       settingsSchema.parse({
         ...defaults,
         ...(general ? { askMode: false, defaultMode: "general" } : {}),
         askExecutorModel: ask,
       }),
-      context,
     );
   }
   return {

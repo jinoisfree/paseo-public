@@ -74,59 +74,7 @@
           ],
           "additionalProperties": false
         },
-        "phoneNotifications": {
-          "type": "object",
-          "properties": {
-            "value": {
-              "type": "boolean"
-            },
-            "date": {
-              "type": "string",
-              "format": "date"
-            }
-          },
-          "required": [
-            "value",
-            "date"
-          ],
-          "additionalProperties": false
-        },
-        "phoneNotificationEndpoint": {
-          "type": "object",
-          "properties": {
-            "value": {
-              "type": "string",
-              "minLength": 1
-            },
-            "date": {
-              "type": "string",
-              "format": "date"
-            }
-          },
-          "required": [
-            "value",
-            "date"
-          ],
-          "additionalProperties": false
-        },
         "core": {
-          "type": "object",
-          "properties": {
-            "value": {
-              "type": "object"
-            },
-            "date": {
-              "type": "string",
-              "format": "date"
-            }
-          },
-          "required": [
-            "value",
-            "date"
-          ],
-          "additionalProperties": false
-        },
-        "roleWorkflow": {
           "type": "object",
           "properties": {
             "value": {
@@ -180,15 +128,251 @@
             "date"
           ],
           "additionalProperties": false
+        },
+        "roleWorkflow": {
+          "type": "object",
+          "properties": {
+            "date": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          "required": [
+            "date"
+          ],
+          "additionalProperties": false
+        },
+        "notifications": {
+          "type": "object",
+          "properties": {
+            "date": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          "required": [
+            "date"
+          ],
+          "additionalProperties": false
         }
       },
-      "required": [],
+      "required": [
+        "roleWorkflow",
+        "notifications"
+      ],
+      "additionalProperties": false
+    },
+    "roleWorkflow": {
+      "type": "object",
+      "properties": {
+        "folderRoots": {
+          "minItems": 1,
+          "maxItems": 8,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "^(?:~(?:\\/|$)|\\/)"
+          }
+        },
+        "autoPinStarted": {
+          "type": "boolean"
+        },
+        "autoPinPushed": {
+          "type": "boolean"
+        },
+        "autoArchivePushed": {
+          "type": "boolean"
+        },
+        "autoArchiveWorktree": {
+          "type": "boolean"
+        },
+        "archiveAfterDays": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "notifyPermission": {
+          "type": "boolean"
+        },
+        "notifyStopped": {
+          "type": "boolean"
+        },
+        "notifyCompleted": {
+          "type": "boolean"
+        },
+        "titleMarker": {
+          "type": "boolean"
+        },
+        "koreanTitle": {
+          "type": "boolean"
+        },
+        "executorThinking": {
+          "type": "string",
+          "maxLength": 40,
+          "pattern": "^[A-Za-z0-9_.-]*$"
+        },
+        "askMode": {
+          "type": "boolean"
+        },
+        "defaultMode": {
+          "type": "string",
+          "enum": [
+            "general",
+            "federated"
+          ]
+        },
+        "askExecutorModel": {
+          "type": "boolean"
+        },
+        "rememberProjectChoices": {
+          "type": "boolean"
+        },
+        "autoStart": {
+          "type": "boolean"
+        },
+        "autoResumeQuota": {
+          "type": "boolean"
+        },
+        "autoResumeTransient": {
+          "type": "boolean"
+        },
+        "shellPushGuard": {
+          "type": "boolean"
+        },
+        "executorPlacement": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "worktree",
+            "wait"
+          ]
+        },
+        "threshold": {
+          "type": "number",
+          "minimum": 0.05,
+          "maximum": 0.9
+        },
+        "claudeCompression": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "threshold": {
+                  "type": "number",
+                  "minimum": 0.05,
+                  "maximum": 0.9
+                },
+                "oneMillionTokenLimit": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 1000000
+                }
+              },
+              "required": [
+                "threshold",
+                "oneMillionTokenLimit"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "codexCompression": {
+          "type": "string",
+          "enum": [
+            "threshold",
+            "native"
+          ]
+        },
+        "maxCycles": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "maxTurns": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 200
+        },
+        "executorModel": {
+          "type": "string",
+          "maxLength": 120,
+          "pattern": "^codex(?:\\/[^\\s]+)?$"
+        },
+        "executorMode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "claudeExecutorModel": {
+          "type": "string",
+          "maxLength": 120,
+          "pattern": "^claude(?:\\/[^\\s]+)?$"
+        },
+        "claudeExecutorThinking": {
+          "type": "string",
+          "maxLength": 40,
+          "pattern": "^[A-Za-z0-9_.-]*$"
+        },
+        "claudeExecutorMode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "claudeStartMode": {
+          "type": "string",
+          "maxLength": 80
+        }
+      },
+      "additionalProperties": false
+    },
+    "notifications": {
+      "type": "object",
+      "properties": {
+        "phoneNotifications": {
+          "type": "boolean"
+        },
+        "phoneNotificationEndpoint": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "migratedFrom": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "at": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stateSettingsSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "source",
+        "at",
+        "stateSettingsSha256"
+      ],
       "additionalProperties": false
     }
   },
   "required": [
     "version",
-    "revision"
+    "revision",
+    "decisions",
+    "roleWorkflow",
+    "notifications"
   ],
   "additionalProperties": false
 }

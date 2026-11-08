@@ -39,6 +39,17 @@ class OwnerSchemaTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_owner('policy', {'version': 1, 'revision': 0, 'keychain': {}})
 
+    def test_policy_workflow_values_use_the_generated_shared_contract(self):
+        policy = json.loads((PRESETS / 'examples/policy.example.json').read_text())
+        for values in [{'maxTurns': 0}, {'threshold': 1}, {'folderRoots': ['relative']},
+                       {'claudeCompression': {'threshold': 0.55, 'oneMillionTokenLimit': 0}},
+                       {'unknown': True}]:
+            value = copy.deepcopy(policy); value['roleWorkflow'] = values
+            with self.assertRaises(ValueError):
+                validate_owner('policy', value)
+        value = copy.deepcopy(policy); value['roleWorkflow'] = {'claudeCompression': None}
+        validate_owner('policy', value)
+
     def test_schema_dialect_does_not_silently_ignore_constraints(self):
         with self.assertRaisesRegex(ValueError, '지원하지 않는'):
             validate_schema('x', {'unsupported': True})

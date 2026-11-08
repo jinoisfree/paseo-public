@@ -5,13 +5,14 @@
 """
 from datetime import date
 import json
+import math
 from pathlib import Path
 import re
 
 SCHEMAS = Path(__file__).resolve().parents[1] / 'plugin/role-workflow/shared/presets/schemas'
 KEYWORDS = {'$schema', 'title', 'description', 'type', 'properties', 'required',
             'additionalProperties', 'items', 'uniqueItems', 'enum', 'const',
-            'minimum', 'maximum', 'minLength', 'pattern', 'format'}
+            'minimum', 'maximum', 'exclusiveMinimum', 'minLength', 'maxLength', 'minItems', 'maxItems', 'anyOf', 'pattern', 'format'}
 
 
 def validate_schema(value, schema, path='$'):
@@ -21,10 +22,20 @@ def validate_schema(value, schema, path='$'):
         raise ValueError(f'{path}: 지원하지 않는 스키마 키워드: {", ".join(sorted(unknown))}')
     def fail(message):
         raise ValueError(f'{path}: {message}')
+    if 'anyOf' in schema:
+        for branch in schema['anyOf']:
+            try:
+                validate_schema(value, branch, path)
+                break
+            except ValueError:
+                pass
+        else:
+            fail('허용된 형식에 맞지 않습니다')
     kind = schema.get('type')
     types = {'object': lambda x: isinstance(x, dict), 'array': lambda x: isinstance(x, list),
              'string': lambda x: isinstance(x, str), 'integer': lambda x: type(x) is int,
-             'boolean': lambda x: type(x) is bool}
+             'boolean': lambda x: type(x) is bool, 'null': lambda x: x is None,
+             'number': lambda x: type(x) in (int, float) and math.isfinite(x)}
     if kind and (kind not in types or not types[kind](value)):
         fail(f'{kind} 형식이어야 합니다')
     if 'const' in schema and (type(value) is not type(schema['const']) or value != schema['const']):
@@ -44,16 +55,22 @@ def validate_schema(value, schema, path='$'):
             elif isinstance(extra, dict):
                 validate_schema(item, extra, f'{path}.*')
     if kind == 'array':
+        if len(value) < schema.get('minItems', 0) or len(value) > schema.get('maxItems', float('inf')):
+            fail('배열 길이가 허용 범위를 벗어났습니다')
         if schema.get('uniqueItems') and len({json.dumps(x, sort_keys=True) for x in value}) != len(value):
             fail('중복 항목이 있습니다')
         for i, item in enumerate(value):
             validate_schema(item, schema.get('items', {}), f'{path}[{i}]')
-    if kind == 'integer':
+    if kind in ('integer', 'number'):
+        if 'exclusiveMinimum' in schema and value <= schema['exclusiveMinimum']:
+            fail('최솟값보다 커야 합니다')
         if 'minimum' in schema and value < schema['minimum']:
             fail('최솟값보다 작습니다')
         if 'maximum' in schema and value > schema['maximum']:
             fail('최댓값보다 큽니다')
     if kind == 'string':
+        if len(value) > schema.get('maxLength', float('inf')):
+            fail('문자열이 너무 깁니다')
         if len(value) < schema.get('minLength', 0):
             fail('문자열이 너무 짧습니다')
         if 'pattern' in schema and not re.search(schema['pattern'], value):

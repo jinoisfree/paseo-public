@@ -251,3 +251,6 @@ GitHub Actions(`.github/workflows/check.yml`)가 푸시와 PR마다 macOS·Node 
 Apache-2.0입니다. Paseo 파생 코드의 원저작권과 변경 사항은 `NOTICE`를 확인하세요.
 
 공항 구조와 각 설정의 소유 경계는 [구조 기준](docs/ARCHITECTURE.md)을 따릅니다.
+
+설정 원본은 `$PASEO_HOME/owner/policy.json`입니다. 기존 state.settings는 1회 이관 뒤 롤백용으로 동결됩니다.
+옛 코드로 롤백하면 이관 이후 설정 변경이 사라집니다. 상세는 [플러그인 지시서 안내](plugin/role-workflow/README.md#사장-지시서와-롤백)를 확인하세요.

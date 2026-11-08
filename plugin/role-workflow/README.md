@@ -68,3 +68,18 @@ Paseo의 일반개발·연합개발 작업 상태를 관리하는 플러그인�
 - 0.15의 `agent.turn.after`는 timeline을 비워 보냅니다. 끝난 턴은 대화 기록에서 다시 읽습니다.
 - 화면은 `addScreen`·`addSidebarHeaderItem`(호스트의 `SidebarRow`)·`openScreen`으로 등록합니다. 폐기 예정인 `addSurface`/`addSidebarItem`/`openSurface`는 쓰지 않습니다. Paseo는 옛 사이드바 항목과 같은 id의 설정 키와 `/sidebar/<id>` 링크를 새 화면으로 이어 줍니다.
 - 0.16이 나오면 변경점을 확인하고 테스트한 뒤 상한을 올립니다.
+
+## 사장 지시서와 롤백
+
+현재 설정은 `$PASEO_HOME/owner/policy.json`(기본 `~/.paseo/owner/policy.json`)의 권장값 차이로 저장합니다.
+처음 로드할 때 기존 state.settings·옛 알림 키를 한 번 이관하고, 기존 파일은 보존합니다.
+state.settings는 롤백용 동결 사본입니다. 옛 코드로 롤백하면 이관 이후 설정 변경은 사라집니다.
+지시서가 깨지면 권장값으로 동작하며 오류·경로를 화면에 표시하고 저장을 거부합니다.
+설정 화면은 읽은 revision을 보낼 때만 저장하며 충돌하면 새로 읽어야 합니다.
+권장 프로필 목록은 shared/presets/profiles.json 하나이며 제품 모두 계획·구현을 할 수 있습니다.
+
+지시서의 roleWorkflow는 설정 차이 객체, notifications는 알림 값 객체입니다.
+두 묶음의 결정 날짜는 decisions.roleWorkflow.date와 decisions.notifications.date에 기록합니다.
+migratedFrom은 이관 출처·시각·원래 settings의 SHA-256이며, 저장해도 이 기록을 유지합니다.
+정책 JSON Schema의 설정 부분은 settingsValuesSchema에서 생성합니다. 검증 제약을 바꾸면
+`tsx scripts/sync-policy-schema.mts`로 JSON을 동기화하고 Python 검증도 확인하세요.

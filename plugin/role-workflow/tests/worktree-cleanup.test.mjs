@@ -265,7 +265,11 @@ test("AC-102: disabling cleanup during inspection is rechecked immediately befor
   const inspect = f.port.archiveInspection;
   let reads = 0;
   f.port.archiveInspection = async ids => {
-    if (++reads === 1) f.engine.database.settings.autoArchiveWorktree = false;
+    if (++reads === 1) {
+      // C4: owner changes must affect the policy source, not the in-memory rollback copy.
+      const current = await f.engine.policy.load();
+      await f.engine.policy.save({...current.settings,autoArchiveWorktree:false},current.policy.revision);
+    }
     return inspect(ids);
   };
   await f.run();

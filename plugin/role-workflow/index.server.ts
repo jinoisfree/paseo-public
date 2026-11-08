@@ -3,7 +3,8 @@ import { SCREEN_SELECTION_PROMPT } from "./server/executor-selection";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import type { PaseoApi, PaseoAgentConfig } from "@getpaseo/client";
 import { randomUUID } from "node:crypto";
-import { homedir } from "node:os";
+import { paseoHome, ownerPolicyPath, legacyPublicConfigs } from "./server/paths";
+import { OwnerPolicyStore } from "./server/owner-policy";
 import path from "node:path";
 import { creationRole } from "./shared/assignment";
 import { materializeRules } from "./server/rules";
@@ -29,7 +30,6 @@ import {
   selectMode,
   selectPlacement,
   testNotification,
-  settingsSchema,
   type Settings,
   models,
   retitle,
@@ -47,11 +47,13 @@ import { listFolders } from "./server/folders";
 export default function contribute(server: PluginServerContext) {
   let api: OperationalApi | null = null;
   let fatal: string | null = null;
-  const access = createWorkspaceAccess(process.env.PASEO_HOME ?? path.join(homedir(), ".paseo"));
+  let settingsReadable = false;
+  let settingsReadError: string | null = null;
+  const access = createWorkspaceAccess(paseoHome());
   const port = withCallBudgets(createPort(access.api));
   const directory =
     process.env.PASEO_ROLE_WORKFLOW_STATE_DIR ??
-    path.join(process.env.PASEO_HOME ?? path.join(homedir(), ".paseo"), "role-workflow");
+    path.join(paseoHome(), "role-workflow");
   const rulesReady = materializeRules(directory);
   const notifier = createNotifier();
   const engine = new WorkflowEngine(
@@ -62,6 +64,7 @@ export default function contribute(server: PluginServerContext) {
     undefined,
     undefined,
     access.createLifecycle(),
+    new OwnerPolicyStore(ownerPolicyPath(), legacyPublicConfigs()),
   );
   interface Seed {
     titled: boolean;
@@ -273,11 +276,20 @@ export default function contribute(server: PluginServerContext) {
   server.handle(status, async (_input, context) => {
     attach(context.paseo);
     try {
-      return { ...(await engine.list()), error: fatal, devices: await notifier.activeCount() };
+      const listed = await engine.list();
+      if (settingsReadError && fatal === settingsReadError) fatal = null;
+      settingsReadError = null;
+      const error = listed.error ?? fatal;
+      settingsReadable = !error;
+      return { ...listed, error, devices: await notifier.activeCount() };
     } catch (error) {
       report(error);
+      settingsReadable = false;
+      settingsReadError = fatal;
       return {
-        settings: settingsSchema.parse({}),
+        settings: null,
+        settingsRevision: null,
+        federation: { available: false, reason: "상태를 읽을 수 없습니다." },
         workflows: [],
         archives: [],
         error: fatal,
@@ -328,7 +340,8 @@ export default function contribute(server: PluginServerContext) {
   });
   server.handle(configure, async (input, context) => {
     attach(context.paseo);
-    return engine.configure(input);
+    if (!settingsReadable) throw new Error("설정 상태 조회가 실패했습니다. 상태를 다시 읽은 뒤 저장하세요.");
+    return engine.configureWithRevision(input.settings, input.expectedRevision);
   });
   server.handle(folderList, async (_input, context) => {
     attach(context.paseo);

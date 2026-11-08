@@ -1,7 +1,9 @@
 // Adapted for paseo-public: phone notifications require explicit user configuration.
 import { readFile } from "node:fs/promises";
 import { request as httpsRequest } from "node:https";
-import { homedir } from "node:os";
+import { paseoHome, legacyPublicConfigs, ownerPolicyPath } from "./paths";
+import { legacyNotifications } from "./owner-policy";
+import { ownerPolicySchema } from "../shared/owner-policy";
 import path from "node:path";
 import type { NotificationEvent } from "./engine";
 
@@ -70,15 +72,15 @@ interface Result {
   error: string | null;
 }
 export function createNotifier(options: Options = {}) {
-  const home = options.home ?? process.env.PASEO_HOME ?? path.join(homedir(), ".paseo");
+  const home = options.home ?? paseoHome();
   const fetcher: Fetcher = options.fetch ?? postJson,
     now = options.now ?? Date.now;
   const log = options.log ?? console.error;
   async function destination(): Promise<string | null> {
-    let config: { phoneNotifications?: boolean; phoneNotificationEndpoint?: string } = {};
-    try {
-      config = JSON.parse(await readFile(options.configPath ?? path.join(homedir(), ".config/paseo-public/config.json"), "utf8"));
-    } catch { /* Missing configuration leaves phone notifications off. */ }
+    let policy: { phoneNotifications?: boolean; phoneNotificationEndpoint?: string } = {};
+    try { policy = ownerPolicySchema.parse(JSON.parse(await readFile(ownerPolicyPath(home), "utf8"))).notifications; }
+    catch { /* A missing or broken owner file falls through to legacy destinations. */ }
+    const config = { ...await legacyNotifications(legacyPublicConfigs(options.configPath)), ...policy };
     const enabled = options.enabled ?? config.phoneNotifications === true;
     const endpoint = options.endpoint ?? config.phoneNotificationEndpoint;
     if (!enabled || !endpoint) return null;

@@ -1,8 +1,9 @@
+import { federationAvailability } from "./federation";
 import { contextUsage, contextRatio } from "../shared/compression";
 import { timelineSelections, timelineMode } from "./executor-selection";
 import { asyncGeneralAnswers } from "./general-agent";
-import { lstat, realpath } from "node:fs/promises";
-import { homedir } from "node:os";
+import { lstat, realpath, readFile } from "node:fs/promises";
+import { paseoHome } from "./paths";
 import path from "node:path";
 import { usageAvailable } from "./quota";
 import { createHash } from "node:crypto";
@@ -444,6 +445,7 @@ export function createPort(
   let usage: ReturnType<PaseoApi["providers"]["listUsage"]> | undefined;
   return {
     syncProjectTitles: createProjectTitleSync(getApi),
+    federationAvailability: (cwd) => federationAvailability(getApi(), cwd),
     async quotaAccount(provider) {
       return quotaAccount(provider);
     },
@@ -863,10 +865,21 @@ async function validateMode(
 /** A refreshed auth file may replace the symlink. Unknown is never an account change. */
 export async function quotaAccount(
   provider: string,
-  home = process.env.PASEO_HOME ?? path.join(homedir(), ".paseo"),
+  home = paseoHome(),
 ): Promise<string | null> {
   if (provider !== "codex") return null;
-  const file = path.join(home, "codex-home", "auth.json");
+  let codexHome = path.join(home, "codex-home");
+  try {
+    const config = JSON.parse(await readFile(path.join(home, "config.json"), "utf8"));
+    const configured = config?.agents?.providers?.codex?.env?.CODEX_HOME;
+    if (configured !== undefined) {
+      if (typeof configured !== "string" || !path.isAbsolute(configured)) return null;
+      codexHome = configured;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") return null;
+  }
+  const file = path.join(codexHome, "auth.json");
   try {
     return (await lstat(file)).isSymbolicLink() ? await realpath(file) : null;
   } catch {

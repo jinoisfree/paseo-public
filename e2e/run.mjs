@@ -4,6 +4,7 @@ import { gitTestEnvironment } from "../plugin/role-workflow/tests/git-test-envir
 // checkout's role-workflow and talks to a fake Claude model, so no real account or quota is used.
 // The harness shape follows babo-jeonguk/paseo-usage-auto-resume (MIT).
 // usage: node e2e/run.mjs [--paseo <cli>] [--keep]
+import { createHash } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { appendFileSync, closeSync, existsSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
@@ -59,7 +60,9 @@ const target = `127.0.0.1:${daemonPort}`;
 const baseEnv = gitTestEnvironment();
 for (const key of Object.keys(baseEnv))
   if (/^(PASEO_|ANTHROPIC_|CLAUDE_)/.test(key)) delete baseEnv[key];
-const env = { ...baseEnv, PASEO_HOME: home };
+const publicConfig = join(root, "public.config.json");
+writeFileSync(publicConfig, JSON.stringify({ phoneNotifications: false, phoneNotificationEndpoint: "https://example.invalid/push" }));
+const env = { ...baseEnv, PASEO_HOME: home, PASEO_PUBLIC_CONFIG: publicConfig };
 const cli = (...args) => run(paseo, [...args, "--home", home], { env });
 
 writeFileSync(control, JSON.stringify({ mode: "text", text: "2" }));
@@ -188,6 +191,16 @@ async function step(name, fn) {
 let questionAgent = "";
 let generalAgent = "";
 let defaultSettings;
+let policyBeforeRestart;
+const policyFile=join(home,"owner","policy.json");
+const policy=()=>JSON.parse(readFileSync(policyFile,"utf8"));
+const configureSettings=async settings=>{
+  const current=await rpc("workflow.status",{});
+  return rpc("workflow.configure",{settings,expectedRevision:current.settingsRevision});
+};
+const legacySettings={...JSON.parse(readFileSync(join(pluginDir,"shared/presets/recommended.json"),"utf8")).roleWorkflow,maxTurns:73};
+await mkdir(join(home,"role-workflow"),{recursive:true});
+writeFileSync(join(home,"role-workflow","state.json"),JSON.stringify({version:1,revision:3,settings:legacySettings,workflows:[]}));
 try {
   detached(process.execPath, [join(here, "fake-models.mjs"), String(modelPort), control, modelLog]);
   await startDaemon();
@@ -202,6 +215,47 @@ try {
     const { settings } = await rpc("workflow.status", {});
     defaultSettings = structuredClone(settings);
     assert(settings.autoPinStarted && settings.autoPinPushed && settings.autoArchivePushed, "automatic pin and archive defaults must remain enabled");
+  });
+
+  await step("airport C3: settings and notification migration records one source once", async()=>{
+    const current=policy();
+    assert(current.migratedFrom.stateSettingsSha256===createHash("sha256").update(JSON.stringify(legacySettings)).digest("hex"),"migration hash mismatch");
+    assert(JSON.stringify(current.roleWorkflow)===JSON.stringify({maxTurns:73}),"migration did not store differences only");
+    assert(current.notifications.phoneNotifications===false,"old notifications were not migrated");
+    const before=readFileSync(policyFile,"utf8");
+    await rpc("workflow.status",{});await rpc("workflow.status",{});
+    assert(readFileSync(policyFile,"utf8")===before,"same migration input changed the policy");
+    assert(JSON.stringify(state().settings)===JSON.stringify(legacySettings),"state settings changed during migration");
+  });
+  await step("airport C5: concurrent saves with one revision conflict instead of overwriting",async()=>{
+    const current=await rpc("workflow.status",{});
+    const attempts=await Promise.allSettled([74,75].map(maxTurns=>rpc("workflow.configure",{settings:{...current.settings,maxTurns},expectedRevision:current.settingsRevision})));
+    assert(attempts.filter(r=>r.status==="fulfilled").length===1,"concurrent saves did not conflict");
+    assert(policy().revision===current.settingsRevision+1,"revision advanced more than once");
+    await configureSettings(defaultSettings);
+    assert(JSON.stringify(state().settings)===JSON.stringify(legacySettings),"state settings did not freeze");
+  });
+  await step("airport C3: plugin remove and install preserve policy and migration marker",async()=>{
+    const before=readFileSync(policyFile,"utf8");
+    assert((await cli("plugin","remove","role-workflow")).code===0,"remove failed");
+    assert(readFileSync(policyFile,"utf8")===before,"plugin remove deleted policy");
+    assert((await cli("plugin","install",pluginDir)).code===0,"reinstall failed");
+    await waitFor("reinstalled plugin",async()=>{try{return (await rpc("workflow.status",{})).settingsRevision!==null;}catch{return false;}});
+    assert(readFileSync(policyFile,"utf8")===before,"reinstall remigrated policy");
+  });
+  await step("airport C2/C6: malformed policy reports its path and never accepts an overwrite",async()=>{
+    const before=readFileSync(policyFile,"utf8");
+    try {
+      for(const broken of ["{broken",JSON.stringify({...JSON.parse(before),roleWorkflow:{maxTurns:0}})]) {
+        writeFileSync(policyFile,broken);
+        const status=await rpc("workflow.status",{});
+        assert(status.error?.includes(policyFile),"policy error or path was hidden");
+        let rejected=false;
+        try {await rpc("workflow.configure",{settings:defaultSettings,expectedRevision:0});}catch{rejected=true;}
+        assert(rejected,"save accepted after failed status");
+        assert(readFileSync(policyFile,"utf8")===broken,"invalid policy was overwritten");
+      }
+    } finally {writeFileSync(policyFile,before);await rpc("workflow.status",{});}
   });
 
   await step("without overlap a federated executor opens in the planner workspace tab", async () => {
@@ -501,7 +555,7 @@ try {
     const dirty = join(flow.worktree.path, "must-preserve.txt");
     writeFileSync(dirty, "uncommitted fixture data\n");
     try {
-      await rpc("workflow.configure", { ...settings, archiveAfterDays: 0 });
+      await configureSettings({ ...settings, archiveAfterDays: 0 });
       const preview = await rpc("workflow.archive-finished", { apply: false, ids: [] });
       assert(!preview.rows.some(row => row.id === flow.id), "dirty worktree became an archive candidate");
       assert(preview.blocked.some(row => row.id === flow.id && row.reason === "푸시 전 작업의 따로 작업 공간은 자동 정리하지 않습니다. 필요하면 커밋을 확인한 뒤 Paseo에서 직접 보관하세요(무시된 파일과 커밋하지 않은 파일은 지워집니다)."), "archive screen has no preservation reason");
@@ -513,7 +567,7 @@ try {
       assert(readFileSync(dirty, "utf8") === "uncommitted fixture data\n", "DATA LOSS RISK: dirty file disappeared");
     } finally {
       await rm(dirty, { force: true });
-      await rpc("workflow.configure", settings);
+      await configureSettings(settings);
     }
   });
 
@@ -580,6 +634,7 @@ try {
 
   await step("state and plugin survive a daemon restart", async () => {
     const flows = state().workflows.length;
+    policyBeforeRestart=readFileSync(policyFile,"utf8");
     await client?.close().catch(() => {});
     client = null;
     await stop(daemon);
@@ -595,6 +650,11 @@ try {
       assert(cleaned?.worktreeCleanup?.stage === "done", "cleanup completion was lost on restart");
       assert(cleaned.worktreeCleanup.attempts === cleanupObservation.attempts && cleaned.worktreeCleanup.at === cleanupObservation.at, "restart attempted cleanup again");
     }
+  });
+
+  await step("airport C3/C4: daemon restart keeps policy and does not repeat migration",async()=>{
+    assert(readFileSync(policyFile,"utf8")===policyBeforeRestart,"policy changed on daemon restart");
+    assert(JSON.stringify(state().settings)===JSON.stringify(legacySettings),"frozen rollback snapshot changed on restart");
   });
 
   await step("the plugin logged no errors", async () => {

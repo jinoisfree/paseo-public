@@ -1,3 +1,4 @@
+import { isolateOwnerHome, configureFixture } from "./owner-fixture.mjs";
 import {test} from "node:test";
 import assert from "node:assert/strict";
 import {mkdtemp,readFile,rm} from "node:fs/promises";
@@ -6,8 +7,9 @@ import path from "node:path";
 import contribute from "../index.server.ts";
 import {settingsSchema} from "../shared/contracts.ts";
 
-test("native maintenance lifecycle updates context without being consumed as a standalone product turn",async()=>{
+test("native maintenance lifecycle updates context without being consumed as a standalone product turn",async(t)=>{
  const dir=await mkdtemp(path.join(tmpdir(),"maintenance-hook-")),previous=process.env.PASEO_ROLE_WORKFLOW_STATE_DIR;process.env.PASEO_ROLE_WORKFLOW_STATE_DIR=dir;
+  isolateOwnerHome(t, dir);
  const before=new Map(),events=new Map(),rpcs=new Map(),sends=[];
  const agent={id:"A",provider:"claude",model:"model",workspaceId:"ws",cwd:dir,title:"Task",status:"idle",archivedAt:null,pendingPermissions:[],lastUsage:{contextWindowUsedTokens:499999,contextWindowMaxTokens:1000000}};
  const context={paseo:{
@@ -16,7 +18,7 @@ test("native maintenance lifecycle updates context without being consumed as a s
  }};
  const close=contribute({addHook:(name,fn)=>{(name==="agent.create.before"||name==="agent.open.before"?before:events).set(name,fn);return()=>{};},handle:(contract,fn)=>rpcs.set(contract.name,fn)});
  try{
-  await rpcs.get("workflow.configure")(settingsSchema.parse({askMode:false,defaultMode:"general",claudeStartMode:"",koreanTitle:false,titleMarker:false,autoPinStarted:false,autoArchivePushed:false,codexCompression:"native",claudeCompression:{threshold:0.55,oneMillionTokenLimit:500000}}),context);
+  await configureFixture(rpcs, context, settingsSchema.parse({askMode:false,defaultMode:"general",claudeStartMode:"",koreanTitle:false,titleMarker:false,autoPinStarted:false,autoArchivePushed:false,codexCompression:"native",claudeCompression:{threshold:0.55,oneMillionTokenLimit:500000}}));
   const created=await before.get("agent.create.before")({request:{config:{provider:"claude",cwd:dir}}},context);
   await before.get("agent.open.before")({request:{agentId:"A",reason:"create",env:created.env}},context);
   await events.get("agent.create.after")({agent},context);

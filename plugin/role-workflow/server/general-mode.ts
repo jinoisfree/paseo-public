@@ -45,6 +45,7 @@ export interface GeneralModeHost {
   renameWorkspaces(w: Workflow, marker: boolean, keep?: boolean): Promise<unknown>;
   handoffPath(w: Workflow): string;
   captureArtifacts(w: Workflow, text: string, evidence: TurnEvidence | undefined, agentId: string, turnKey: string): Promise<unknown>;
+  allowMode(w: Workflow, mode: "general" | "federated"): Promise<boolean>;
   busyWriter(w: Workflow): Promise<Workflow | null>;
 }
 
@@ -167,7 +168,10 @@ export class GeneralMode {
       );
       if (w && capabilities(w).current) {
         const mode = w.mode === "undecided" ? (modeAnswer ?? timelineMode(items) ?? requestedMode(initialRequest)) : null;
-        if (mode) { w.mode = mode; await this.host.rememberProject(w); await this.host.save(); }
+        if (mode) {
+          if (!await this.host.allowMode(w, mode)) { await this.host.save(); return; }
+          w.mode = mode; await this.host.rememberProject(w); await this.host.save();
+        }
         if (!capabilities(w).executorSelection) return;
         for (const answer of selectionEvents ?? timelineSelections(items))
           await this.host.executorChoice().acceptSelection(w, answer.id, answer.values, answer.fields);

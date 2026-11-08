@@ -59,6 +59,8 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
   const execution = executorDefaults(draft, executorProvider);
   const [error, setError] = useState("");
   // A failed poll clears itself on the next success; action errors stay until dismissed.
+  const draftLoaded = useRef(false);
+  const [draftRevision, setDraftRevision] = useState<number | null>(null);
   const [loadError, setLoadError] = useState("");
   const loads = useRef({ started: 0, applied: 0 });
   const [notice, setNotice] = useState("");
@@ -120,7 +122,11 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
       loads.current.applied = sequence;
       setData(next);
       setLoadError("");
-      setDraft((previous) => previous ?? next.settings);
+      if (next.settings && !next.error && !draftLoaded.current) {
+        draftLoaded.current = true;
+        setDraft(next.settings);
+        setDraftRevision(next.settingsRevision);
+      }
     } catch (e) {
       if (sequence < loads.current.applied) return;
       setLoadError(e instanceof Error ? e.message : String(e));
@@ -202,12 +208,12 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
     }, "작업을 재개했습니다.");
   }
   const button = useCallback(
-    (title: string, onPress: () => void, id?: string) => {
+    (title: string, onPress: () => void, id?: string, unavailable = false) => {
       return (
         <Pressable
           testID={id}
           accessibilityRole="button"
-          disabled={pending}
+          disabled={pending || unavailable}
           onPress={onPress}
           style={s.button}
         >
@@ -495,9 +501,23 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
         )}
         {button(
           "설정 저장",
-          () => void run(() => write(draft), "설정을 저장했습니다."),
+          () => void run(async () => {
+            if (loadError || data?.error || !data?.settings || draftRevision === null)
+              throw new Error("설정 상태를 다시 읽은 뒤 저장하세요.");
+            const result = await write({ settings: draft, expectedRevision: draftRevision });
+            setDraft(result.settings);
+            setDraftRevision(result.revision);
+          }, "설정을 저장했습니다."),
           "workflow-save",
+          !!(loadError || data?.error || !data?.settings || draftRevision === null),
         )}
+        {button("설정 다시 읽기", () => void run(async () => {
+          const next = await read({});
+          if (next.error || !next.settings || next.settingsRevision === null)
+            throw new Error(next.error ?? "설정을 읽지 못했습니다.");
+          setData(next); setDraft(next.settings); setDraftRevision(next.settingsRevision);
+          setLoadError("");
+        }, "설정을 다시 읽었습니다."), "workflow-reload-settings")}
         <Text style={s.muted}>
           자동 연결을 꺼도 이미 연결된 작업은 유지됩니다. 해당 작업에서 일시정지하세요. 모델·권한
           설정은 새 실행 대화부터 사용합니다.
@@ -661,6 +681,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
         일시정지는 현재 응답을 마친 뒤 적용됩니다.
       </Text>
       {pending && <Text style={s.text}>처리 중…</Text>}
+      {!!data?.federation?.reason && <Text style={s.muted}>{data.federation.reason}</Text>}
       {!!(error || loadError || data?.error) && (
         <View accessibilityRole="alert">
           <Text testID="workflow-error" style={s.error}>

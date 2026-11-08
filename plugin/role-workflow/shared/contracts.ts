@@ -135,7 +135,9 @@ export const status = defineRpc({
   name: "workflow.status",
   input: z.object({}),
   output: z.object({
-    settings: settingsSchema,
+    settings: settingsSchema.nullable(),
+    settingsRevision: z.number().int().nonnegative().nullable(),
+    federation: z.object({ available: z.boolean(), reason: z.string().nullable() }),
     projects: z.record(z.string(), projectDefaultsSchema).default({}),
     workflows: z.array(workflowViewSchema),
     archives: z.array(archiveEntrySchema).default([]),
@@ -145,8 +147,8 @@ export const status = defineRpc({
 });
 export const configure = defineRpc({
   name: "workflow.configure",
-  input: settingsSchema,
-  output: settingsSchema,
+  input: z.object({ settings: settingsValuesSchema.strict(), expectedRevision: z.number().int().nonnegative() }).strict(),
+  output: z.object({ settings: settingsSchema, revision: z.number().int().nonnegative() }),
 });
 export const forgetProject = defineRpc({
   name: "workflow.forget-project",

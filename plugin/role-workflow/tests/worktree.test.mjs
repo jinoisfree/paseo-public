@@ -358,7 +358,7 @@ test("AC-07: shared placement is kept when the executor is replaced despite a ne
   assert.equal(f.cards.length, 0);
 });
 
-test("AC-08: legacy boolean settings migrate to ask, and saving removes the old key", async t => {
+test("AC-08: legacy boolean settings migrate to policy ask while preserving the frozen rollback snapshot", async t => {
   for (const old of [true, false]) {
     const settings = settingsSchema.parse({ executorWorktree: old });
     assert.equal(settings.executorPlacement, "ask");
@@ -368,6 +368,8 @@ test("AC-08: legacy boolean settings migrate to ask, and saving removes the old 
   const f = await fixture(t, { overlap: false });
   await f.engine.close();
   const legacy = JSON.parse(await readFile(f.file, "utf8"));
+  // C3: simulate a genuinely pre-migration install, without an existing policy.
+  await rm(f.engine.policy.file);
   delete legacy.settings.executorPlacement;
   legacy.settings.executorWorktree = false;
   await writeFile(f.file, JSON.stringify(legacy));
@@ -375,8 +377,9 @@ test("AC-08: legacy boolean settings migrate to ask, and saving removes the old 
   assert.equal((await f.engine.settings()).executorPlacement, "ask");
   await f.engine.configure(await f.engine.settings());
   const saved = JSON.parse(await readFile(f.file, "utf8"));
-  assert.equal(saved.settings.executorPlacement, "ask");
-  assert.equal("executorWorktree" in saved.settings, false);
+  // C4: old settings stay byte-equivalent as rollback input; current settings live in policy.
+  assert.deepEqual(saved.settings, legacy.settings);
+  assert.equal((await f.engine.settings()).executorPlacement, "ask");
 });
 
 test("AC-09: missing, non-federated and non-waiting choices leave workflow state unchanged", async t => {

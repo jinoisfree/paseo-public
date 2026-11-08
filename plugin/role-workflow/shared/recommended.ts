@@ -31,3 +31,5 @@ export const recommendedSchema = z.object({
 // Validate JSON at the boundary before passing typed values to Zod defaults.
 export const recommended = recommendedSchema.parse(raw);
 export const recommendedSettings = recommended.roleWorkflow;
+
+export { default as recommendedProfiles } from "./presets/profiles.json";

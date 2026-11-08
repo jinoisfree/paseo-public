@@ -53,13 +53,9 @@ test('invalid recommended JSON fails schema validation and operating profiles pr
   assert.deepEqual(raw.core.log.file.rotate,{maxSize:'10m',maxFiles:3});
 });
 
-test('recommended role templates require explicit account and model selection', async () => {
-  for (const role of ['planner','executor']) {
-    const template=await json(`roles/${role}.json`);
-    assert.equal(template.version,1);assert.equal(template.role,role);assert.equal(template.autoSelect,false);
-    assert.deepEqual(template.profiles.map(p=>p.provider),['claude','codex']);
-    for(const profile of template.profiles) {
-      assert.equal(typeof profile.model,'string');assert.ok(profile.model.length);
-    }
-  }
+test('U10 one shared recommended profile list keeps both products and explicit model selection', async () => {
+  const template=await json('profiles.json');
+  assert.equal(template.version,1);assert.equal(template.autoSelect,false);
+  assert.equal('role' in template,false);
+  assert.deepEqual(template.profiles.map(p=>p.provider),['claude','codex']);
 });

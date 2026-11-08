@@ -1,3 +1,5 @@
+import { OwnerPolicyStore } from "./owner-policy";
+import { recommendedSettings } from "../shared/recommended";
 import { unknownData } from "./data-records";
 import { compressionDecision, type ContextUsage } from "../shared/compression";
 import { executorSelectionSchema, selectionStageLabel, type SelectionStage } from "../shared/executor-selection";
@@ -362,6 +364,7 @@ export interface History {
   failed: string | null;
 }
 export interface WorkflowPort {
+  federationAvailability?(cwd?: string): Promise<{ available: boolean; reason: string | null }>;
   models?(provider: "codex" | "claude", cwd: string): Promise<readonly ExecutorModel[]>;
   syncProjectTitles?(): Promise<void>;
   quotaAccount(provider: string): Promise<string | null>;
@@ -535,6 +538,9 @@ function outsideScope(w: Workflow, next: PushTarget[]) {
 
 export class WorkflowEngine {
   readonly store: JsonStore<Database>;
+  private federation = { available: true, reason: null as string | null };
+  private frozenSettings: unknown = structuredClone(recommendedSettings);
+  private policyState: Awaited<ReturnType<OwnerPolicyStore["load"]>> | null = null;
   private database: Database | null = null;
   private loading: Promise<Database> | null = null;
   private readonly tickFailures = new Map<string, number>();
@@ -595,6 +601,7 @@ export class WorkflowEngine {
     handoffPath: (w) => this.handoffPath(w),
     captureArtifacts: (w, text, evidence, agentId, turnKey) => this.captureArtifacts(w, text, evidence, agentId, turnKey),
     busyWriter: (w) => this.busyWriter(w),
+    allowMode: (w, mode) => this.allowMode(w, mode),
   });
   private readonly worktreeCleanup = new WorktreeCleanup({
     lifecycle: () => this.lifecycle,
@@ -657,6 +664,7 @@ export class WorkflowEngine {
     private readonly now: () => number = Date.now,
     managedRunner?: ManagedPushRunner,
     private readonly lifecycle = new WorkspaceLifecycle(),
+    readonly policy = new OwnerPolicyStore(path.join(path.dirname(file), "owner", "policy.json")),
   ) {
     bindWorkspaceLifecycle(this.lifecycle, { db: () => this.db(), cleanupReadiness: w => this.worktreeCleanup.verifyForArchive(w) });
     this.managedRunner =
@@ -673,7 +681,12 @@ export class WorkflowEngine {
         workflows: [],
         archives: [],
       }),
-      (v) => databaseSchema.parse(v),
+      (v) => {
+        const raw = v as Record<string, unknown>;
+        this.frozenSettings = raw.settings;
+        // Preserve the rollback snapshot verbatim; it is never an effective-setting source after migration.
+        return databaseSchema.parse({ ...raw, settings: recommendedSettings });
+      },
     );
   }
   private async db(): Promise<Database> {
@@ -685,7 +698,11 @@ export class WorkflowEngine {
         this.loading = null;
         throw error;
       });
-    return (this.database ??= await this.loading);
+    const db = (this.database ??= await this.loading);
+    this.policyState = await this.policy.load(this.frozenSettings === undefined ? undefined
+      : { settings: this.frozenSettings, source: this.store.file });
+    db.settings = this.policyState.settings;
+    return db;
   }
   private handoffPath(w: Workflow) {
     return path.join(path.dirname(this.store.file), "handoffs", `${w.id}.json`);
@@ -750,10 +767,11 @@ export class WorkflowEngine {
         w.status !== "completed" && !this.executorChoice.selectedExecutor(w),
     );
     for (const w of pickers) w.pickerPosted = true;
-    const serialized = JSON.stringify(db);
+    const persisted = { ...db, settings: this.frozenSettings };
+    const serialized = JSON.stringify(persisted);
     if (serialized !== this.savedDatabase) {
       try {
-        await this.store.write(db);
+        await this.store.write(persisted as Database);
       } catch (error) {
         // Unsent notifications stay pending for the next successful save.
         for (const [w, previous] of marked) w.notifiedStatus = previous;
@@ -875,16 +893,22 @@ export class WorkflowEngine {
     });
   }
   configure(settings: Settings) {
+    return this.configureWithRevision(settings).then(result => result.settings);
+  }
+  configureWithRevision(settings: Settings, expectedRevision?: number) {
     return this.serial(async () => {
       const db = await this.db();
-      db.settings = settingsSchema.parse(settings);
+      if (this.policyState?.error || !this.policyState?.policy)
+        throw new Error(this.policyState?.error ?? "지시서를 읽은 뒤 저장하세요.");
+      const saved = await this.policy.save(settings, expectedRevision ?? this.policyState.policy.revision);
+      db.settings = (await this.policy.load()).settings;
       if (!db.settings.autoResumeTransient) {
         for (const w of db.workflows)
           if (w.transientPause && ["paused", "error"].includes(w.status))
             this.recovery.stopTransient(w, w.transientPause.failure);
       }
       await this.save();
-      return settings;
+      return saved;
     });
   }
   setRepositories(id: string, paths: string[]) {
@@ -1161,8 +1185,10 @@ export class WorkflowEngine {
     );
     return {
       settings: db.settings,
+      settingsRevision: this.policyState?.policy?.revision ?? null,
+      federation: this.federation,
       projects: db.projects,
-      error: null,
+      error: this.policyState?.error ?? null,
       archives: db.archives.toSorted((a, b) => b.archivedAt.localeCompare(a.archivedAt)),
       workflows: db.workflows.map((w) => ({
         id: w.id,
@@ -1228,6 +1254,8 @@ export class WorkflowEngine {
       );
       if (known) return known.id;
       if (snapshot.archived) throw new Error("보관된 대화는 자동 작업에 연결할 수 없습니다.");
+      const availability = mode === "federated" ? await this.federationStatus(snapshot.cwd) : null;
+      if (availability && !availability.available) mode = "undecided";
       // Only new root conversations enroll; persisted members retain their original roles.
       const member: Member = {
         id: snapshot.id,
@@ -1274,7 +1302,7 @@ export class WorkflowEngine {
         execute: null,
         cycles: 0,
         turns: 0,
-        detail: "첫 작업을 기다리고 있습니다.",
+        detail: availability?.reason ?? "첫 작업을 기다리고 있습니다.",
         repositories: [],
         isolation: "undecided",
         placement: null,
@@ -1402,7 +1430,7 @@ export class WorkflowEngine {
       }
       if (capabilities(w).current && w.mode === "undecided") {
         const requested = requestedMode(userText(request || goal));
-        if (requested) w.mode = requested;
+        if (requested && await this.allowMode(w, requested)) w.mode = requested;
       }
       if (capabilities(w).executorSelection && w.plan?.id === agentId && !w.selection!.explicitRead) {
         w.selection!.explicitRead = true;
@@ -1585,8 +1613,10 @@ export class WorkflowEngine {
       const requested = requestedMode(userText(request));
       if (requested && requested !== w.mode) {
         if (w.mode === "undecided") {
-          w.mode = requested;
-          await this.rememberProject(w);
+          if (await this.allowMode(w, requested)) {
+            w.mode = requested;
+            await this.rememberProject(w);
+          }
         } else this.touch(w, "진행 중인 작업의 방식은 바꿀 수 없습니다. 현재 방식을 유지합니다. 다른 방식은 새 작업으로 시작하세요.");
         await this.save();
       }
@@ -1597,7 +1627,7 @@ export class WorkflowEngine {
       !!w.execute &&
       w.plan?.id === turn.agentId &&
       requestedMode(userText(request)) === "general";
-    if (splitGeneral(w) && requestedMode(userText(request)) === "federated") {
+    if (splitGeneral(w) && requestedMode(userText(request)) === "federated" && await this.allowMode(w, "federated")) {
       w.mode = "federated";
       await this.rememberProject(w);
       await this.save();
@@ -2434,7 +2464,7 @@ export class WorkflowEngine {
       if (w && capabilities(w).current && w.mode === "undecided" && w.plan?.id === agentId) {
         const history = await this.port.history(agentId).catch(() => null);
         const requested = requestedMode(history?.goal ?? "");
-        if (requested) { w.mode = requested; await this.rememberProject(w); }
+        if (requested && await this.allowMode(w, requested)) { w.mode = requested; await this.rememberProject(w); }
       }
       const questionId = request.id.replace(/^permission-/, "");
       if (w && capabilities(w).executorSelection && w.plan?.id === agentId && request.kind === "question") {
@@ -2516,6 +2546,16 @@ export class WorkflowEngine {
       await this.applyModeChoice(w, agentId, mode);
     });
   }
+  async federationStatus(cwd?: string) {
+    return (this.federation = await (this.port.federationAvailability?.(cwd) ?? { available: true, reason: null }));
+  }
+  private async allowMode(w: Workflow, mode: "general" | "federated") {
+    if (mode === "general") return true;
+    const availability = await this.federationStatus(w.cwd);
+    if (availability.available) return true;
+    this.touch(w, availability.reason ?? "실행 가능한 제품이 없어 연합개발을 선택할 수 없습니다.");
+    return false;
+  }
   /** Records a work-mode choice from the question tool or the in-chat card. */
   private async applyModeChoice(w: Workflow, agentId: string, mode: "general" | "federated") {
     if (capabilities(w).current && w.mode !== "undecided") {
@@ -2523,6 +2563,7 @@ export class WorkflowEngine {
       await this.save();
       return;
     }
+    if (!await this.allowMode(w, mode)) { await this.save(); return; }
     // Clear stale questions before queuing a transition as well as before an immediate choice.
     for (const pending of this.modeQuestions.keys())
       if (pending.startsWith(`${agentId}:`)) this.modeQuestions.delete(pending);

@@ -1,17 +1,23 @@
 {
   "version": 1,
   "revision": 0,
+  "roleWorkflow": {
+    "folderRoots": [
+      "~/projects"
+    ]
+  },
+  "notifications": {
+    "phoneNotifications": false
+  },
   "decisions": {
-    "operatingProfile": {
-      "value": "desktop",
+    "roleWorkflow": {
       "date": "2026-01-01"
     },
-    "roleWorkflow": {
-      "value": {
-        "folderRoots": [
-          "~/projects"
-        ]
-      },
+    "notifications": {
+      "date": "2026-01-01"
+    },
+    "operatingProfile": {
+      "value": "desktop",
       "date": "2026-01-01"
     }
   }

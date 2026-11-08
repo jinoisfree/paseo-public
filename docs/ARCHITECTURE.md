@@ -1,6 +1,6 @@
 # Paseo 공항 구조
 
-모든 개발의 구조 기준이다. 공항은 누구나 같은 시설·도구 집행·매뉴얼·직책 틀을 배포하고,
+모든 개발의 구조 기준이다. 공항은 누구나 같은 시설·도구 집행·매뉴얼·권장 프로필 목록을 배포하고,
 사장은 금고·지시서·명부·사물함을 가진다. 본체가 제공하는 칸의 수명이 이 원칙에 맞으면 본체가 원본이다.
 업데이트·플러그인 제거가 사장 자료를 지우는 칸은 원본으로 쓰지 않는다.
 
@@ -26,7 +26,7 @@ Paseo 본체 칸과 함께 대응시킨다. 기계용 원본은 [소유표](../p
 | 시설 설비 | 실행기·계정 전환·사용량·데몬·감시·인증 유지·보관 | modules |
 | 직원 도구 집행 | 위험 행동 확인·통제 | 시설 |
 | 매뉴얼 서가 | 역할 규칙 | plugin/role-workflow/rules |
-| 직책 명세서 | 권장 설정·본체 키·프로필 틀·운영 프로필 | plugin/role-workflow/shared/presets |
+| 공용 명세서 | 권장 설정·본체 키·프로필 틀·운영 프로필 | plugin/role-workflow/shared/presets |
 | 사장 금고 | 키체인 참조·계정 이름·도구 경로·백업 위치 | `$PASEO_HOME/owner/vault.json` |
 | 사장 지시서 | 설비 허가·시각·알림·프로필·권장값 차이·folderRoots | `$PASEO_HOME/owner/policy.json` |
 | 직원 명부 | 실제 에이전트 프로필 | 본체 daemon.agentProfiles |
@@ -79,8 +79,8 @@ server는 외부 데몬·업데이트 감시·Paseo 전용 watchdog, desktop은 
 ## 단계 경계와 새 기능 점검표
 
 1차는 명세·기본값·스키마·설비 틀·소유표다. 설치기는 아직 이 구조를 조립하지 않는다.
-지시서 원자적 쓰기·revision 보호·state.settings 이관, 원칙 6, check/doctor/refresh, 운영 clone 전환,
-분리 홈 조립·설비 설치·다른 Mac 수락·잔재 제거는 후속 단계다. 현재는 state.settings를 계속 사용한다.
+지시서 원자적 쓰기·revision 보호·state.settings 이관과 제품 0개 시 연합개발 거부는 구현됐다. check/doctor/refresh,
+분리 홈 조립·설비 설치·다른 Mac 수락·잔재 제거는 후속 단계다. 현재 설정은 owner/policy.json을 읽고, state.settings는 롤백용 동결 사본이다.
 
 - 소유 칸·공식 원본·쓰기 주체·수명을 정했는가?
 - 본체 칸과 중복되거나 파일 하나가 두 칸에 걸치는가?

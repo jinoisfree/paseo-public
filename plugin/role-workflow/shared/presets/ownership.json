@@ -43,7 +43,7 @@
     },
     {
       "id": "presets",
-      "description": "직책 명세서"
+      "description": "공용 명세서"
     },
     {
       "id": "vault",
@@ -193,7 +193,7 @@
         "task-artifacts": "lockers",
         "rules-status.json": "facility-generated"
       },
-      "migration": "state.json.settings만 현재 지시서 역할. 2차 owner/policy.json 이관 뒤 동결 사본; projects 기억은 사물함 유지"
+      "migration": "state.json.settings는 롤백용 동결 사본. 현재 설정은 owner/policy.json; projects 기억은 사물함 유지"
     },
     "pipeline": {
       "slot": "installation",
@@ -299,11 +299,11 @@
     },
     "phoneNotifications": {
       "slot": "policy",
-      "target": "decisions.phoneNotifications"
+      "target": "notifications.phoneNotifications"
     },
     "phoneNotificationEndpoint": {
       "slot": "policy",
-      "target": "decisions.phoneNotificationEndpoint"
+      "target": "notifications.phoneNotificationEndpoint"
     },
     "dependenciesLock": {
       "slot": "installation",
@@ -353,6 +353,7 @@
   "locations": {
     "plugin/role-workflow/rules/": "manuals",
     "plugin/role-workflow/shared/presets/": "presets",
+    "plugin/role-workflow/shared/presets/profiles.json": "presets",
     "modules/": "equipment",
     "scripts/": "facility",
     "$PASEO_HOME/role-workflow/rules/": "facility-generated",

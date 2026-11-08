@@ -183,6 +183,7 @@ test("public distribution leaves phone notifications off until configured", asyn
   t.after(() => rm(home, { recursive: true, force: true }));
   await writeFile(path.join(home, "push-tokens.json"), JSON.stringify({ subscriptions: [{ token: "fixture", expiresAt: "2030-01-01" }] }));
   const configPath = path.join(home, "config.json");
+  await writeFile(configPath, "{}"); // Explicit empty config wins over any older fallback.
   const notifier = createNotifier({home, configPath});
   assert.equal(await notifier.activeCount(), 0);
   await writeFile(configPath, JSON.stringify({phoneNotifications:true, phoneNotificationEndpoint:"https://example.invalid/push"}));

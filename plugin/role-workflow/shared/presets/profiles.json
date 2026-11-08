@@ -1,7 +1,6 @@
 {
   "version": 1,
-  "role": "executor",
-  "description": "사용자가 계정에서 사용할 수 있는 프로필을 확인한 뒤 추가하는 권장 틀",
+  "description": "계정에서 사용할 수 있는 모델을 확인한 뒤 추가하는 권장 프로필 목록",
   "profiles": [
     {
       "provider": "claude",

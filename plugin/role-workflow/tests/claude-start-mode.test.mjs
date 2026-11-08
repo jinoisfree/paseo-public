@@ -1,3 +1,4 @@
+import { isolateOwnerHome, configureFixture } from "./owner-fixture.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -15,6 +16,7 @@ async function fixture(t, project) {
     );
   const previous = process.env.PASEO_ROLE_WORKFLOW_STATE_DIR;
   process.env.PASEO_ROLE_WORKFLOW_STATE_DIR = dir;
+  isolateOwnerHome(t, dir);
   const hooks = new Map(),
     events = new Map(),
     rpcs = new Map(),
@@ -35,22 +37,24 @@ async function fixture(t, project) {
   const context = {
     paseo: {
       providers: {
+        listAvailable:async()=>({providers:[{provider:"claude",available:true}]}),
         listModes: async (...args) => {
           calls.push(structuredClone(args));
           return { modes: [{ id: "bypassPermissions" }, { id: "acceptEdits" }] };
         },
-        listModels: async () => ({ models: [] }),
+        listModels: async () => ({ models: [{id:"fixture"}] }),
       },
     },
   };
   return {
     dir,
+    currentSettings: async()=> (await rpcs.get("workflow.status")({},context)).settings,
     context,
     hooks,
     events,
     calls,
     configure: (settings) =>
-      rpcs.get("workflow.configure")(settingsSchema.parse(settings), context),
+      configureFixture(rpcs, context, settingsSchema.parse(settings)),
     create: (config = {}, env = {}) =>
       hooks.get("agent.create.before")(
         { request: { config: { provider: "claude", cwd: dir, ...config }, env } },
@@ -143,7 +147,8 @@ for (const provider of ["claude", "codex"])
         } else assert.doesNotMatch(result.config.systemPrompt,/질문 도구로 진행 방식을 단독 질문/);
         const saved = await f.enroll(result);
         assert.equal(saved.workflows[0].mode, askMode ? "undecided" : mode);
-        assert.equal(saved.settings.askMode, askMode);
+        // C4: state.settings is a frozen rollback snapshot, not the effective setting source.
+        assert.equal((await f.currentSettings()).askMode, askMode);
         assert.deepEqual(saved.projects[f.dir], project);
       });
 
@@ -165,7 +170,7 @@ for (const [name, lookup] of [
   ["returned error", async () => ({ error: "offline", modes: [{ id: "bypassPermissions" }] })],
   [
     "exception",
-    async () => {
+    async (t) => {
       throw new Error("offline");
     },
   ],
