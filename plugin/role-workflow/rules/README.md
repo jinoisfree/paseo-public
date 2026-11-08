@@ -8,7 +8,8 @@
 
 | 현재 단계 | 추가로 읽을 상세 |
 | --- | --- |
-| 기획·설계 | `10-planning.md` |
+| 기획·설계 | `10-planning.md`, `15-design-guide.md` |
+| 브레인스토밍 | `15-design-guide.md` 5절 |
 | 구현·자체 시험 | `20-implementation.md` |
 | 최종 검토 | `30-verification.md`와 관련 구현 기준 |
 | 역할 분리 인계·상태 처리 | `40-paseo-role-workflow.md` 관련 절 |

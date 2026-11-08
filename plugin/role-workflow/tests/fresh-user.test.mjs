@@ -203,7 +203,7 @@ async function assertRules(prompt, home) {
   const readme = JSON.parse(/규칙 원본: ("[^\n]+")\./.exec(guide)[1]);
   const directory = path.join(home, "role-workflow", "rules", RULES_VERSION);
   assert.equal(readme, path.join(directory, "README.md"));
-  assert.equal(Object.keys(RULES).length, 7);
+  assert.equal(Object.keys(RULES).length, 8);
   assert.deepEqual((await readdir(directory)).sort(), Object.keys(RULES).sort());
   for (const [name, body] of Object.entries(RULES)) {
     assert.equal(await readFile(path.join(directory, name), "utf8"), body);
