@@ -34,6 +34,8 @@ export interface RepoProbe {
   identity?(cwd: string): Promise<RepoIdentity | null>;
   /** Read the base branch and its tracking tip without fetching; unavailable refs fail closed. */
   branchTips?(cwd: string, branch: string, remote: string): Promise<{ head: string; tracking: string } | null>;
+  /** Actual push destination tip, without fetching: empty string is a new branch, null unreadable. */
+  remoteTip?(target: PushTarget): Promise<string | null>;
   /** null distinguishes an unreadable commit/graph from a known non-ancestor. */
   isAncestor?(cwd: string, ancestor: string, commit: string): Promise<boolean | null>;
   /** Extra read-only hazards before deleting a worktree directory. null means unreadable. */
@@ -107,13 +109,12 @@ export function createRepoProbe(run: typeof git = git): RepoProbe {
       return null;
     }
   }
-  async function pushedTarget(target: PushTarget): Promise<boolean | null> {
+  async function remoteTip(target: PushTarget): Promise<string | null> {
     try {
       const ref = target.branch.startsWith("refs/heads/")
         ? target.branch
         : `refs/heads/${target.branch}`;
       await run(target.repository, ["check-ref-format", ref]);
-      await run(target.repository, ["cat-file", "-e", `${target.commit}^{commit}`]);
       // A push goes to the remote's push URL, which can differ from the fetch URL (a fork).
       const urls = (
         await run(target.repository, ["remote", "get-url", "--push", "--all", target.remote])
@@ -122,12 +123,27 @@ export function createRepoProbe(run: typeof git = git): RepoProbe {
         .filter(Boolean);
       if (urls.length !== 1) return null;
       // ls-remote matches patterns as ref-name suffixes; only the exact branch counts.
-      const rows = (await run(target.repository, ["ls-remote", "--exit-code", "--", urls[0], ref]))
+      let output: string;
+      try {
+        output = await run(target.repository, ["ls-remote", "--exit-code", "--", urls[0], ref]);
+      } catch (error) {
+        return (error as { code?: unknown }).code === 2 ? "" : null;
+      }
+      const rows = output
         .split(/\r?\n/)
         .map((line) => line.split(/\s+/))
         .filter((row) => row[1] === ref);
       if (rows.length !== 1 || !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(rows[0][0])) return null;
-      const advertised = rows[0][0];
+      return rows[0][0];
+    } catch {
+      return null;
+    }
+  }
+  async function pushedTarget(target: PushTarget): Promise<boolean | null> {
+    try {
+      await run(target.repository, ["cat-file", "-e", `${target.commit}^{commit}`]);
+      const advertised = await remoteTip(target);
+      if (!advertised) return null;
       if (advertised === target.commit) return true;
       await run(target.repository, ["cat-file", "-e", `${advertised}^{commit}`]);
       try {
@@ -304,6 +320,7 @@ export function createRepoProbe(run: typeof git = git): RepoProbe {
     repository,
     pushTarget,
     pushedTarget,
+    remoteTip,
     async snapshot(cwd) {
       const single = await singleSnapshot(cwd);
       if (single) return single;

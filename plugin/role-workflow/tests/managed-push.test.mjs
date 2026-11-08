@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { ManagedPushRunner } from "../server/managed-push.ts";
+import { ManagedPushRunner, REMOTE_ADVANCED_ERROR } from "../server/managed-push.ts";
 
 const execute = promisify(execFile);
 async function git(cwd, args) {
@@ -63,6 +63,32 @@ const recordPath = (f, id) => path.join(f.records, id, "record.json");
 async function replaceRecord(f, record) {
   await writeFile(recordPath(f, record.id), `${JSON.stringify(record)}\n`);
 }
+
+for (const [stdout, stderr, behind] of [
+  ["! x:refs/heads/main [rejected] (non-fast-forward)\n", "", true],
+  ["", " ! [rejected] main -> main (fetch first)\n", true],
+  ["", "fatal: Authentication failed", false],
+  ["", " ! [remote rejected] main -> main (hook declined)", false],
+  ["", "hint: fetch first", false],
+]) test(`AC-303: push error classification ${JSON.stringify(stdout || stderr)}`, async t => {
+  const f = await fixture(t);
+  const runner = new ManagedPushRunner(f.records, async (cwd, args) => {
+    if (args.includes("push")) {
+      f.calls.push(structuredClone({ cwd, args }));
+      return { stdout, stderr, exitCode: 1 };
+    }
+    return f.driver(cwd, args);
+  });
+  const prepared = await runner.prepare("flow", 0, [f.target]);
+  const result = await runner.execute(prepared.id);
+  assert.equal(result.state, "failed");
+  assert.equal(result.error, behind ? REMOTE_ADVANCED_ERROR : "Git 푸시가 종료 코드 1로 실패했습니다.");
+  assert.equal(result.targets[0].error, result.error);
+  await runner.recheck(prepared.id);
+  await runner.execute(prepared.id);
+  assert.equal(pushes(f.calls).length, 1);
+  assert.ok(f.calls.every(call => !call.args.some(arg => ["fetch", "merge", "rebase", "--force"].includes(arg))));
+});
 
 test("prepare validates canonical immutable targets without pushing or changing Git", async (t) => {
   const f = await fixture(t);
@@ -227,13 +253,16 @@ async function rejectedFixture(t, diverged, offline = false) {
   return { ...f, result, remoteHead };
 }
 
-test("a rejected divergent commit stays failed after execution and read-only recheck", async (t) => {
+test("AC-303: a rejected divergent commit keeps the base-advanced reason after execution and read-only recheck", async (t) => {
   const f = await rejectedFixture(t, true);
   assert.equal(f.result.state, "failed");
+  assert.equal(f.result.error, REMOTE_ADVANCED_ERROR);
+  assert.equal(f.result.targets[0].error, REMOTE_ADVANCED_ERROR);
   assert.equal(f.result.targets[0].verified, false);
   assert.equal(f.result.targets[0].alreadyIncluded, false);
   const checkedAgain = await f.runner.recheck(f.result.id);
   assert.equal(checkedAgain.state, "failed");
+  assert.equal(checkedAgain.error, REMOTE_ADVANCED_ERROR);
   assert.equal(checkedAgain.targets[0].alreadyIncluded, false);
   assert.equal(pushes(f.calls).length, 1);
   assert.equal(await checked(f.remote, ["rev-parse", "refs/heads/main"]), f.remoteHead);

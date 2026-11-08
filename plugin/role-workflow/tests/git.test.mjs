@@ -8,6 +8,25 @@ import { createRepoProbe } from "../server/git.ts";
 
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, stdio: "pipe" }).toString();
 
+test("AC-302: remote tip reuses the exact push URL and distinguishes absent branches from query failures", async () => {
+  const target = { repository: "/repo", remote: "origin", branch: "main", commit: "a".repeat(40) };
+  const tip = "b".repeat(40), ref = "refs/heads/main", url = "ssh://git@example.invalid/push.git";
+  for (const variant of ["tip", "absent", "offline", "wrong-ref", "bad-hash", "multiple-urls"]) {
+    const calls = [];
+    const probe = createRepoProbe(async (cwd, args) => {
+      calls.push(structuredClone({ cwd, args }));
+      if (args[0] === "check-ref-format") return "";
+      if (args[0] === "remote") return variant === "multiple-urls" ? `${url}\n${url}/other\n` : `${url}\n`;
+      assert.deepEqual(args, ["ls-remote", "--exit-code", "--", url, ref]);
+      if (variant === "absent" || variant === "offline") throw Object.assign(new Error(variant), { code: variant === "absent" ? 2 : 128 });
+      return `${variant === "bad-hash" ? "invalid" : tip}\t${variant === "wrong-ref" ? `refs/heads/nested/${ref}` : ref}\n`;
+    });
+    assert.equal(await probe.remoteTip(target), variant === "tip" ? tip : variant === "absent" ? "" : null, variant);
+    assert.ok(calls.every(call => call.cwd === "/repo" && ["check-ref-format", "remote", "ls-remote"].includes(call.args[0])));
+    assert.equal(calls.filter(call => call.args[0] === "ls-remote").length, variant === "multiple-urls" ? 0 : 1);
+  }
+});
+
 test("probe reads the baseline, what changed since it, and whether commits are pushed", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "role-git-"));
   t.after(() => rm(root, { recursive: true, force: true }));

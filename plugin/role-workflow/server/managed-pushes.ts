@@ -3,6 +3,7 @@ import type { ManagedPush } from "../shared/managed-push";
 import type { Snapshot, Workflow, WorkflowPort } from "./engine";
 import type { RepoProbe } from "./git";
 import type { ManagedPushRunner } from "./managed-push";
+import { REMOTE_ADVANCED_ERROR, REMOTE_ADVANCED_NOTICE } from "./managed-push";
 import { pushReviewKey } from "./push-review";
 import { checkWorktreeBase, integrateWorktree } from "./worktree";
 
@@ -94,18 +95,24 @@ export class ManagedPushes {
     if (!base.ok) {
       this.host.touch(w, base.detail);
       if (w.managedPush?.state === "prepared") w.managedPush = null;
-      const key = [...new Set(w.pushTargets.map(target => target.commit))].sort().join(":");
-      const notify = base.needsMerge && w.plan && !w.worktreeMergeNotices.includes(key);
-      if (notify) w.worktreeMergeNotices.push(key);
-      await this.host.save();
-      if (notify)
-        await this.host.port().send(
-          w.plan!.id,
-          `작업 ID: ${w.id}\n${base.detail}\n구현 담당에게 최신 기준 브랜치를 worktree 브랜치에 merge하고 충돌을 정리한 뒤 전체 시험을 다시 실행하도록 보완 plan을 지시하세요. 결과를 재검증한 커밋으로 pushTargets를 갱신하세요. 두 작업의 의도 판단이 필요한 충돌은 사용자에게 input으로 묻고, rebase·force로 이력을 다시 쓰지 마세요. 플러그인은 merge를 실행하지 않습니다.`,
-          `role-workflow-worktree-merge:${w.id}:${key}`,
-        ).catch(() => {});
+      if (base.needsMerge) await this.notifyMerge(w, targets, base.detail);
+      else await this.host.save();
       throw new Error(base.detail);
     }
+  }
+  private async notifyMerge(w: Workflow, targets: Workflow["pushTargets"], detail: string) {
+    const key = [...new Set(targets.map(target => target.commit))].sort().join(":");
+    const notify = w.plan && !w.worktreeMergeNotices.includes(key);
+    if (notify) w.worktreeMergeNotices.push(key);
+    await this.host.save();
+    if (!notify) return;
+    const approval = detail === REMOTE_ADVANCED_ERROR
+      ? "푸시 거절 뒤 합치기는 사용자 결정을 먼저 받아야 합니다. 승인되면 다음 절차를 진행하세요.\n" : "";
+    const instruction = w.isolation === "worktree" && w.mode === "federated"
+      ? `${detail}\n${approval}구현 담당에게 최신 기준 브랜치를 worktree 브랜치에 merge하고 충돌을 정리한 뒤 전체 시험을 다시 실행하도록 보완 plan을 지시하세요. 결과를 재검증한 커밋으로 pushTargets를 갱신하세요. 두 작업의 의도 판단이 필요한 충돌은 사용자에게 input으로 묻고, rebase·force로 이력을 다시 쓰지 마세요. 플러그인은 merge를 실행하지 않습니다.`
+      : REMOTE_ADVANCED_NOTICE;
+    await this.host.port().send(w.plan!.id, `작업 ID: ${w.id}\n${instruction}`,
+      `role-workflow-worktree-merge:${w.id}:${key}`).catch(() => {});
   }
   async managedRequest(id: string, requestId: string) {
     const w = await this.pushWorkflow(id);
@@ -196,7 +203,9 @@ export class ManagedPushes {
           unknown: "실행 결과 확인이 필요합니다. 자동으로 다시 푸시하지 않습니다.",
         })[record.state];
     }
-    await this.host.save();
+    if (record.state === "failed" && record.targets.some(target => target.error === REMOTE_ADVANCED_ERROR && target.verified !== true))
+      await this.notifyMerge(w, record.targets, REMOTE_ADVANCED_ERROR);
+    else await this.host.save();
     await this.host.renameWorkspaces(w, (await this.host.settings()).titleMarker);
   }
   async managedCompleted(w: Workflow, record: ManagedPush) {

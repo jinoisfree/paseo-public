@@ -9,6 +9,7 @@ import { WorkflowEngine } from "../server/engine.ts";
 import { createRepoProbe } from "../server/git.ts";
 import { settingsSchema } from "../shared/contracts.ts";
 import { checkWorktreeBase, integrateWorktree, worktreeContext } from "../server/worktree.ts";
+import { ManagedPushRunner, REMOTE_ADVANCED_ERROR, REMOTE_ADVANCED_NOTICE } from "../server/managed-push.ts";
 
 const run = promisify(execFile);
 const git = (cwd, ...args) =>
@@ -17,7 +18,7 @@ const block = (status, extra = {}) =>
   `<paseo-workflow>${JSON.stringify({ status, summary: status, next: "구현 지시", handoff: "인계", checks: [], ...extra })}</paseo-workflow>`;
 const ALL = [{ id: "high", label: "High", isDefault: true }];
 
-async function fixture(t, { placement = "worktree", overlap = true, foreign = false, unavailable = "" } = {}) {
+async function fixture(t, { placement = "worktree", overlap = true, foreign = false, unavailable = "", driver } = {}) {
   const dir = await realpath(await mkdtemp(path.join(tmpdir(), "worktree-engine-")));
   const repo = path.join(dir, "repo");
   await run("git", ["init", "-q", "-b", "main", repo]);
@@ -69,7 +70,9 @@ async function fixture(t, { placement = "worktree", overlap = true, foreign = fa
     const identity = probe.identity;
     probe.identity = async (cwd) => ({ ...await identity(cwd), root: dir });
   }
-  let engine = new WorkflowEngine(file, port, undefined, probe);
+  const makeEngine = () => new WorkflowEngine(file, port, undefined, probe, undefined,
+    driver ? new ManagedPushRunner(path.join(dir, "pushes"), driver) : undefined);
+  let engine = makeEngine();
   t.after(async () => {
     await engine.close();
     await rm(dir, { recursive: true, force: true });
@@ -108,7 +111,7 @@ async function fixture(t, { placement = "worktree", overlap = true, foreign = fa
     return engine.selectExecutor(id, { provider: "codex", model: "builder", thinking: "high" });
   };
   return { dir, repo, other, base, id, file, port, get engine() { return engine; }, probe, agents, blocker, addBlocker, cards, created, sent, worktrees, state, finish, start,
-    restart: async () => { await engine.close(); engine = new WorkflowEngine(file, port, undefined, probe); await engine.tick(); },
+    restart: async () => { await engine.close(); engine = makeEngine(); await engine.tick(); },
   };
 }
 
@@ -415,7 +418,10 @@ test("AC-10: running writer protection and conflict warnings still block shared 
 async function readyWorktreePush(f) {
   await f.start();
   const w = f.engine.database.workflows[0];
-  await git(f.repo, "remote", "add", "origin", f.other);
+  const remote = path.join(f.dir, "remote.git");
+  await git(f.dir, "init", "--bare", "-q", remote);
+  await git(remote, "fetch", "-q", f.repo, `${f.base}:refs/heads/main`);
+  await git(f.repo, "remote", "add", "origin", remote);
   await git(f.repo, "update-ref", "refs/remotes/origin/main", f.base);
   await git(f.repo, "config", "branch.main.remote", "origin");
   await git(f.repo, "config", "branch.main.merge", "refs/heads/main");
@@ -432,6 +438,98 @@ async function readyWorktreePush(f) {
   f.sent.length = 0;
   return { w, commit };
 }
+
+for (const stage of ["prepare", "execute"])
+test(`AC-302: stale tracking cannot hide another clone's remote advance at ${stage}`, async t => {
+  const f = await fixture(t);
+  let { w, commit } = await readyWorktreePush(f);
+  const prepared = stage === "execute" ? await f.engine.prepareManagedPush(f.id) : null;
+  const remote = await git(f.repo, "remote", "get-url", "origin");
+  const clone = path.join(f.dir, "other-clone");
+  await git(f.dir, "clone", "-q", "--branch", "main", remote, clone);
+  await git(clone, "commit", "-q", "--allow-empty", "-m", "another writer advances the remote");
+  const ahead = await git(clone, "rev-parse", "HEAD");
+  // Only this disposable fixture writes its own local bare remote, never a user remote.
+  await git(clone, "push", "-q", "origin", `${ahead}:refs/heads/main`);
+  assert.equal(await git(f.repo, "rev-parse", "refs/remotes/origin/main"), f.base);
+  assert.equal(await f.probe.commit(f.repo, ahead), null, "the remote object is absent locally");
+  const refs = await git(f.repo, "show-ref");
+  const files = await git(w.worktree.path, "status", "--porcelain");
+  if (prepared) await assert.rejects(f.engine.executeManagedPush(f.id, prepared.id, true), /원격 기준이 앞서/);
+  else await assert.rejects(f.engine.prepareManagedPush(f.id), /원격 기준이 앞서/);
+  assert.equal((await f.state()).managedPush, null);
+  assert.equal(f.engine.managedExecutions.size, 0);
+  assert.equal(f.sent.length, 1);
+  assert.match(f.sent[0].prompt, /보완 plan/);
+  assert.equal(await git(f.repo, "show-ref"), refs);
+  assert.equal(await git(w.worktree.path, "status", "--porcelain"), files);
+  assert.equal(await git(remote, "rev-parse", "refs/heads/main"), ahead);
+  f.agents.get("A").status = "idle";
+  await f.restart(); w = f.engine.database.workflows[0];
+  await assert.rejects(f.engine.prepareManagedPush(f.id), /원격 기준이 앞서/);
+  assert.equal(f.sent.length, 1, "one notice per commit set survives restart and both gates");
+  // The fixture represents the implementer's approved fetch/merge work, never plugin automation.
+  await git(f.repo, "fetch", "-q", "--no-write-fetch-head", remote, ahead);
+  assert.equal(await git(f.repo, "rev-parse", "refs/remotes/origin/main"), f.base);
+  await assert.rejects(f.engine.prepareManagedPush(f.id), /원격 기준이 앞서/);
+  assert.equal(f.sent.length, 1, "a known but unincluded remote tip is also blocked");
+  await git(w.worktree.path, "merge", "--no-edit", ahead);
+  w.pushTargets[0].commit = await git(w.worktree.path, "rev-parse", "HEAD");
+  assert.notEqual(w.pushTargets[0].commit, commit);
+  assert.equal((await f.engine.prepareManagedPush(f.id)).state, "prepared");
+  assert.equal(await git(remote, "rev-parse", "refs/heads/main"), ahead, "preparation does not push");
+});
+
+test("AC-302: a new remote branch passes while an unavailable push destination blocks without a notice", async t => {
+  const f = await fixture(t);
+  const { w } = await readyWorktreePush(f);
+  w.pushTargets[0].branch = "new-branch";
+  assert.equal((await f.engine.prepareManagedPush(f.id)).state, "prepared");
+  await git(f.repo, "remote", "set-url", "--push", "origin", path.join(f.dir, "missing.git"));
+  await assert.rejects(f.engine.prepareManagedPush(f.id), /기준 브랜치를 확인하지 못했습니다/);
+  assert.equal((await f.state()).managedPush, null);
+  assert.equal(f.sent.length, 0);
+  assert.deepEqual((await f.state()).worktreeMergeNotices, []);
+});
+
+for (const isolation of ["worktree", "shared"])
+test(`AC-303: ${isolation} rejected push persists the reason and notifies once without automatic retry or merge`, async t => {
+  const calls = [];
+  const driver = async (cwd, args) => {
+    calls.push(structuredClone({ cwd, args }));
+    if (args.includes("push")) return { stdout: "! x:refs/heads/main [rejected] (fetch first)\n", stderr: "", exitCode: 1 };
+    try { return { ...await run("git", args, { cwd }), exitCode: 0 }; }
+    catch (error) { return { stdout: error.stdout ?? "", stderr: error.stderr ?? "", exitCode: error.code ?? null }; }
+  };
+  const f = await fixture(t, { driver });
+  let { w } = await readyWorktreePush(f);
+  w.isolation = isolation;
+  const prepared = await f.engine.prepareManagedPush(f.id);
+  const result = await f.engine.executeManagedPush(f.id, prepared.id, true);
+  assert.equal(result.state, "failed");
+  assert.equal(result.error, REMOTE_ADVANCED_ERROR);
+  assert.equal(result.targets[0].error, REMOTE_ADVANCED_ERROR);
+  assert.equal((await f.state()).artifactNotice, REMOTE_ADVANCED_ERROR);
+  assert.equal(f.sent.length, 1);
+  assert.equal(f.sent[0].id, "A");
+  if (isolation === "worktree") {
+    assert.match(f.sent[0].prompt, /merge하고 충돌/);
+    assert.match(f.sent[0].prompt, /푸시 거절 뒤 합치기는 사용자 결정을 먼저 받아야/);
+  }
+  else assert.equal(f.sent[0].prompt, `작업 ID: ${f.id}\n${REMOTE_ADVANCED_NOTICE}`);
+  f.agents.get("A").status = "idle";
+  await f.engine.recheckManagedPush(f.id, result.id);
+  await f.restart(); w = f.engine.database.workflows[0];
+  await f.engine.recheckManagedPush(f.id, result.id);
+  assert.equal(f.sent.length, 1);
+  assert.equal(calls.filter(call => call.args.includes("push")).length, 1);
+  assert.ok(calls.every(call => !call.args.some(arg => ["fetch", "merge", "rebase", "--force", "--force-with-lease"].includes(arg))));
+  const next = await git(w.worktree.path, "commit-tree", `${w.pushTargets[0].commit}^{tree}`, "-p", w.pushTargets[0].commit, "-m", "new reviewed target");
+  w.pushTargets[0].commit = next;
+  const again = await f.engine.prepareManagedPush(f.id);
+  await f.engine.executeManagedPush(f.id, again.id, true);
+  assert.equal(f.sent.length, 2, "a newly approved commit set receives one new notice");
+});
 
 for (const advanced of ["local", "tracking"])
 test(`AC-12: ${advanced} base advancement blocks approval without changing Git and notifies once per commit`, async t => {
@@ -468,7 +566,7 @@ test(`AC-12: ${advanced} base advancement blocks approval without changing Git a
   assert.deepEqual(await refs(), before);
 });
 
-test("AC-13: merging the advanced base opens approval and lets verified integration fast-forward", async t => {
+test("AC-13/AC-301: merging the advanced base opens approval and lets verified integration fast-forward", async t => {
   const f = await fixture(t);
   const { w } = await readyWorktreePush(f);
   await writeFile(path.join(f.repo, "base.txt"), "base change\n");
@@ -564,9 +662,11 @@ test("AC-12/AC-14: base inspection uses only read-only Git commands and fails cl
   assert.equal((await checkWorktreeBase(w, probe, w.pushTargets)).ok, true);
   assert.ok(calls.some(args => args[0] === "merge-base"));
   for (const args of calls) {
-    assert.ok(["rev-parse", "branch", "check-ref-format", "for-each-ref", "cat-file", "merge-base"].includes(args[0]), args.join(" "));
+    assert.ok(["rev-parse", "branch", "check-ref-format", "for-each-ref", "cat-file", "merge-base", "remote", "ls-remote"].includes(args[0]), args.join(" "));
     if (args[0] === "branch") assert.deepEqual(args, ["branch", "--show-current"]);
     if (args[0] === "merge-base") assert.equal(args[1], "--is-ancestor");
+    if (args[0] === "remote") assert.deepEqual(args.slice(0, 4), ["remote", "get-url", "--push", "--all"]);
+    if (args[0] === "ls-remote") assert.deepEqual(args.slice(0, 3), ["ls-remote", "--exit-code", "--"]);
   }
   const broken = createRepoProbe(async (cwd, args) => {
     if (args[0] === "merge-base") throw Object.assign(new Error("read failure"), { code: 128 });

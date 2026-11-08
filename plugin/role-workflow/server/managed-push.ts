@@ -31,6 +31,8 @@ const now = () => new Date().toISOString();
 const unavailable = "푸시 기록을 읽거나 저장하지 못했습니다. 다시 푸시하지 말고 기록을 확인하세요.";
 
 const OUTPUT_LIMIT = 1024 * 1024;
+export const REMOTE_ADVANCED_NOTICE = "원격이 앞서 있어 푸시가 거절되었습니다. 최신 원격을 합친 새 커밋을 검증한 뒤 다시 승인받으세요.";
+export const REMOTE_ADVANCED_ERROR = `기준 앞섬: ${REMOTE_ADVANCED_NOTICE}`;
 
 // No stdin and its own process group: a credential or host-key prompt cannot wait on input,
 // and a timeout stops ssh and remote helpers too, so no push can land after it is recorded.
@@ -501,6 +503,8 @@ export class ManagedPushRunner {
         result.exitCode === null
           ? "Git 푸시의 종료 결과를 확인하지 못했습니다."
           : `Git 푸시가 종료 코드 ${result.exitCode}로 실패했습니다.`;
+      if (result.exitCode !== null && /\[rejected\][^\r\n]*(?:non-fast-forward|fetch first)/.test(`${result.stdout}\n${result.stderr}`))
+        target.error = REMOTE_ADVANCED_ERROR;
     }
     record.error = target.error;
     // The exit status is durable before logging, remote checks or the next push.
@@ -608,7 +612,9 @@ export class ManagedPushRunner {
     else if (record.targets.some((target) => target.exitCode !== 0 && target.verified !== true))
       record.state = "failed";
     record.error =
-      record.state === "pushed" ? "" : "승인한 커밋의 원격 반영을 아직 확인하지 못했습니다.";
+      record.state === "pushed" ? "" :
+      record.state === "failed" && record.targets.some(target => target.error === REMOTE_ADVANCED_ERROR && target.verified !== true)
+        ? REMOTE_ADVANCED_ERROR : "승인한 커밋의 원격 반영을 아직 확인하지 못했습니다.";
     try {
       await this.save(record);
     } catch {

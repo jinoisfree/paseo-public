@@ -253,7 +253,8 @@ try {
     });
   });
 
-  await step("an agent's shell cannot git push; nothing reaches the remote", async () => {
+  await step("an agent's shell cannot git push; remote refs stay unchanged", async () => {
+    const before = (await run("git", ["ls-remote", remote], { env })).stdout;
     writeFileSync(control, JSON.stringify({ mode: "tool", command: "git push origin HEAD:main", text: "push attempted" }));
     try {
       await runAgent("일반개발로 진행해줘. 원격에 푸시해줘.");
@@ -264,7 +265,7 @@ try {
     assert(calls.some((call) => call.callsTool), "the fake model never asked for the push");
     const results = calls.filter((call) => call.toolResult).map((call) => call.toolResult).join("\n");
     assert(/role-workflow-approval-required|role-workflow: 에이전트는 git push/.test(results), `push was not blocked: ${results.slice(0, 400)}`);
-    assert((await run("git", ["ls-remote", remote])).stdout === "", "a commit reached the remote");
+    assert((await run("git", ["ls-remote", remote], { env })).stdout === before, "the agent changed remote refs");
   });
 
   let worktreeFlow;
@@ -336,27 +337,27 @@ try {
     }
   });
 
-  await step("AC-12/AC-13: base advancement blocks approval until the executor merges it", async () => {
+  const fixtureGit = async (cwd, args) => {
+    const result = await run("git", args, { cwd, env });
+    assert(result.code === 0, result.stderr);
+    return result.stdout.trim();
+  };
+  const reportTarget = async (flow, commit) => {
+    const targets = [{ repository: flow.worktree.path, remote: "origin", branch: await fixtureGit(work, ["branch", "--show-current"]), commit }];
+    writeFileSync(control, JSON.stringify({ mode: "text", text: `푸시대상: ${JSON.stringify(targets)}\n${workflowBlock("note", "대상 기록")}` }));
+    const result = await cli("send", flow.plan.id, "이 검증 대상 커밋을 기록해줘.");
+    assert(result.code === 0, result.stderr);
+    await waitFor("reported push target", async () => state().workflows.find(w => w.id === flow.id && w.pushTargets[0]?.commit === commit && !w.pending));
+    await rpc("workflow.progress", { number: flow.number, project: work, progress: "done" });
+  };
+  await step("AC-12/AC-13/AC-301: base advancement blocks approval until the executor merges it", async () => {
     const flow = worktreeFlow;
     assert(flow?.worktree, "worktree scenario did not finish");
-    const fixtureGit = async (cwd, args) => {
-      const result = await run("git", args, { cwd });
-      assert(result.code === 0, result.stderr);
-      return result.stdout.trim();
-    };
-    const reportTarget = async commit => {
-      const targets = [{ repository: flow.worktree.path, remote: "origin", branch: await fixtureGit(work, ["branch", "--show-current"]), commit }];
-      writeFileSync(control, JSON.stringify({ mode: "text", text: `푸시대상: ${JSON.stringify(targets)}\n${workflowBlock("note", "대상 기록")}` }));
-      const result = await cli("send", flow.plan.id, "이 검증 대상 커밋을 기록해줘.");
-      assert(result.code === 0, result.stderr);
-      await waitFor("reported push target", async () => state().workflows.find(w => w.id === flow.id && w.pushTargets[0]?.commit === commit && !w.pending));
-      await rpc("workflow.progress", { number: flow.number, project: work, progress: "done" });
-    };
     try {
       const candidate = await fixtureGit(flow.worktree.path, ["rev-parse", "HEAD"]);
       const baseBranch = await fixtureGit(work, ["branch", "--show-current"]);
       await fixtureGit(work, ["update-ref", `refs/remotes/origin/${baseBranch}`, candidate]);
-      await reportTarget(candidate);
+      await reportTarget(flow, candidate);
       const advanced = await run("git", ["-c", "user.email=e2e@example.invalid", "-c", "user.name=e2e", "commit", "-q", "--allow-empty", "-m", "base advances before approval"], { cwd: work });
       assert(advanced.code === 0, advanced.stderr);
       const head = await fixtureGit(work, ["rev-parse", "HEAD"]);
@@ -373,10 +374,59 @@ try {
       // The harness represents the executor performing its approved merge plan; the plugin never merges.
       const merged = await run("git", ["merge", "--ff-only", "--no-edit", head], { cwd: flow.worktree.path });
       assert(merged.code === 0, merged.stderr);
-      await reportTarget(await fixtureGit(flow.worktree.path, ["rev-parse", "HEAD"]));
+      await reportTarget(flow, await fixtureGit(flow.worktree.path, ["rev-parse", "HEAD"]));
       const prepared = await rpc("workflow.push-prepare", { id: flow.id });
       assert(prepared.state === "prepared" && prepared.targets[0].commit === head, "merged target was not prepared");
       assert((await run("git", ["ls-remote", remote])).stdout === "", "approval preparation wrote to the remote");
+    } finally {
+      writeFileSync(control, JSON.stringify({ mode: "text", text: "2" }));
+    }
+  });
+
+  await step("AC-302/AC-304: default settings block approval and execution when another clone advances only the bare remote", async () => {
+    const flow = state().workflows.find(w => w.id === worktreeFlow?.id);
+    assert(flow?.worktree, "worktree scenario did not finish");
+    const { settings } = await rpc("workflow.status", {});
+    assert(JSON.stringify(settings) === JSON.stringify(defaultSettings), "remote advancement must run with all default settings");
+    const branch = await fixtureGit(work, ["branch", "--show-current"]);
+    const tracking = await fixtureGit(work, ["rev-parse", `refs/remotes/origin/${branch}`]);
+    const candidate = flow.pushTargets[0].commit;
+    const oldApproval = await rpc("workflow.push-prepare", { id: flow.id });
+    const clone = join(root, "another-clone");
+    await fixtureGit(root, ["clone", "-q", "--no-hardlinks", "--branch", branch, work, clone]);
+    await fixtureGit(clone, ["remote", "set-url", "origin", remote]);
+    await fixtureGit(clone, ["-c", "user.email=e2e@example.invalid", "-c", "user.name=e2e", "commit", "-q", "--allow-empty", "-m", "another clone advances the remote"]);
+    const ahead = await fixtureGit(clone, ["rev-parse", "HEAD"]);
+    // This clone belongs to the isolated fixture and can write only its temporary local bare remote.
+    assert(remote.startsWith(`${root}/`), "test remote must be inside the disposable fixture");
+    await fixtureGit(clone, ["push", "-q", "origin", `${ahead}:refs/heads/${branch}`]);
+    const before = await fixtureGit(work, ["show-ref"]);
+    const notices = flow.worktreeMergeNotices.length;
+    let executionBlocked = false;
+    try { await rpc("workflow.push-execute", { id: flow.id, requestId: oldApproval.id, approved: true }); }
+    catch (error) { executionBlocked = /원격 기준이 앞서/.test(String(error)); }
+    assert(executionBlocked, "execution ignored the actual advanced remote tip");
+    await waitFor("planner finishes remote merge notice", async () => {
+      const current = state().workflows.find(w => w.id === flow.id);
+      const { agent } = await createPaseoApi(client).agents.ref(flow.plan.id).refresh();
+      return current?.worktreeMergeNotices.length === notices + 1 && !current.managedPush && agent.status === "idle" && !agent.activeTurn;
+    });
+    let preparationBlocked = false;
+    try { await rpc("workflow.push-prepare", { id: flow.id }); }
+    catch (error) { preparationBlocked = /원격 기준이 앞서/.test(String(error)); }
+    assert(preparationBlocked, "preparation ignored the actual advanced remote tip");
+    assert(state().workflows.find(w => w.id === flow.id).worktreeMergeNotices.length === notices + 1, "merge notice was repeated");
+    assert(await fixtureGit(work, ["show-ref"]) === before, "plugin fetched or changed refs");
+    assert(await fixtureGit(work, ["rev-parse", `refs/remotes/origin/${branch}`]) === tracking, "tracking ref did not stay stale");
+    assert((await fixtureGit(root, ["ls-remote", remote, `refs/heads/${branch}`])).startsWith(ahead), "plugin changed the remote");
+    try {
+      // Planned executor work in the fixture; the plugin never fetches or merges.
+      await fixtureGit(flow.worktree.path, ["fetch", "-q", "--no-write-fetch-head", remote, ahead]);
+      await fixtureGit(flow.worktree.path, ["merge", "--ff-only", "--no-edit", ahead]);
+      await reportTarget(flow, await fixtureGit(flow.worktree.path, ["rev-parse", "HEAD"]));
+      const prepared = await rpc("workflow.push-prepare", { id: flow.id });
+      assert(prepared.state === "prepared" && prepared.targets[0].commit === ahead, "included actual tip did not pass");
+      writeFileSync(join(root, "remote-advance-observation.json"), JSON.stringify({ allDefaultSettings: true, candidate, remoteTip: ahead, tracking, executionBlocked, preparationBlocked, noticeCount: 1, preparedAfterMerge: prepared.state }, null, 2));
     } finally {
       writeFileSync(control, JSON.stringify({ mode: "text", text: "2" }));
     }
@@ -427,7 +477,8 @@ try {
     assert(codex.some((call) => call.instructions.includes("paseo-work-mode-v4")), "the instructions did not reach the model");
   });
 
-  await step("codex: the agent's shell cannot git push; nothing reaches the remote", async () => {
+  await step("codex: the agent's shell cannot git push; remote refs stay unchanged", async () => {
+    const before = (await run("git", ["ls-remote", remote], { env })).stdout;
     writeFileSync(control, JSON.stringify({ mode: "tool", command: "git push origin HEAD:main", text: "push attempted" }));
     try {
       await runAgent("일반개발로 진행해줘. 원격에 푸시해줘.", "codex");
@@ -439,7 +490,7 @@ try {
     assert(codex.some((call) => call.callsTool), `the fake model found no shell tool: ${JSON.stringify(codex.at(-1)?.tools)}`);
     const results = codex.filter((call) => call.toolResult).map((call) => call.toolResult).join("\n");
     assert(/role-workflow-approval-required|role-workflow: 에이전트는 git push/.test(results), `push was not blocked: ${results.slice(0, 400)}`);
-    assert((await run("git", ["ls-remote", remote])).stdout === "", "a commit reached the remote");
+    assert((await run("git", ["ls-remote", remote], { env })).stdout === before, "the agent changed remote refs");
   });
 
   await step("AC-107/B-1/R-2 [archiveAfterDays=0]: manual archive preserves an unfinished dirty worktree and its planner", async () => {

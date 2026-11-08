@@ -87,12 +87,12 @@ export function worktreeContext(w: Workflow) {
   );
 }
 
-/** Read-only approval gate: both known base tips must already be in every proposed commit. */
+/** Read-only approval gate: local, tracking and actual push-destination tips must be included. */
 export async function checkWorktreeBase(w: Workflow, probe: RepoProbe | null, targets: PushTarget[]) {
   if (w.isolation !== "worktree" || w.mode !== "federated") return { ok: true, detail: "", needsMerge: false };
   const unreadable = { ok: false, needsMerge: false, detail: "기준 브랜치를 확인하지 못했습니다. 저장소와 기준 브랜치를 확인한 뒤 푸시 대상을 다시 준비하세요. 기준 브랜치가 원격에 없거나 추적 브랜치가 없으면 기준 브랜치를 원격에 한 번 푸시하거나 upstream을 설정하세요." };
   try {
-    if (!w.worktree || !probe?.identity || !probe.branchTips || !probe.isAncestor || !targets.length) return unreadable;
+    if (!w.worktree || !probe?.identity || !probe.branchTips || !probe.isAncestor || !probe.remoteTip || !probe.commit || !targets.length) return unreadable;
     const origin = await probe.identity(w.cwd);
     const tree = await probe.identity(w.worktree.path);
     const baseBranch = w.worktree.baseBranch ?? origin?.branch;
@@ -107,6 +107,15 @@ export async function checkWorktreeBase(w: Workflow, probe: RepoProbe | null, ta
         if (included === null) return unreadable;
         if (!included)
           return { ok: false, needsMerge: true, detail: `기준 브랜치 ${baseBranch}가 ${tip.slice(0, 12)}로 앞서 있어 먼저 합쳐야 합니다.` };
+      }
+      const remote = await probe.remoteTip(target);
+      if (remote === null) return unreadable;
+      if (remote) {
+        const needsMerge = { ok: false, needsMerge: true, detail: "원격 기준이 앞서 있어 최신 기준을 가져와 합쳐야 합니다." };
+        if (!await probe.commit(target.repository, remote)) return needsMerge;
+        const included = await probe.isAncestor(target.repository, remote, target.commit);
+        if (included === null) return unreadable;
+        if (!included) return needsMerge;
       }
     }
     return { ok: true, detail: "", needsMerge: false };
