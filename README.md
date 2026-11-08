@@ -49,6 +49,10 @@ python3 scripts/setup.py doctor
 백업하고, 권장값에 지시서 차이를 합쳐 본체의 상위 객체 단위로 맞춥니다. 관련 없는 키는 보존합니다.
 다른 경로에 등록돼 있으면 `--replace-registration`을 명시해야 합니다. 등록 전환은 `config set plugins`와
 데몬 worker 재시작으로 하며, 지시 전송·압축 중에는 중단합니다. 플러그인을 remove하지 않아 사장 자료를 보존합니다.
+같은 옵션은 다른 clone의 자동 업데이트 LaunchAgent도 교체하며, 교체 전 plist를 설치 백업의 `LaunchAgents/`에 남깁니다.
+install dry-run은 실제 install이 거부할 사유(등록 경로·Python·Node·데몬 미실행·진행 중 작업·다른 clone의 자동 업데이트)를
+`blockers`로 모두 보여 주고, 하나라도 있으면 종료 2입니다.
+Codex 실행기를 설치하면 제공자가 가리키는 `CODEX_HOME` 폴더(권장 `$PASEO_HOME/codex-home`)를 0700으로 만듭니다.
 권장 직원은 [profiles.json](plugin/role-workflow/shared/presets/profiles.json)을 본체 화면에서 추가하도록 제안만 합니다.
 권장 권한은 Codex `full-access`, Claude `bypassPermissions`이며 relay는 켜짐입니다.
 
@@ -60,9 +64,10 @@ archive-rotate는 오래된 제품 세션을 `$PASEO_HOME/archive`에 보관한 
 
 기존 등록·state·옛 공용 설정·공항 LaunchAgent 중 하나라도 있는데 profile 결정이 없으면 인자 없는 install은 **쓰기 전에 종료 2**로 멈춥니다.
 `./install.sh --profile server|desktop`으로 명시하세요. 새 홈에서만 desktop과 프로필 권장 설비를 기본으로 허가합니다.
-기존 홈에서는 설비를 자동 허가하지 않습니다. `enable`·`disable`은 지시서 `decisions.modules`에 날짜와 revision을 기록하고, 이어지는 install이 적용합니다.
+기존 홈에서는 설비를 자동 허가하지 않으며, 허가 결정이 없는 프로필 권장 설비를 install 알림과 doctor `equipment.grants`(경고)로 알려 줍니다. `enable`·`disable`은 지시서 `decisions.modules`에 날짜와 revision을 기록하고, 이어지는 install이 적용합니다.
 같은 기능의 비공항 설비가 발견되면 허가돼 있어도 설치하지 않고 dry-run·check·doctor에 사유를 표시합니다.
 4차 설비 교체는 `enable` → 충돌 확인 → 기존 설비 정리 → `install` 순서로 하나씩 진행합니다.
+daemon-service B를 설치할 때 launchd 밖에서 띄운 데몬이 이미 있으면, 진행 중 작업이 없을 때 그 데몬을 멈춰 작업이 넘겨받게 합니다.
 
 ```sh
 python3 scripts/setup.py enable daemon-service --variant B --dry-run

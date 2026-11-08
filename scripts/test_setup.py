@@ -76,6 +76,8 @@ class SetupTests(unittest.TestCase):
         (self.paseo_home/'paseo.pid').write_text(json.dumps({'pid':os.getpid()}))
         self.env = mock.patch.dict(os.environ, {'HOME':str(self.home), 'PASEO_HOME':str(self.paseo_home), 'PASEO_PUBLIC_CONFIG':str(self.legacy), 'PASEO_PUBLIC_NODE':str(self.bin/'node'), 'FIXTURE_EVENTS':str(self.events)})
         self.env.start(); self.addCleanup(self.env.stop)
+        # A Paseo-launched shell exports the real staff homes; fixtures must not inherit them.
+        for name in ('CLAUDE_CONFIG_DIR', 'CODEX_HOME'): os.environ.pop(name, None)
         self.root_patch=mock.patch.object(setup,'ROOT',self.root); self.root_patch.start();self.addCleanup(self.root_patch.stop)
         self.load_patch=mock.patch.object(setup,'load_config',side_effect=self.load_config);self.load_patch.start();self.addCleanup(self.load_patch.stop)
         # Only macOS service utilities are redirected. Paseo is a real fake executable subprocess.
@@ -88,6 +90,9 @@ class SetupTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command,0,stdout='',stderr='')
             return actual_run(command,home,**kwargs)
         patch=mock.patch.object(setup,'run',side_effect=invoke);patch.start();self.addCleanup(patch.stop)
+        # The fake launchd already owns the fixture daemon; C37 adoption is exercised explicitly.
+        for name in ('agent_pid','daemon_parent'):
+            owned=mock.patch.object(setup,name,return_value=4242);owned.start();self.addCleanup(owned.stop)
 
     def load_config(self):
         old=json.loads(self.legacy.read_text()) if self.legacy.exists() else {}
@@ -349,6 +354,59 @@ class SetupTests(unittest.TestCase):
             self.events.unlink();self.execute('install')
             self.assertFalse(any(c[1:3]==['plugin','reload'] for c in self.calls()))
 
+
+    def test_c37_dry_run_reports_every_install_refusal_without_writing(self):
+        (self.paseo_home/'paseo.pid').unlink()
+        agent=self.home/'Library/LaunchAgents'/(setup.AUTO_UPDATE_LABEL+'.plist');agent.parent.mkdir(parents=True,exist_ok=True)
+        agent.write_bytes(plistlib.dumps({'Label':setup.AUTO_UPDATE_LABEL,'ProgramArguments':['python3','/other/scripts/auto-update.py']}))
+        before=self.snapshot()
+        code,result=self.execute('install','--with-auto-update','--dry-run')
+        self.assertEqual(code,2)
+        self.assertEqual({b['key'] for b in result['blockers']},{'daemon','autoUpdate'})
+        self.assertEqual(self.snapshot(),before)
+        with self.assertRaisesRegex(RuntimeError,'Paseo를 먼저 실행'):
+            self.execute('install','--with-auto-update')
+
+    def test_c37_replace_registration_takes_over_a_foreign_auto_update_and_keeps_it_in_the_backup(self):
+        agent=self.home/'Library/LaunchAgents'/(setup.AUTO_UPDATE_LABEL+'.plist');agent.parent.mkdir(parents=True,exist_ok=True)
+        foreign=plistlib.dumps({'Label':setup.AUTO_UPDATE_LABEL,'ProgramArguments':['python3','/other/scripts/auto-update.py']})
+        agent.write_bytes(foreign)
+        with self.assertRaisesRegex(RuntimeError,'--replace-registration'):
+            self.execute('install','--with-auto-update')
+        self.assertEqual(agent.read_bytes(),foreign)
+        code,result=self.execute('install','--with-auto-update','--replace-registration')
+        self.assertEqual(code,0,result)
+        self.assertEqual(setup.auto_update_agent_state(self.home,self.root),'installed')
+        self.assertEqual((Path(result['backup'])/'LaunchAgents'/agent.name).read_bytes(),foreign)
+
+    def test_c37_continuing_owner_is_told_which_equipment_is_not_granted(self):
+        code,result=self.execute('install')
+        self.assertEqual(code,0)
+        self.assertTrue(any('자동 허가하지 않았습니다' in n and 'codex-launcher' in n for n in result['notices']))
+        grants=next(c for c in self.execute('doctor','--json')[1]['checks'] if c['key']=='equipment.grants')
+        self.assertFalse(grants['ok']);self.assertFalse(grants['blocking'])
+
+    def test_c37_install_creates_the_codex_home_it_points_the_provider_at(self):
+        self.execute('enable','codex-launcher')
+        code,result=self.execute('install')
+        self.assertEqual(code,0,result)
+        codex_home=Path(json.loads(self.config.read_text())['agents']['providers']['codex']['env']['CODEX_HOME'])
+        self.assertTrue(codex_home.is_dir());self.assertEqual(codex_home.stat().st_mode&0o777,0o700)
+
+    def test_c37_variant_b_adopts_a_daemon_started_outside_launchd(self):
+        a=setup.Airport();a.module_config=lambda:{'moduleVariants':{'daemon-service':'B'}}
+        samples=iter([None,None,41]);owned={'parent':7}
+        def stop(*args,**kwargs): owned['parent']=41
+        with mock.patch.object(setup,'agent_pid',side_effect=lambda *_:next(samples,41)), \
+             mock.patch.object(setup,'daemon_parent',side_effect=lambda *_:owned['parent']), \
+             mock.patch.object(setup,'daemon_running',return_value=True), \
+             mock.patch.object(setup.time,'sleep'), mock.patch.object(a,'command',side_effect=stop) as command:
+            a.adopt_daemon(['daemon-service'])
+        command.assert_called_once_with('daemon','stop')
+        with mock.patch.object(setup,'agent_pid',return_value=41), mock.patch.object(setup,'daemon_parent',return_value=41), \
+             mock.patch.object(setup,'daemon_running',return_value=True), mock.patch.object(a,'command') as command:
+            a.adopt_daemon(['daemon-service'])
+        command.assert_not_called()
 
 if __name__=='__main__':
     unittest.main()

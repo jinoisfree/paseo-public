@@ -311,6 +311,24 @@ test("contract5 plan before selection is held across restart and dispatched once
  await f.restart();await f.engine.tick();assert.equal(f.created.length,1);assert.equal(f.sent.filter(x=>x.id===w.execute.id).length,1);
  await assert.rejects(f.engine.selectExecutor(f.id,{provider:"claude",model:"builder",thinking:"high"}),/이미 생성/);
 });
+for (const recovery of ["replay","repick"]) test(`contract5 a catalog failure after the executor exists recovers by ${recovery}`,async t=>{
+ const {picksExecutor}=await import("../shared/executor-picker.ts");
+ const f=await fixture(t,{contract:5,options:ALL});await f.finish("A","plan",{next:"첫 계획"});
+ assert.equal((await f.engine.selectExecutor(f.id,{provider:"codex",model:"builder",thinking:"high"})).ok,true);
+ let w=await f.state();const executor=w.execute.id;await f.finish(executor,"result");
+ f.failCatalog(true);await f.finish("A","plan",{next:"둘째 계획"});
+ w=await f.state();assert.equal(w.status,"needs_input");assert.equal(w.selectionPlan,w.inbox.key);
+ const view=(await f.engine.list()).workflows[0];assert.equal(picksExecutor(view),true);
+ f.failCatalog(false);
+ if(recovery==="replay") await f.finish("A","plan",{next:"셋째 계획"});
+ else {
+  await assert.rejects(f.engine.selectExecutor(f.id,{provider:"claude",model:"builder",thinking:"high"}),/같은 제품/);
+  assert.equal((await f.engine.selectExecutor(f.id,{provider:"codex",model:"builder",thinking:"low"})).ok,true);
+ }
+ w=await f.state();assert.equal(f.created.length,1);assert.equal(w.selection.stage,"ready");
+ assert.match(f.sent.filter(x=>x.id===executor).at(-1).prompt,recovery==="replay"?/셋째 계획/:/둘째 계획/);
+ assert.equal(picksExecutor((await f.engine.list()).workflows[0]),false);
+});
 test("contract5 invalid screen choice keeps the plan held and creates nothing",async t=>{
  const f=await fixture(t,{contract:5,options:ALL});await f.finish("A","plan");
  for (const choice of [{provider:"codex",model:"builder",thinking:"bogus"},{provider:"codex",model:"missing",thinking:"high"},{provider:"codex",model:"builder",thinking:""}]) {
@@ -373,6 +391,24 @@ test("picker offers every thinking option and none only for models without optio
  assert.equal(picksExecutor({contract:5,mode:"federated",status:"needs_input",executeAgentId:null}),true);
  assert.equal(picksExecutor({contract:5,mode:"federated",status:"active",executeAgentId:"B"}),false);
  assert.equal(picksExecutor({contract:5,mode:"general",status:"active",executeAgentId:null}),false);
+ // An existing executor whose selection fell out of ready is offered again instead of hiding the only fix.
+ assert.equal(picksExecutor({contract:5,mode:"federated",status:"needs_input",executeAgentId:"B",selection:{stage:"model"}}),true);
+ assert.equal(picksExecutor({contract:5,mode:"federated",status:"active",executeAgentId:"B",selection:{stage:"ready"}}),false);
+});
+test("a transient catalog failure is replayed from complete saved answers",async()=>{
+ const {validateSelection,applySelectionBatch}=await import("../server/executor-selection.ts");
+ const {executorSelectionSchema}=await import("../shared/executor-selection.ts");
+ const models=[{id:"gpt",label:"GPT",isDefault:true,thinkingOptions:[{id:"high",label:"High"},{id:"low",label:"Low"}]}];
+ const state=executorSelectionSchema.parse({});
+ await applySelectionBatch(state,{provider:"codex",model:"gpt",thinking:"high"},async()=>models);
+ assert.equal(state.stage,"ready");
+ assert.equal(await validateSelection(state,async()=>{throw new Error("모델 카탈로그 조회 시간 초과");}),false);
+ assert.equal(state.stage,"model");
+ assert.equal(await validateSelection(state,async()=>models),true);
+ assert.deepEqual([state.stage,state.provider,state.model,state.thinking,state.error],["ready","codex","gpt","high",""]);
+ const partial=executorSelectionSchema.parse({});
+ await applySelectionBatch(partial,{provider:"codex"},async()=>models).catch(()=>{});
+ assert.equal(await validateSelection(partial,async()=>models),false);
 });
 test("prompt budget: new conversations stay well under the previous 10.5k characters",async()=>{
  const {titlePrompt,progressPrompt,pushApprovalPrompt}=await import("../server/protocol.ts");

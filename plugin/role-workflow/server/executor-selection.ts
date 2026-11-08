@@ -134,11 +134,15 @@ export async function applyLegacySelection(
 
 export async function validateSelection(state: ExecutorSelection,
   catalog: (provider: "codex" | "claude") => Promise<readonly ExecutorModel[]>) {
-  if (state.stage !== "ready" || !state.provider) return false;
-  if (state.responses) {
-    try { await applySelectionBatch(state, {}, catalog); return true; }
+  const answered = state.responses?.provider !== undefined && state.responses.model !== undefined &&
+    state.responses.thinking !== undefined;
+  // A transient catalog failure strands complete real answers short of ready; replay them instead of waiting forever.
+  if (state.stage !== "ready" && !answered) return false;
+  if (state.responses && (answered || state.provider)) {
+    try { await applySelectionBatch(state, {}, catalog); return state.stage === "ready"; }
     catch (error) { state.error = error instanceof Error ? error.message : String(error); return false; }
   }
+  if (!state.provider) return false;
   const model = selectableModel(await catalog(state.provider), state.model);
   if (!model) { state.stage = "model"; state.model = ""; state.thinking = null;
     state.error = "선택한 모델이 없어 모델을 다시 선택해야 합니다."; return false; }

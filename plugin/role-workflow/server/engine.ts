@@ -1028,7 +1028,10 @@ export class WorkflowEngine {
         await this.advance(w);
         return { ok: true, detail: "승인한 계획을 구현 담당에게 전달합니다." };
       }
-      if (w.execute) throw new Error("구현 담당이 이미 생성되어 바꿀 수 없습니다.");
+      // An executor whose selection fell out of ready (e.g. a failed catalog) may be re-picked within its product.
+      if (w.execute && w.selection?.stage === "ready") throw new Error("구현 담당이 이미 생성되어 바꿀 수 없습니다.");
+      if (w.execute && w.execute.config.provider.split("/")[0] !== choice.provider)
+        throw new Error("이미 만든 구현 담당과 같은 제품의 모델만 고를 수 있습니다.");
       const state = w.selection!;
       // A still-open chat question is retired; its late answer cannot override this choice.
       if (state.pending) { state.answered.push(state.pending.id); state.pending = null; }

@@ -141,6 +141,7 @@ def install_agent(label, generated, home):
 LAUNCHD_WAIT_SECONDS = 30
 LAUNCHD_POLL_SECONDS = 1
 BOOTSTRAP_ATTEMPTS = 5
+DAEMON_ADOPT_SECONDS = 60
 
 
 def agent_loaded(label, home):
@@ -162,6 +163,21 @@ def bootstrap_agent(file, label, home):
             break
         time.sleep(LAUNCHD_POLL_SECONDS * (attempt + 1))
     run(['/bin/launchctl', 'print', f'gui/{os.getuid()}/{label}'], home)
+
+
+def agent_pid(label, home):
+    result = run(['/bin/launchctl', 'print', f'gui/{os.getuid()}/{label}'], home, check=False)
+    match = re.search(r'^\s*pid = (\d+)\s*$', result.stdout or '', re.M) if result.returncode == 0 else None
+    return int(match[1]) if match else None
+
+
+def daemon_parent(home):
+    try:
+        pid = read_json(paseo_home(home)/'paseo.pid')['pid']
+    except (OSError, KeyError, ValueError, TypeError):
+        return None
+    parent = run(['/bin/ps', '-o', 'ppid=', '-p', str(pid)], home, check=False).stdout.strip()
+    return int(parent) if parent.isdigit() else None
 
 
 def daemon_running(home):
@@ -291,6 +307,7 @@ class Airport:
         self.config = load_config()
         self.recommended = read_json(ROOT/'plugin/role-workflow/shared/presets/recommended.json')
         self.fresh = not self.legacy_installation()
+        self.replacing_auto_update = False
 
     def decision(self, key, default=None):
         return self.policy['decisions'].get(key, {}).get('value', default)
@@ -465,33 +482,61 @@ class Airport:
         if auto_update or auto_update_agent_installed(self.home, ROOT):
             self.record['autoUpdate'] = True
         if self.record.get('autoUpdate'):
-            if auto_update_agent_state(self.home, ROOT) == 'foreign':
+            if auto_update_agent_state(self.home, ROOT) == 'foreign' and not self.replacing_auto_update:
                 raise RuntimeError('다른 저장소의 자동 업데이트가 등록돼 있어 변경하지 않습니다.')
             node, python, _ = self.tools()
             (self.directory/'airport/logs/auto-update').mkdir(parents=True, exist_ok=True)
             install_agent(AUTO_UPDATE_LABEL, plistlib.dumps(launch_plist({**self.config, 'python': python}, node, self.home), sort_keys=False), self.home)
 
+    def install_blockers(self, args):
+        """C37: every refusal install would raise, read without writing so dry-run reports the same set."""
+        blockers = []
+        def add(key, message): blockers.append({'key': key, 'message': message})
+        entry = read_paseo(self.home).get('plugins', {}).get('role-workflow')
+        if entry and not same_plugin(entry) and not args.replace_registration:
+            add('registration', '다른 경로에 이미 등록돼 있습니다. --replace-registration으로 전환하세요.')
+        if sys.version_info < (3, 12):
+            add('python', 'Python 3.12 이상이 필요합니다.')
+        try:
+            node_version = version([self.tools()[0], '--version'], self.home)
+        except RuntimeError as error:
+            add('tools', str(error))
+        else:
+            if not node_version or int(node_version.split('.')[0]) < 22:
+                add('node', 'Node.js 22 이상이 필요합니다.')
+        if not daemon_running(self.home):
+            add('daemon', '이 계정에서 Paseo를 먼저 실행하세요.')
+        busy = busy_workflows(self.home)
+        if busy:
+            add('busy', '진행 중인 작업이 있어 변경을 중단합니다: '+', '.join(map(str, busy)))
+        if args.with_auto_update and auto_update_agent_state(self.home, ROOT) == 'foreign' and not args.replace_registration:
+            add('autoUpdate', '다른 저장소의 자동 업데이트가 이미 등록돼 있습니다. --replace-registration으로 교체하세요.')
+        return blockers
+
+    def ungranted_notice(self, option=None):
+        # C37: a continuing owner is never granted equipment silently; say what the profile recommends.
+        grants = self.policy['decisions'].get('modules', {})
+        missing = [] if self.fresh else [m for m in self.recommended['profiles'][self.profile(option)]['modules'] if m not in grants]
+        return ['기존 설치를 이어받아 프로필 권장 설비를 자동 허가하지 않았습니다: '+', '.join(missing)+
+                '. 쓰려면 setup.py enable <설비> 후 install을 다시 실행하세요.'] if missing else []
+
     def install(self, args):
         self.profile(args.profile, installing=True)
-        account = read_paseo(self.home)
-        entry = account.get('plugins', {}).get('role-workflow')
-        if entry and not same_plugin(entry) and not args.replace_registration:
-            raise RuntimeError('다른 경로에 이미 등록돼 있습니다. --replace-registration으로 전환하세요.')
         core, desktop, ids = self.expected(args.profile)
         rows = module_files(ids, self.home, self.module_config())  # Validate all sources before the first write.
         node, python, paseo = self.tools()
         verify_cli(paseo, self.home)
-        if sys.version_info < (3, 12):
-            raise RuntimeError('Python 3.12 이상이 필요합니다.')
-        node_version = version([node, '--version'], self.home)
-        if not node_version or int(node_version.split('.')[0]) < 22:
-            raise RuntimeError('Node.js 22 이상이 필요합니다.')
-        if not daemon_running(self.home):
-            raise RuntimeError('이 계정에서 Paseo를 먼저 실행하세요.')
-        self.ensure_idle()
-        if args.with_auto_update and auto_update_agent_state(self.home, ROOT) == 'foreign':
-            raise RuntimeError('다른 저장소의 자동 업데이트가 이미 등록돼 있습니다.')
+        blockers = self.install_blockers(args)
+        if blockers:
+            raise RuntimeError(blockers[0]['message'])
+        replacing = args.with_auto_update and auto_update_agent_state(self.home, ROOT) == 'foreign'
         saved = backup(self.home)
+        if replacing:
+            # C37: the other clone's job is kept for rollback; install_agent then boots it out and overwrites it.
+            agent = self.home/'Library/LaunchAgents'/(AUTO_UPDATE_LABEL+'.plist')
+            (saved/'LaunchAgents').mkdir(parents=True, exist_ok=True)
+            shutil.copy2(agent, saved/'LaunchAgents'/agent.name)
+            self.replacing_auto_update = True
         policy = copy.deepcopy(self.policy)
         if self.fresh:
             grants = policy['decisions'].setdefault('modules', {})
@@ -510,6 +555,10 @@ class Airport:
         account = read_paseo(self.home)
         self.dependencies()
         self.capture_providers(core, account)
+        codex_home = core.get('agents', {}).get('providers', {}).get('codex', {}).get('env', {}).get('CODEX_HOME')
+        if codex_home:
+            # C37: Codex refuses a missing CODEX_HOME, and the daemon keeps that failure until restart.
+            Path(codex_home).expanduser().mkdir(parents=True, exist_ok=True, mode=0o700)
         if 'claude-home' in ids:
             self.assemble_claude()
         agent_directory = (self.home/'Library/LaunchAgents').resolve()
@@ -553,13 +602,32 @@ class Airport:
         self.install_modules([row for row in rows if row['target'].parent == agent_directory])
         # A variant B bootout can stop the daemon: finish every CLI mutation first.
         self.agents(args.with_auto_update)
+        self.adopt_daemon(ids)
         self.remove_disabled_modules(rows, files_only=True)
         self.record['equipment'] = self.module_plan()
         atomic_json(self.record_file, self.record)
         checked = self.check()
         if checked['differences']:
             raise RuntimeError('설치 후 check 차이가 남았습니다. check --json과 설치 백업을 확인하세요.')
-        return {'backup': str(saved), 'profile': self.profile(), 'equipment': self.module_plan(), 'notices': self.notices()}
+        return {'backup': str(saved), 'profile': self.profile(), 'equipment': self.module_plan(), 'notices': self.notices()+self.ungranted_notice()}
+
+    def adopt_daemon(self, ids):
+        """C37: variant B's `daemon run` exits while a daemon started elsewhere holds the home; hand it over once idle."""
+        if 'daemon-service' not in ids or self.module_config()['moduleVariants'].get('daemon-service') != 'B':
+            return
+        label = PREFIX+'daemon-service'
+        job = agent_pid(label, self.home)
+        if not daemon_running(self.home) or (job and daemon_parent(self.home) == job):
+            return
+        self.ensure_idle()
+        self.command('daemon', 'stop')
+        deadline = time.monotonic() + DAEMON_ADOPT_SECONDS
+        while time.monotonic() < deadline:
+            job = agent_pid(label, self.home)
+            if job and daemon_running(self.home) and daemon_parent(self.home) == job:
+                return
+            time.sleep(LAUNCHD_POLL_SECONDS)
+        raise RuntimeError(f'데몬 서비스가 데몬을 넘겨받지 못했습니다. launchctl print gui/{os.getuid()}/{label}로 확인하세요.')
 
     def capture_providers(self, core, actual):
         for provider, desired in core.get('agents', {}).get('providers', {}).items():
@@ -800,15 +868,17 @@ class Airport:
         add('autoUpdate.lastSuccess', bool(success), '자동 업데이트 마지막 성공 시각을 확인하세요: '+str(success or '없음'))
         for module in self.module_plan():
             add('equipment.'+module['id'], not module['conflicts'], module['reason'])
+        ungranted = self.ungranted_notice()
+        add('equipment.grants', not ungranted, ungranted[0] if ungranted else '프로필 권장 설비의 허가 결정이 있습니다.', blocking=False)
         if 'claude-home' in self.expected()[2]:
             config_home = account.get('agents', {}).get('providers', {}).get('claude', {}).get('env', {}).get('CLAUDE_CONFIG_DIR')
             add('claude.home.env', config_home == str(self.directory/'claude-home'), '제공자 CLAUDE_CONFIG_DIR을 분리 홈과 맞추세요.')
             _, links = claude_desired(ROOT, self.home, self.directory, self.policy)
             core_skills = read_json(ROOT/'plugin/role-workflow/shared/presets/claude-home/skills.json')
-            add('claude.home.coreSkills', all((self.home/'.claude/skills'/name).is_dir() for name in core_skills), '본체 Host → Skills에서 Paseo 스킬을 1회 설치하세요.', True)
+            add('claude.home.coreSkills', all((self.home/'.claude/skills'/name).is_dir() for name in core_skills), '앱 설정 → 호스트 → 오케스트레이션 스킬에서 Paseo 스킬을 1회 설치하세요.', True)
             unknown = [p.name for p in (self.home/'.claude/skills').glob('paseo*') if p.is_dir() and p.name not in core_skills]
             add('claude.home.newSkills', not unknown, '새 본체 스킬이 있으면 공항 스킬 명세를 갱신하세요.')
-            add('claude.home.skills', all((self.directory/'claude-home/skills'/name).is_symlink() for name in links), '본체 스킬·사장 매뉴얼 링크를 확인하세요.')
+            add('claude.home.skills', all((self.directory/'claude-home/skills'/name).is_symlink() for name in links), '분리 홈 스킬 링크가 없습니다. 스킬을 설치한 뒤 setup.py refresh를 실행하세요.')
         return {'checks': checks, 'equipment': self.module_plan(), 'versions': versions, 'notices': self.notices()}
 
     def remove_auto_update(self):
@@ -955,14 +1025,16 @@ def main(argv=None):
         return 0
     if args.dry_run:
         result = {'action': args.action, 'dryRun': True, 'profile': airport.profile(args.profile),
-                  'equipment': airport.module_plan(args.profile), 'cleanup': [str(p) for p in generated_cleanup(airport.home)], 'notices': airport.notices(),
+                  'equipment': airport.module_plan(args.profile), 'cleanup': [str(p) for p in generated_cleanup(airport.home)],
+                  'notices': airport.notices()+(airport.ungranted_notice(args.profile) if args.action == 'install' else []),
+                  'blockers': airport.install_blockers(args) if args.action == 'install' else [],
                   'steps': {'install': ['백업', '금고·지시서 revision 비교', '본체 상위 객체 맞춤', '등록 변경 시 데몬 재시작', '설비 설치'],
                             'refresh': ['lock 변경 시 npm ci', '설비 틀 재생성', '미참조 생성물 정리', '켜진 플러그인만 reload'],
                             'uninstall': ['provider command 원복', '등록·공항 LaunchAgent·생성물 제거', '사장 칸 보존' if not args.purge_owner else '백업 뒤 사장 칸 삭제'],
                             'check': ['기대값과 실제 파일 비교'], 'doctor': ['읽기 전용 점검']}[args.action]}
         if args.action == 'uninstall' and args.with_auto_update:
             result['steps'] = ['이 clone의 자동 업데이트 LaunchAgent만 해제', '플러그인·사장 칸 보존']
-        code = 0
+        code = 2 if result['blockers'] else 0
     elif args.action == 'check':
         result = airport.check()
         code = int(bool(result['differences']))

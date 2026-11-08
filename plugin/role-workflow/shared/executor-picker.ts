@@ -18,14 +18,16 @@ export function pickerDefaultThinking(model: ExecutorModel | undefined) {
   return (options.find((option) => option.isDefault) ?? options[0])?.id ?? null;
 }
 
-/** The picker is offered until an executor conversation exists for the workflow. */
+/** Offered until an executor exists, and again while that executor's selection is not ready. */
 export function picksExecutor(w: {
   contract?: number;
   mode: string;
   status: string;
   executeAgentId: string | null;
+  selection?: { stage?: string } | null;
 }) {
-  return capabilities(w).executorSelection && !w.executeAgentId && w.status !== "completed";
+  const stranded = !!w.executeAgentId && !!w.selection && w.selection.stage !== "ready";
+  return capabilities(w).executorSelection && (!w.executeAgentId || stranded) && w.status !== "completed";
 }
 
 /** The in-chat picker card posted when a contract 5 flow becomes federated. */
