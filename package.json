@@ -5,11 +5,12 @@
   "type": "module",
   "license": "Apache-2.0",
   "workspaces": [
-    "plugin/role-workflow"
+    "plugin/role-workflow",
+    "plugin/codex-usage"
   ],
   "scripts": {
-    "test": "npm test --workspace paseo-role-workflow",
-    "typecheck": "npm run typecheck --workspace paseo-role-workflow",
+    "test": "npm test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
     "e2e": "node --import ./plugin/role-workflow/tests/test-home.mjs e2e/run.mjs"
   },
   "devDependencies": {

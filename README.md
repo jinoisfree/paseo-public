@@ -53,7 +53,19 @@ python3 scripts/setup.py doctor
 권장 권한은 Codex `full-access`, Claude `bypassPermissions`이며 relay는 켜짐입니다.
 
 `--profile server|desktop`은 처음 설치할 때 선택합니다(기본 desktop). 이후에는 지시서 `decisions.profile`의 날짜 있는 선택이 우선합니다.
-server의 데몬·업데이트 감시·watchdog과 제품 홈 조립은 별도 설비 단계에서 배포됩니다. 명세가 없는 설비는 설치 전에 중단합니다.
+server 설비는 daemon-service(A: start+감시, B: foreground+KeepAlive), update-watch, paseo-watchdog입니다.
+archive-rotate는 오래된 제품 세션을 `$PASEO_HOME/archive`에 보관한 뒤 원본을 옮깁니다(권장 30일).
+공통 설비는 Claude 분리 홈·실행기, Codex 실행기·계정 도구·사용량 플러그인입니다. 계정 이름은 금고의 codexAccounts에 직접 적습니다.
+
+기존 등록·state·옛 공용 설정·공항 LaunchAgent 중 하나라도 있는데 profile 결정이 없으면 인자 없는 install은 **쓰기 전에 종료 2**로 멈춥니다.
+`./install.sh --profile server|desktop`으로 명시하세요. 새 홈에서만 desktop과 프로필 권장 설비를 기본으로 허가합니다.
+기존 홈에서는 설비를 자동 허가하지 않습니다. `decisions.modules`의 설비별 `{ "enabled": true, "date": "2026-01-01", "variant": "A" }`로 선택합니다.
+같은 기능의 비공항 설비가 발견되면 허가돼 있어도 설치하지 않고 dry-run·check·doctor에 사유를 표시합니다.
+실제 설비 교체는 기존 설비를 정리한 뒤 단계별로 진행하세요. A/B 실제 재기동 수락은 별도 시험입니다.
+
+Claude 설정은 명세서 `presets/claude-home/settings.json`에 날짜 있는 `decisions.claudeHome.settings` 차이를 합칩니다.
+본체 스킬과 `decisions.claudeHome.manuals`에서 고른 매뉴얼만 분리 홈에 링크합니다. 제공자 env의 CLAUDE_CONFIG_DIR도 같은 절대경로를 씁니다.
+금고에 선택한 키체인 항목이 없으면 실행기는 토큰 없이 분리 홈 로그인을 쓰며 안내합니다. 전역 Claude 홈의 인증 유지 작업은 바꾸지 않습니다.
 
 `check --json`은 공항 커밋·앱/제품 버전·차이(키, 기대값, 실제값, 원본 칸)를 출력합니다. 차이 0이면 종료 0,
 있으면 1입니다. 비밀 값은 가립니다. `doctor`는 읽기 전용으로 CLI·로그인·키체인 항목 존재·모델·스킬·포트·cask 기록·업데이트를

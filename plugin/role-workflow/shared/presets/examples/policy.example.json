@@ -19,6 +19,13 @@
     "profile": {
       "value": "desktop",
       "date": "2026-01-01"
+    },
+    "modules": {
+      "daemon-service": {
+        "enabled": false,
+        "date": "2026-01-01",
+        "variant": "A"
+      }
     }
   }
 }

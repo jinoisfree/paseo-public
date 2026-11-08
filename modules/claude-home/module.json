@@ -1,0 +1,16 @@
+{
+  "id": "claude-home",
+  "description": "Claude 분리 홈 조립",
+  "requires": [
+    "claude"
+  ],
+  "installationImpact": [
+    "분리 홈 설정·스킬 링크 및 제공자 env"
+  ],
+  "installs": [],
+  "vaultKeys": [],
+  "policyKeys": [
+    "decisions.claudeHome"
+  ],
+  "conflicts": []
+}

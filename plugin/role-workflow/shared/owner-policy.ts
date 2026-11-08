@@ -8,7 +8,7 @@ export interface OwnerPolicy {
   revision: number;
   roleWorkflow: Partial<z.infer<typeof settingsValuesSchema>>;
   notifications: { phoneNotifications?: boolean; phoneNotificationEndpoint?: string };
-  decisions: Record<string, { date: string; value?: unknown }>;
+  decisions: { roleWorkflow: { date: string }; notifications: { date: string }; [key: string]: unknown };
   migratedFrom?: { source: string; at: string; stateSettingsSha256: string };
 }
 // JSON Schema is shared with the Python installer; settings values retain their existing Zod constraints.

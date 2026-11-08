@@ -218,6 +218,15 @@ try {
     assert(settings.autoPinStarted && settings.autoPinPushed && settings.autoArchivePushed, "automatic pin and archive defaults must remain enabled");
   });
 
+  await step("airport C26: codex-usage compiles and registers as a second plugin", async()=>{
+    const result=await cli("plugin","install",resolve(here,"../plugin/codex-usage"));
+    assert(result.code===0,result.stderr||result.stdout);
+    await waitFor("codex usage plugin",async()=>{
+      const rows=JSON.parse((await cli("plugin","ls","--json")).stdout);
+      return rows.some(p=>p.id==="codex-usage"&&p.status==="running"&&!p.error);
+    });
+  });
+
   await step("airport C3: settings and notification migration records one source once", async()=>{
     const current=policy();
     assert(current.migratedFrom.stateSettingsSha256===createHash("sha256").update(JSON.stringify(legacySettings)).digest("hex"),"migration hash mismatch");
@@ -659,7 +668,7 @@ try {
   });
 
   await step("the plugin logged no errors", async () => {
-    const logs = (await cli("plugin", "logs", "role-workflow")).stdout;
+    const logs = (await cli("plugin", "logs", "role-workflow")).stdout + (await cli("plugin", "logs", "codex-usage")).stdout;
     const errors = logs.split("\n").filter((line) => /\bstderr\b|role-workflow:/.test(line));
     assert(errors.length === 0, errors.join("\n").slice(0, 800));
   });

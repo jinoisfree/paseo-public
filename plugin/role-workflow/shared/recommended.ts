@@ -26,6 +26,7 @@ export const recommendedSchema = z.object({
       rotate: z.object({ maxSize: z.string().regex(/^\d+[kmg]$/i), maxFiles: z.number().int().positive() }).strict(),
     }).strict() }).strict(),
   }).strict(),
+  equipment: z.object({ archiveRotate: z.object({ afterDays: z.number().int().positive() }).strict() }).strict(),
   profiles: z.object({ server: profileSchema, desktop: profileSchema }).strict(),
 }).strict();
 // Validate JSON at the boundary before passing typed values to Zod defaults.

@@ -211,13 +211,17 @@
       "slot": "lockers",
       "children": {
         "settings.json": "equipment",
-        "skills": "owner-manuals"
+        "skills": "equipment"
       },
-      "note": "후속 조립 파일과 세션을 파일별로 분리"
+      "note": "settings·스킬 링크는 설비 생성물, 링크 대상은 본체/선택한 사장 매뉴얼, 세션·auth는 사물함"
     },
     "airport": {
       "slot": "installation",
       "target": "공항 설치 기록·설비 생성물·로그"
+    },
+    "archive": {
+      "slot": "lockers",
+      "target": "제품 세션 보관본(원본 삭제 전 확인)"
     }
   },
   "config": {
@@ -376,7 +380,8 @@
     "~/.config/paseo-public/sync-deny.txt": "maintenance",
     "docs/changes/": "maintenance",
     "$PASEO_HOME/airport/": "installation",
-    "$PASEO_HOME/airport/modules/": "equipment"
+    "$PASEO_HOME/airport/modules/": "equipment",
+    "plugin/codex-usage/": "equipment"
   },
   "externalDependencies": [
     "다른 macOS 계정의 앱 공유·데몬",

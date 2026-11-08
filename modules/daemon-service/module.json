@@ -1,0 +1,62 @@
+{
+  "id": "daemon-service",
+  "description": "Paseo daemon-service 설비",
+  "requires": [
+    "Paseo.app",
+    "python3"
+  ],
+  "installationImpact": [
+    "공항 LaunchAgent 생성"
+  ],
+  "installs": [
+    {
+      "source": "modules/daemon-service/A.plist.in",
+      "target": "$LAUNCH_AGENTS/io.github.jinoisfree.paseo-public.daemon-service.plist",
+      "variant": "A"
+    },
+    {
+      "source": "modules/daemon-service/B.plist.in",
+      "target": "$LAUNCH_AGENTS/io.github.jinoisfree.paseo-public.daemon-service.plist",
+      "variant": "B"
+    },
+    {
+      "source": "modules/daemon-service/run.py",
+      "target": "$INSTALL_ROOT/modules/daemon-service/run.py"
+    },
+    {
+      "source": "modules/service_runtime.py",
+      "target": "$INSTALL_ROOT/modules/service_runtime.py"
+    },
+    {
+      "source": "modules/launcher_runtime.py",
+      "target": "$INSTALL_ROOT/modules/launcher_runtime.py"
+    }
+  ],
+  "vaultKeys": [
+    "paths.app",
+    "paths.python"
+  ],
+  "policyKeys": [
+    "decisions.modules"
+  ],
+  "conflicts": [
+    {
+      "kind": "paseo-command",
+      "commands": [
+        [
+          "start"
+        ],
+        [
+          "daemon",
+          "run"
+        ]
+      ]
+    },
+    {
+      "kind": "script-content",
+      "patterns": [
+        "\\bpaseo\\b.*\\bstart\\b"
+      ]
+    }
+  ]
+}

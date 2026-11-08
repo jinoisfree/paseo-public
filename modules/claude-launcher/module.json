@@ -25,5 +25,11 @@
   ],
   "policyKeys": [
     "decisions.modules"
+  ],
+  "conflicts": [
+    {
+      "kind": "provider-command",
+      "provider": "claude"
+    }
   ]
 }

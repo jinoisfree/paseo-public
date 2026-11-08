@@ -36,6 +36,13 @@
           "target": {
             "type": "string",
             "minLength": 1
+          },
+          "variant": {
+            "type": "string",
+            "enum": [
+              "A",
+              "B"
+            ]
           }
         },
         "required": [
@@ -57,6 +64,48 @@
       "items": {
         "type": "string",
         "minLength": 1
+      }
+    },
+    "conflicts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "enum": [
+              "paseo-command",
+              "watch-app",
+              "script-content",
+              "plugin-source",
+              "provider-command"
+            ]
+          },
+          "commands": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "patterns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "provider": {
+            "enum": [
+              "claude",
+              "codex"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "additionalProperties": false
       }
     }
   },

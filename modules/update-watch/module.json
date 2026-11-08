@@ -1,0 +1,52 @@
+{
+  "id": "update-watch",
+  "description": "Paseo update-watch 설비",
+  "requires": [
+    "Paseo.app",
+    "python3"
+  ],
+  "installationImpact": [
+    "공항 LaunchAgent 생성"
+  ],
+  "installs": [
+    {
+      "source": "modules/update-watch/job.plist.in",
+      "target": "$LAUNCH_AGENTS/io.github.jinoisfree.paseo-public.update-watch.plist"
+    },
+    {
+      "source": "modules/update-watch/run.py",
+      "target": "$INSTALL_ROOT/modules/update-watch/run.py"
+    },
+    {
+      "source": "modules/service_runtime.py",
+      "target": "$INSTALL_ROOT/modules/service_runtime.py"
+    },
+    {
+      "source": "modules/launcher_runtime.py",
+      "target": "$INSTALL_ROOT/modules/launcher_runtime.py"
+    },
+    {
+      "source": "plugin/role-workflow/shared/presets/recommended.json",
+      "target": "$INSTALL_ROOT/presets/recommended.json"
+    }
+  ],
+  "vaultKeys": [
+    "paths.app",
+    "paths.python"
+  ],
+  "policyKeys": [
+    "decisions.modules"
+  ],
+  "conflicts": [
+    {
+      "kind": "watch-app"
+    },
+    {
+      "kind": "script-content",
+      "patterns": [
+        "CFBundleShortVersionString",
+        "daemonVersion"
+      ]
+    }
+  ]
+}

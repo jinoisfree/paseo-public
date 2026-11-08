@@ -83,7 +83,7 @@ server는 외부 데몬·업데이트 감시·Paseo 전용 watchdog, desktop은 
 check·doctor는 파일을 쓰지 않는다. refresh는 본체·지시서와 꺼진 등록을 건드리지 않고 의존성·설비·켜진 플러그인·검증된 미참조 생성물만 갱신한다.
 uninstall은 command 원복 뒤 설비를 지우고 사장 칸·사물함을 보존한다. --purge-owner만 백업 뒤 사장 칸을 지운다.
 앱 설정·LaunchAgent·백업은 macOS 계정 Library, 공항 설치 상태·설비 생성물은 $PASEO_HOME/airport가 소유한다.
-설비 내용과 분리 홈 조립·다른 Mac 수락·잔재 제거는 후속 단계다. 현재 설정은 owner/policy.json을 읽고 state.settings는 롤백용 동결 사본이다.
+설비·분리 홈 조립은 module.json과 지시서 허가로 수행한다. 기존 설치는 명시적 profile이 있어야 조립하고, 기존 비공항 설비와 충돌하면 설치하지 않는다. 다른 Mac 수락·실제 설비 교체·잔재 제거는 후속 단계다. 현재 설정은 owner/policy.json을 읽고 state.settings는 롤백용 동결 사본이다.
 
 - 소유 칸·공식 원본·쓰기 주체·수명을 정했는가?
 - 본체 칸과 중복되거나 파일 하나가 두 칸에 걸치는가?

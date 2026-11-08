@@ -38,6 +38,8 @@ class LauncherTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, '앱 내장 CLI'):
                 runtime.paseo_cli(app)
             cli = self.executable(app / 'Contents/Resources/bin/paseo')
+            import plistlib
+            (app/'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleShortVersionString':'0.15.3'}))
             self.assertEqual(runtime.paseo_cli(app), cli)
             with self.assertRaises(ValueError):
                 runtime.paseo_cli('relative.app')
@@ -58,9 +60,9 @@ class LauncherTests(unittest.TestCase):
             self.assertEqual(sent['CLAUDE_CODE_OAUTH_TOKEN'], 'fixture-token')
             self.assertEqual(sent['CLAUDE_CONFIG_DIR'], '/fixture/claude-home')
             self.assertNotIn('ANTHROPIC_API_KEY', sent)
-        with patch.dict(os.environ, {}, clear=True), patch.object(runtime, 'find_cli', return_value='/fixture/claude'):
-            with self.assertRaisesRegex(ValueError, '금고'):
-                runtime.launch('claude', [])
+        with patch.dict(os.environ, {}, clear=True), patch.object(runtime, 'find_cli', return_value='/fixture/claude'), patch.object(runtime.os, 'execve') as execute:
+            runtime.launch('claude', [])
+            self.assertNotIn('CLAUDE_CODE_OAUTH_TOKEN', execute.call_args.args[2])
 
     def test_codex_does_not_select_account_or_modify_home(self):
         with patch.dict(os.environ, {'CODEX_HOME': '/fixture/codex-home', 'OPENAI_API_KEY': 'unused'}, clear=True), \

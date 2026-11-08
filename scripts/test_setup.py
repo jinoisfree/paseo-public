@@ -26,6 +26,10 @@ home=Path(os.environ['PASEO_HOME'])
 file=home/'config.json'
 with Path(os.environ['FIXTURE_EVENTS']).open('a') as out: out.write(json.dumps([Path(sys.argv[0]).name,*args])+'\\n')
 if '--version' in args: print('26.0.0' if Path(sys.argv[0]).name=='node' else '0.15.3'); sys.exit(0)
+if Path(sys.argv[0]).name=='launchctl' and args[:1]==['bootstrap']:
+ import plistlib
+ spec=plistlib.loads(Path(args[-1]).read_bytes())
+ if any(not Path(spec[key]).parent.is_dir() for key in ('StandardOutPath','StandardErrorPath') if key in spec): sys.exit(1)
 if args[:3]==['daemon','config','set']:
  data=json.loads(file.read_text()); data[args[3]]=json.loads(args[4]); file.write_text(json.dumps(data));sys.exit(0)
 if args[:2]==['plugin','ls']:
@@ -80,8 +84,8 @@ class SetupTests(unittest.TestCase):
         patch=mock.patch.object(setup,'run',side_effect=invoke);patch.start();self.addCleanup(patch.stop)
 
     def load_config(self):
-        old=json.loads(self.legacy.read_text())
-        return {**old, **old['profiles'][str(self.root)], **read_owner(self.paseo_home/'owner/vault.json','vault').get('paths',{})}
+        old=json.loads(self.legacy.read_text()) if self.legacy.exists() else {}
+        return {**old, **old.get('profiles',{}).get(str(self.root),{}), **read_owner(self.paseo_home/'owner/vault.json','vault').get('paths',{})}
 
     def execute(self,*args):
         if args and args[0]=='install' and '--profile' not in args:
@@ -171,7 +175,7 @@ class SetupTests(unittest.TestCase):
 
     def test_modules_from_manifest_and_uninstall_generated_only(self):
         self.execute('install');a=setup.Airport();p=copy.deepcopy(a.policy)
-        p['decisions']['modules']={'value':{'claude-launcher':True},'date':'2026-01-01'}
+        p['decisions']['modules']={'claude-launcher':{'enabled':True,'date':'2026-01-01'}}
         save_owner(a.policy_file,'policy',p,p['revision']);self.execute('install')
         launcher=self.paseo_home/'airport/modules/claude-launcher/launcher.py'
         self.assertTrue(launcher.is_file());self.assertEqual(self.execute('check')[0],0)
@@ -246,7 +250,7 @@ class SetupTests(unittest.TestCase):
         (folder/'job.plist.in').write_bytes(template)
         (folder/'module.json').write_text(json.dumps({'id':'fixture','description':'fixture','requires':[], 'installationImpact':[], 'installs':[{'source':'modules/fixture/job.plist.in','target':'$LAUNCH_AGENTS/'+label+'.plist'}], 'vaultKeys':[], 'policyKeys':[]}))
         self.execute('install');a=setup.Airport();p=copy.deepcopy(a.policy)
-        p['decisions']['modules']={'value':{'fixture':True},'date':'2026-01-01'};save_owner(a.policy_file,'policy',p,p['revision'])
+        p['decisions']['modules']={'fixture':{'enabled':True,'date':'2026-01-01'}};save_owner(a.policy_file,'policy',p,p['revision'])
         self.execute('install');file=self.home/'Library/LaunchAgents'/(label+'.plist')
         self.assertTrue(file.is_file());self.assertEqual(self.execute('check')[0],0)
         self.assertTrue(any('bootstrap' in c and str(file) in c for c in self.calls()))
@@ -301,11 +305,12 @@ class SetupTests(unittest.TestCase):
                     file=home/'.config/paseo-public/config.json';file.parent.mkdir(parents=True);file.write_text('{}')
                 if trace=='agent':
                     file=home/'Library/LaunchAgents/io.github.jinoisfree.paseo-public.fixture.plist';file.parent.mkdir(parents=True);file.write_bytes(plistlib.dumps({}))
-                before={str(p):p.read_bytes() for p in home.rglob('*') if p.is_file()}
+                before={str(p):(p.read_bytes(),p.stat().st_mtime_ns,p.stat().st_ino) for p in home.rglob('*') if p.is_file()}
                 env={**os.environ,'HOME':str(home),'PASEO_HOME':str(ph),'PASEO_PUBLIC_CONFIG':str(home/'.config/paseo-public/config.json')}
                 result=subprocess.run([sys.executable,'-B',str(source),'install'],env=env,capture_output=True,text=True)
                 self.assertEqual(result.returncode,2,result.stderr);self.assertIn('--profile server|desktop',result.stdout)
-                self.assertEqual({str(p):p.read_bytes() for p in home.rglob('*') if p.is_file()},before)
+                self.assertEqual({str(p):(p.read_bytes(),p.stat().st_mtime_ns,p.stat().st_ino) for p in home.rglob('*') if p.is_file()},before)
+                self.assertEqual(self.calls(),[])  # Includes fake npm: no dependency install or CLI probe.
                 self.assertFalse((ph/'owner').exists())
                 self.assertFalse((ph/'airport').exists())
 

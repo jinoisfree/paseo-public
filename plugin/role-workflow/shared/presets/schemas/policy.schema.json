@@ -15,23 +15,30 @@
       "properties": {
         "modules": {
           "type": "object",
-          "properties": {
-            "value": {
-              "type": "object",
-              "additionalProperties": {
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "enabled": {
                 "type": "boolean"
+              },
+              "date": {
+                "type": "string",
+                "format": "date"
+              },
+              "variant": {
+                "type": "string",
+                "enum": [
+                  "A",
+                  "B"
+                ]
               }
             },
-            "date": {
-              "type": "string",
-              "format": "date"
-            }
-          },
-          "required": [
-            "value",
-            "date"
-          ],
-          "additionalProperties": false
+            "required": [
+              "enabled",
+              "date"
+            ],
+            "additionalProperties": false
+          }
         },
         "schedule": {
           "type": "object",
@@ -168,6 +175,47 @@
           },
           "required": [
             "value",
+            "date"
+          ],
+          "additionalProperties": false
+        },
+        "archiveRotate": {
+          "type": "object",
+          "properties": {
+            "days": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "date": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          "required": [
+            "days",
+            "date"
+          ],
+          "additionalProperties": false
+        },
+        "claudeHome": {
+          "type": "object",
+          "properties": {
+            "date": {
+              "type": "string",
+              "format": "date"
+            },
+            "settings": {
+              "type": "object"
+            },
+            "manuals": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "required": [
             "date"
           ],
           "additionalProperties": false

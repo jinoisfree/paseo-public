@@ -20,6 +20,8 @@ from public_runtime import (ROOT, AUTO_UPDATE_LABEL, paseo_home, config_path,
     auto_update_agent_state, auto_update_agent_installed)
 from owner_store import atomic_bytes, atomic_json, read_owner, save_owner, today
 from airport_schema import validate_schema, SCHEMAS
+from equipment import plan as equipment_plan
+from claude_home import desired as claude_desired
 
 PREFIX = 'io.github.jinoisfree.paseo-public.'
 STABLE_PATHS = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin']
@@ -114,6 +116,9 @@ def install_agent(label, generated, home):
     if not label.startswith(PREFIX):
         raise RuntimeError('공항 소유가 아닌 LaunchAgent입니다.')
     file = home/'Library/LaunchAgents'/(label+'.plist')
+    job = plistlib.loads(generated)
+    for key in ('StandardOutPath', 'StandardErrorPath'):
+        if job.get(key): Path(job[key]).parent.mkdir(parents=True, exist_ok=True)
     if file.exists() and file.read_bytes() == generated and file.stat().st_mode & 0o777 == 0o600:
         run(['/bin/launchctl', 'print', f'gui/{os.getuid()}/{label}'], home)
         return
@@ -166,6 +171,8 @@ def module_files(ids, home, config=None):
         if data['id'] != module_id:
             raise RuntimeError('설비 id가 디렉터리와 다릅니다.')
         for item in data['installs']:
+            if item.get('variant') and item['variant'] != config.get('moduleVariants', {}).get(module_id, 'A'):
+                continue
             source = (ROOT/item['source']).resolve()
             target = Path(item['target'].replace('$INSTALL_ROOT', str(install_root)).replace('$LAUNCH_AGENTS', str(home/'Library/LaunchAgents'))).resolve()
             owned_agent = target.parent == (home/'Library/LaunchAgents').resolve() and target.name.startswith(PREFIX) and target.suffix == '.plist'
@@ -248,6 +255,7 @@ class Airport:
         self.record = read_json(self.record_file)
         self.config = load_config()
         self.recommended = read_json(ROOT/'plugin/role-workflow/shared/presets/recommended.json')
+        self.fresh = not self.legacy_installation()
 
     def decision(self, key, default=None):
         return self.policy['decisions'].get(key, {}).get('value', default)
@@ -273,9 +281,24 @@ class Airport:
         keep = self.decision('keepRunningAfterQuit')
         if keep is not None:
             desktop = merge(desktop, {'daemon': {'keepRunningAfterQuit': keep}})
-        selected = {m: True for m in profile['modules']}
-        selected.update(self.decision('modules', {}))
-        return core, {'settings': desktop}, [m for m, enabled in selected.items() if enabled]
+        modules = [m['id'] for m in self.module_plan(option) if m['install']]
+        providers = {}
+        if 'claude-home' in modules:
+            providers['claude'] = {'env': {'CLAUDE_CONFIG_DIR': str(self.directory/'claude-home')}}
+        for product in ('claude', 'codex'):
+            if product+'-launcher' in modules:
+                providers.setdefault(product, {})['command'] = [self.tools()[1], str(self.directory/'airport/modules'/f'{product}-launcher/launcher.py')]
+                if product == 'codex':
+                    providers[product]['env'] = {'CODEX_HOME': core.get('agents', {}).get('providers', {}).get('codex', {}).get('env', {}).get('CODEX_HOME', str(self.directory/'codex-home'))}
+        if providers:
+            core = merge(core, {'agents': {'providers': providers}})
+        return core, {'settings': desktop}, modules
+
+    def module_plan(self, option=None):
+        return equipment_plan(ROOT, self.home, read_paseo(self.home), self.recommended, self.policy, self.profile(option), self.fresh)
+
+    def module_config(self):
+        return {**self.config, 'moduleVariants': {m['id']: m['variant'] for m in self.module_plan()}}
 
     def tools(self):
         node = node_executable(self.config)
@@ -333,7 +356,7 @@ class Airport:
         if entry and not same_plugin(entry) and not args.replace_registration:
             raise RuntimeError('다른 경로에 이미 등록돼 있습니다. --replace-registration으로 전환하세요.')
         core, desktop, ids = self.expected(args.profile)
-        rows = module_files(ids, self.home, self.config)  # Validate all sources before the first write.
+        rows = module_files(ids, self.home, self.module_config())  # Validate all sources before the first write.
         node, python, paseo = self.tools()
         verify_cli(paseo, self.home)
         if sys.version_info < (3, 12):
@@ -348,6 +371,10 @@ class Airport:
             raise RuntimeError('다른 저장소의 자동 업데이트가 이미 등록돼 있습니다.')
         saved = backup(self.home)
         policy = copy.deepcopy(self.policy)
+        if self.fresh:
+            grants = policy['decisions'].setdefault('modules', {})
+            for module_id in self.recommended['profiles'][self.profile(args.profile)]['modules']:
+                grants.setdefault(module_id, {'enabled': True, 'date': today()})
         policy['decisions'].setdefault('profile', {'value': self.profile(args.profile), 'date': today()})
         for key in ('phoneNotifications', 'phoneNotificationEndpoint'):
             if key in self.config:
@@ -358,6 +385,12 @@ class Airport:
         self.vault = save_owner(self.vault_file, 'vault', vault, self.vault['revision'])
         self.config.update(self.vault['paths'])
         self.dependencies()
+        self.capture_providers(core, account)
+        if 'claude-home' in ids:
+            self.assemble_claude()
+        agent_directory = (self.home/'Library/LaunchAgents').resolve()
+        self.install_modules([row for row in rows if row['target'].parent != agent_directory])
+        atomic_json(self.record_file, self.record)
         # CLI supports top-level objects; preserve unrelated nested fields in each object.
         for key, value in core.items():
             actual = read_paseo(self.home).get(key)
@@ -371,19 +404,70 @@ class Airport:
         account = read_paseo(self.home)
         plugins = copy.deepcopy(account.get('plugins', {}))
         desired = {'source': 'directory', 'path': str(ROOT/'plugin/role-workflow'), 'enabled': True}
-        if plugins.get('role-workflow') != desired:
+        desired_plugins = {**plugins, 'role-workflow': desired}
+        if 'codex-usage' in ids:
+            desired_plugins['codex-usage'] = {'source': 'directory', 'path': str(ROOT/'plugin/codex-usage'), 'enabled': True}
+        if plugins != desired_plugins:
             self.ensure_idle()
-            plugins['role-workflow'] = desired
-            self.command('daemon', 'config', 'set', 'plugins', json.dumps(plugins))
+            self.command('daemon', 'config', 'set', 'plugins', json.dumps(desired_plugins))
             self.command('daemon', 'restart')
             verify_registration(paseo, self.home)
-        self.install_modules(rows)
+        self.install_modules([row for row in rows if row['target'].parent == agent_directory])
+        self.record['equipment'] = self.module_plan()
         self.agents(args.with_auto_update)
         atomic_json(self.record_file, self.record)
         checked = self.check()
         if checked['differences']:
             raise RuntimeError('설치 후 check 차이가 남았습니다. check --json과 설치 백업을 확인하세요.')
-        return {'backup': str(saved), 'profile': self.profile(), 'notices': self.notices()}
+        return {'backup': str(saved), 'profile': self.profile(), 'equipment': self.module_plan(), 'notices': self.notices()}
+
+    def capture_providers(self, core, actual):
+        for provider, desired in core.get('agents', {}).get('providers', {}).items():
+            original = actual.get('agents', {}).get('providers', {}).get(provider, {})
+            if 'command' in desired:
+                self.record.setdefault('providerCommands', {}).setdefault(provider, original.get('command'))
+            for key,value in desired.get('env', {}).items():
+                entry = self.record.setdefault('providerEnvironment', {}).setdefault(provider, {}).setdefault(key, {'before': original.get('env', {}).get(key)})
+                entry['installed'] = value
+        atomic_json(self.record_file, self.record)  # Recovery data must precede config changes.
+
+    def assemble_claude(self):
+        settings, links = claude_desired(ROOT, self.home, self.directory, self.policy)
+        folder = self.directory/'claude-home'
+        file = folder/'settings.json'
+        if 'claudeSettingsBefore' not in self.record:
+            self.record['claudeSettingsBefore'] = file.read_text() if file.exists() else None
+        generated = (json.dumps(settings, ensure_ascii=False, indent=2)+'\n').encode()
+        self.record['claudeSettingsHash'] = hashlib.sha256(generated).hexdigest()
+        atomic_json(self.record_file, self.record)
+        if not file.exists() or file.read_bytes() != generated:
+            atomic_bytes(file, generated)
+        targets = self.record.setdefault('claudeSkillLinks', {})
+        wanted = {str(folder/'skills'/name) for name in links}
+        for name, target in list(targets.items()):
+            link = Path(name)
+            if name not in wanted and link.is_symlink() and str(link.readlink()) == target:
+                link.unlink();targets.pop(name)
+        for name, source in links.items():
+            link = folder/'skills'/name
+            link.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if link.is_symlink() and link.resolve() == source.resolve(): continue
+            if link.is_symlink() and str(link) in targets and str(link.readlink()) == targets[str(link)]:
+                link.unlink()
+            elif link.exists() or link.is_symlink():
+                raise RuntimeError('분리 홈 스킬의 기존 항목과 충돌합니다. 지시서를 확인하세요.')
+            link.symlink_to(source);targets[str(link)] = str(source)
+        atomic_json(self.record_file, self.record)
+
+    def restore_claude(self):
+        file = self.directory/'claude-home/settings.json'
+        if file.exists() and hashlib.sha256(file.read_bytes()).hexdigest() == self.record.get('claudeSettingsHash'):
+            previous = self.record.get('claudeSettingsBefore')
+            if previous is None: file.unlink()
+            else: atomic_bytes(file, previous.encode())
+        for name,target in self.record.get('claudeSkillLinks', {}).items():
+            link = Path(name)
+            if link.is_symlink() and str(link.readlink()) == target: link.unlink()
 
     def notices(self):
         return ['권장 권한: Codex full-access, Claude bypassPermissions.',
@@ -395,9 +479,12 @@ class Airport:
         if not same_plugin(entry):
             raise RuntimeError('등록 경로가 달라 refresh를 건너뜁니다.')
         self.ensure_idle()
-        rows = module_files(self.expected()[2], self.home, self.config)
+        rows = module_files(self.expected()[2], self.home, self.module_config())
         self.dependencies()
         self.install_modules(rows)
+        if 'claude-home' in self.expected()[2]:
+            self.assemble_claude()
+        self.record['equipment'] = self.module_plan()
         self.agents()
         for file in generated_cleanup(self.home):
             if file.is_dir():
@@ -452,7 +539,7 @@ class Airport:
             if not file.exists():
                 rows.append({'key': f'owner.{kind}', 'expected': '있음', 'actual': '없음', 'source': '사장 칸'})
         try:
-            for row in module_files(ids, self.home, self.config):
+            for row in module_files(ids, self.home, self.module_config()):
                 actual = row['target'].read_bytes() if row['target'].exists() else None
                 if actual != row['content'] or row['target'].stat().st_mode & 0o777 != row['mode']:
                     rows.append({'key': str(row['target']), 'expected': '명세서와 일치', 'actual': '없음 또는 다름', 'source': '설비'})
@@ -467,7 +554,17 @@ class Airport:
             except (OSError, ValueError):
                 actual = None
             rows += differences(expected, actual, 'LaunchAgent 틀', 'launchd.auto-update', strict=True)
-        return {'airportCommit': version(['git', 'rev-parse', 'HEAD'], self.home, raw=True),
+        if 'codex-usage' in ids:
+            usage = account.get('plugins', {}).get('codex-usage', {})
+            rows += differences({'source':'directory','path':str(ROOT/'plugin/codex-usage'),'enabled':True}, usage, '설비', 'plugins.codex-usage')
+        if 'claude-home' in ids:
+            desired_settings, links = claude_desired(ROOT, self.home, self.directory, self.policy)
+            rows += differences(desired_settings, read_json(self.directory/'claude-home/settings.json'), '명세서 ⊕ 지시서', 'claudeHome.settings', strict=True)
+            for name, source in links.items():
+                link = self.directory/'claude-home/skills'/name
+                if not link.is_symlink() or link.resolve() != source.resolve():
+                    rows.append({'key': 'claudeHome.skills.'+name, 'expected': '선택한 스킬 링크', 'actual': '없음 또는 다름', 'source': '본체 스킬/지시서'})
+        return {'equipment': self.module_plan(), 'airportCommit': version(['git', 'rev-parse', 'HEAD'], self.home, raw=True),
                 'versions': self.versions(), 'profile': self.profile(), 'differences': rows}
 
     def versions(self):
@@ -542,7 +639,18 @@ class Airport:
         state = read_json(auto_update_data(self.config)/'state.json')
         success = state.get('lastSuccessAt') or (state.get('finishedAt') if state.get('result') == 'updated' else None)
         add('autoUpdate.lastSuccess', bool(success), '자동 업데이트 마지막 성공 시각을 확인하세요: '+str(success or '없음'))
-        return {'checks': checks, 'versions': versions, 'notices': self.notices()}
+        for module in self.module_plan():
+            add('equipment.'+module['id'], not module['conflicts'], module['reason'])
+        if 'claude-home' in self.expected()[2]:
+            config_home = account.get('agents', {}).get('providers', {}).get('claude', {}).get('env', {}).get('CLAUDE_CONFIG_DIR')
+            add('claude.home.env', config_home == str(self.directory/'claude-home'), '제공자 CLAUDE_CONFIG_DIR을 분리 홈과 맞추세요.')
+            _, links = claude_desired(ROOT, self.home, self.directory, self.policy)
+            core_skills = read_json(ROOT/'plugin/role-workflow/shared/presets/claude-home/skills.json')
+            add('claude.home.coreSkills', all((self.home/'.claude/skills'/name).is_dir() for name in core_skills), '본체 Host → Skills에서 Paseo 스킬을 1회 설치하세요.', True)
+            unknown = [p.name for p in (self.home/'.claude/skills').glob('paseo*') if p.is_dir() and p.name not in core_skills]
+            add('claude.home.newSkills', not unknown, '새 본체 스킬이 있으면 공항 스킬 명세를 갱신하세요.')
+            add('claude.home.skills', all((self.directory/'claude-home/skills'/name).is_symlink() for name in links), '본체 스킬·사장 매뉴얼 링크를 확인하세요.')
+        return {'checks': checks, 'equipment': self.module_plan(), 'versions': versions, 'notices': self.notices()}
 
     def remove_auto_update(self):
         # Preserve the existing opt-out flag's narrow meaning.
@@ -560,6 +668,9 @@ class Airport:
         account = read_paseo(self.home)
         plugins = copy.deepcopy(account.get('plugins', {}))
         changed = False
+        usage = plugins.get('codex-usage', {})
+        if isinstance(usage, dict) and usage.get('path') and Path(usage['path']).resolve() == (ROOT/'plugin/codex-usage').resolve():
+            plugins.pop('codex-usage');account['plugins'] = plugins;changed = True
         if same_plugin(plugins.get('role-workflow')):
             plugins.pop('role-workflow')
             account['plugins'] = plugins
@@ -575,6 +686,14 @@ class Airport:
                 else:
                     entry['command'] = command
                 changed = True
+        for provider, keys in self.record.get('providerEnvironment', {}).items():
+            env = account.get('agents', {}).get('providers', {}).get(provider, {}).get('env', {})
+            for key, record in keys.items():
+                if env.get(key) == record['installed']:
+                    if record['before'] is None: env.pop(key, None)
+                    else: env[key] = record['before']
+                    changed = True
+        self.restore_claude()
         if changed:
             if daemon_running(self.home):
                 for key in ('agents', 'plugins'):
@@ -656,7 +775,7 @@ def main(argv=None):
             return 2
     if args.dry_run:
         result = {'action': args.action, 'dryRun': True, 'profile': airport.profile(args.profile),
-                  'cleanup': [str(p) for p in generated_cleanup(airport.home)], 'notices': airport.notices(),
+                  'equipment': airport.module_plan(args.profile), 'cleanup': [str(p) for p in generated_cleanup(airport.home)], 'notices': airport.notices(),
                   'steps': {'install': ['백업', '금고·지시서 revision 비교', '본체 상위 객체 맞춤', '등록 변경 시 데몬 재시작', '설비 설치'],
                             'refresh': ['lock 변경 시 npm ci', '설비 틀 재생성', '미참조 생성물 정리', '켜진 플러그인만 reload'],
                             'uninstall': ['provider command 원복', '등록·공항 LaunchAgent·생성물 제거', '사장 칸 보존' if not args.purge_owner else '백업 뒤 사장 칸 삭제'],

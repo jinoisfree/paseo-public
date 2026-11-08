@@ -57,7 +57,7 @@ class OwnerSchemaTests(unittest.TestCase):
     def test_modules_have_valid_manifests_and_real_template_sources(self):
         schema = json.loads((SCHEMAS / 'module.schema.json').read_text())
         manifests = sorted((ROOT / 'modules').glob('*/module.json'))
-        self.assertEqual(len(manifests), 3)
+        self.assertEqual(len(manifests), 9)  # C22~C28 add six public facilities.
         for file in manifests:
             value = json.loads(file.read_text()); validate_schema(value, schema)
             self.assertEqual(value['id'], file.parent.name)

@@ -1,0 +1,24 @@
+{
+  "id": "codex-usage",
+  "description": "Codex 제공자 계정 사용량 플러그인",
+  "requires": [
+    "Paseo.app"
+  ],
+  "installationImpact": [
+    "codex-usage 등록"
+  ],
+  "installs": [],
+  "vaultKeys": [],
+  "policyKeys": [
+    "decisions.modules"
+  ],
+  "conflicts": [
+    {
+      "kind": "plugin-source",
+      "patterns": [
+        "registerUsageSource",
+        "codex-paseo"
+      ]
+    }
+  ]
+}

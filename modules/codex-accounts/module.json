@@ -26,5 +26,6 @@
   ],
   "policyKeys": [
     "decisions.modules"
-  ]
+  ],
+  "conflicts": []
 }

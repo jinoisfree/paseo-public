@@ -1,0 +1,49 @@
+{
+  "id": "paseo-watchdog",
+  "description": "Paseo paseo-watchdog 설비",
+  "requires": [
+    "Paseo.app",
+    "python3"
+  ],
+  "installationImpact": [
+    "공항 LaunchAgent 생성"
+  ],
+  "installs": [
+    {
+      "source": "modules/paseo-watchdog/job.plist.in",
+      "target": "$LAUNCH_AGENTS/io.github.jinoisfree.paseo-public.paseo-watchdog.plist"
+    },
+    {
+      "source": "modules/paseo-watchdog/run.py",
+      "target": "$INSTALL_ROOT/modules/paseo-watchdog/run.py"
+    },
+    {
+      "source": "modules/service_runtime.py",
+      "target": "$INSTALL_ROOT/modules/service_runtime.py"
+    },
+    {
+      "source": "modules/launcher_runtime.py",
+      "target": "$INSTALL_ROOT/modules/launcher_runtime.py"
+    },
+    {
+      "source": "plugin/role-workflow/shared/presets/recommended.json",
+      "target": "$INSTALL_ROOT/presets/recommended.json"
+    }
+  ],
+  "vaultKeys": [
+    "paths.app",
+    "paths.python"
+  ],
+  "policyKeys": [
+    "decisions.modules"
+  ],
+  "conflicts": [
+    {
+      "kind": "script-content",
+      "patterns": [
+        "plugin.*reload",
+        "paseo"
+      ]
+    }
+  ]
+}

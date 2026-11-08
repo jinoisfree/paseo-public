@@ -93,7 +93,13 @@
       "modules": [
         "daemon-service",
         "update-watch",
-        "paseo-watchdog"
+        "paseo-watchdog",
+        "codex-usage",
+        "codex-accounts",
+        "claude-home",
+        "claude-launcher",
+        "codex-launcher",
+        "archive-rotate"
       ]
     },
     "desktop": {
@@ -102,7 +108,19 @@
           "manageBuiltInDaemon": true
         }
       },
-      "modules": []
+      "modules": [
+        "codex-usage",
+        "codex-accounts",
+        "claude-home",
+        "claude-launcher",
+        "codex-launcher",
+        "archive-rotate"
+      ]
+    }
+  },
+  "equipment": {
+    "archiveRotate": {
+      "afterDays": 30
     }
   }
 }

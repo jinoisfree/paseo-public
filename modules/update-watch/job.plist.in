@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>io.github.jinoisfree.paseo-public.update-watch</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__PYTHON__</string>
+		<string>__INSTALL_ROOT__/modules/update-watch/run.py</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>__HOME__</string>
+		<key>PASEO_HOME</key>
+		<string>__PASEO_HOME__</string>
+		<key>PATH</key>
+		<string>__PATH__</string>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>__INSTALL_ROOT__/logs/update-watch.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>__INSTALL_ROOT__/logs/update-watch.err.log</string>
+	<key>WatchPaths</key>
+	<array>
+		<string>__APP__/Contents/Info.plist</string>
+	</array>
+	<key>StartInterval</key>
+	<integer>3600</integer>
+</dict>
+</plist>

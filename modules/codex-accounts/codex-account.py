@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from launcher_runtime import find_cli, paseo_cli
+from launcher_runtime import find_cli, paseo_cli, owner_vault
 
 HOME = Path.home()
 PASEO_HOME = Path(os.environ.get("PASEO_HOME", HOME / ".paseo"))
@@ -47,9 +47,7 @@ def profile(name):
 
 
 def names():
-    if not ACCOUNTS.is_dir():
-        return []
-    return sorted(p.name for p in ACCOUNTS.iterdir() if os.path.lexists(p / "auth.json"))
+    return sorted(name for name in owner_vault().get('codexAccounts', []) if isinstance(name, str) and name and '/' not in name and not name.startswith('.'))
 
 
 def active_name():
@@ -65,6 +63,8 @@ def active_name():
 def require_name(name):
     if not name or "/" in name or name.startswith("."):
         sys.exit(f"계정 이름이 올바르지 않습니다: {name!r}")
+    if name not in names():
+        sys.exit('금고 codexAccounts에 등록한 계정 이름을 먼저 명시하세요.')
     return name
 
 
@@ -130,6 +130,7 @@ def reload_codex_agents():
     """Codex 프로세스는 시작할 때 읽은 로그인을 계속 쓰므로, 쉬고 있는 Codex 대화를 다시 띄운다."""
     paseo = [paseo_cli(), "--home", str(PASEO_HOME)]
     env = dict(os.environ)
+    env.pop('PASEO_HOST', None)
     try:
         listed = subprocess.run(
             [*paseo, "ls", "--json"], capture_output=True, text=True, check=True, timeout=30, env=env

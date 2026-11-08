@@ -1,0 +1,7 @@
+{
+  "id": "codex-usage",
+  "description": "Paseo Codex 제공자 계정의 사용량",
+  "requirements": {
+    "paseo": ">=0.15.0 <0.16.0"
+  }
+}
