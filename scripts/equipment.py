@@ -39,7 +39,9 @@ def conflicts(manifest, home, account):
                     candidate = Path(str(arg)).expanduser()
                     if candidate.is_absolute() and candidate.suffix in ('.sh', '.py', '') and candidate.is_file():
                         try:
-                            body = candidate.read_text()
+                            # Shell/Python full-line comments describe other facilities too;
+                            # only executable content can establish a script conflict.
+                            body = '\n'.join(line for line in candidate.read_text().splitlines() if not line.lstrip().startswith('#'))
                             match = match or all(re.search(pattern, body) for pattern in rule['patterns'])
                         except (OSError, UnicodeError):
                             pass
