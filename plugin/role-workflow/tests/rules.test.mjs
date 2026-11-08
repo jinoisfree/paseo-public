@@ -144,6 +144,12 @@ test('lightweight reading and record policy remains consistent in injected promp
  assert.match(RULES['10-planning.md'],/`있음`은 갈래가 3개 이상이고, 갈래끼리 담당 파일이 겹치지 않으며, 각 갈래를 따로 시험하고 완료를 확인할 수 있을 때만 적는다/);
  assert.match(RULES['10-planning.md'],/한 갈래의 결과를 다른 갈래가 쓰면 선행 관계로 적는다/);
  assert.match(RULES['10-planning.md'],/^9\. 작업 범위·금지 범위·선행 작업·병렬 갈래\(있음\/없음과 이유, STEP 6\)$/m);
+ // Additional handoff 3, AC-14: require verifiable reasons for declining parallelism.
+ assert.match(RULES['10-planning.md'],/여러 TASK가 공통 기반\(공유 함수·자료 구조 등\)을 쓴다는 이유만으로 `없음`이라 하지 않는다/);
+ assert.match(RULES['10-planning.md'],/기반 TASK를 선행으로 두고 나머지 TASK로 다시 판단한다/);
+ assert.match(RULES['10-planning.md'],/파일 겹침은 STEP 6 첫 문단의 TASK별 영향 파일로 대조한다/);
+ assert.match(RULES['10-planning.md'],/`없음`의 이유에는 걸린 기준\(갈래 3개 미만 \/ 파일 겹침 \/ 따로 시험 불가 \/ 경미 변경\)과 구체 근거를 적는다/);
+ assert.match(RULES['10-planning.md'],/예: `없음\(파일 겹침: approval\.py를 TASK-3·4가 수정\)`/);
  assert.match(RULES['20-implementation.md'],/계획에 독립 갈래가 있고 실행 도구가 하위 에이전트 병렬 실행을 지원할 때만/);
  assert.match(RULES['20-implementation.md'],/갈래가 2개 이하이거나, 변경이 작거나, 한 파일에 몰리면 직접 구현한다/);
  assert.match(RULES['20-implementation.md'],/지원하지 않는 도구에서는 차례대로 직접 구현한다/);
