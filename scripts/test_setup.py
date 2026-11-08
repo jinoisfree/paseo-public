@@ -33,8 +33,8 @@ if Path(sys.argv[0]).name=='launchctl' and args[:1]==['bootstrap']:
 if args[:3]==['daemon','config','set']:
  data=json.loads(file.read_text()); data[args[3]]=json.loads(args[4]); file.write_text(json.dumps(data));sys.exit(0)
 if args[:2]==['plugin','ls']:
- data=json.loads(file.read_text()); entry=data.get('plugins',{}).get('role-workflow')
- print(json.dumps([{'id':'role-workflow','enabled':entry['enabled'],'status':'running','path':entry['path']}] if entry else []));sys.exit(0)
+ data=json.loads(file.read_text()); plugin_id=args[2] if len(args)>2 and not args[2].startswith('-') else 'role-workflow'; entry=data.get('plugins',{}).get(plugin_id)
+ print(json.dumps([{'id':plugin_id,'enabled':entry['enabled'],'status':'running','path':entry['path']}] if entry else []));sys.exit(0)
 sys.exit(0)
 '''
 
@@ -318,6 +318,20 @@ class SetupTests(unittest.TestCase):
         a=setup.Airport();self.legacy.unlink();self.config.write_text('{}')
         self.assertEqual(a.profile(installing=True),'desktop')
         self.assertEqual(a.profile('server',installing=True),'server')
+
+    def test_same_path_new_commit_install_activates_once_for_policy_migration(self):
+        actual_version=setup.version;head=['a'*40]
+        def version(command,home,**kwargs):
+            return head[0] if command[0]=='git' else actual_version(command,home,**kwargs)
+        with mock.patch.object(setup,'version',side_effect=version):
+            self.execute('install');self.events.unlink()
+            head[0]='b'*40
+            self.assertEqual(self.execute('check')[0],1)
+            self.execute('install')
+            self.assertEqual(sum(c[1:3]==['plugin','reload'] for c in self.calls()),1)
+            self.assertEqual(self.execute('check')[0],0)
+            self.events.unlink();self.execute('install')
+            self.assertFalse(any(c[1:3]==['plugin','reload'] for c in self.calls()))
 
 
 if __name__=='__main__':

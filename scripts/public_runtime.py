@@ -95,15 +95,15 @@ def busy_workflows(home):
     return blocked
 
 
-def verify_plugin_entries(entries, root, after='reload'):
+def verify_plugin_entries(entries, root, after='reload', plugin_id='role-workflow'):
     """Check `plugin ls role-workflow --json` output for a clean registration from root."""
     if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
-        raise RuntimeError(f'Expected one role-workflow plugin after {after}')
+        raise RuntimeError(f'Expected one {plugin_id} plugin after {after}')
     entry = entries[0]
-    if (entry.get('id') != 'role-workflow' or entry.get('enabled') is not True or
+    if (entry.get('id') != plugin_id or entry.get('enabled') is not True or
             entry.get('status') != 'running' or entry.get('error') or
-            Path(entry.get('path', '')).resolve() != (root/'plugin/role-workflow').resolve()):
-        raise RuntimeError('role-workflow is not running cleanly from this checkout')
+            Path(entry.get('path', '')).resolve() != (root/'plugin'/plugin_id).resolve()):
+        raise RuntimeError(f'{plugin_id} is not running cleanly from this checkout')
 
 
 def auto_update_agent_state(home, root):

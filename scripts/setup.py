@@ -407,11 +407,21 @@ class Airport:
         desired_plugins = {**plugins, 'role-workflow': desired}
         if 'codex-usage' in ids:
             desired_plugins['codex-usage'] = {'source': 'directory', 'path': str(ROOT/'plugin/codex-usage'), 'enabled': True}
-        if plugins != desired_plugins:
+        changed_registration = plugins != desired_plugins
+        if changed_registration:
             self.ensure_idle()
             self.command('daemon', 'config', 'set', 'plugins', json.dumps(desired_plugins))
             self.command('daemon', 'restart')
             verify_registration(paseo, self.home)
+        activated = version(['git', 'rev-parse', 'HEAD'], self.home, raw=True)
+        if not changed_registration and activated and self.record.get('activatedCommit') != activated:
+            self.ensure_idle()
+            for plugin_id in ['role-workflow', *(['codex-usage'] if 'codex-usage' in ids else [])]:
+                self.command('plugin', 'reload', plugin_id)
+                verify_registration(paseo, self.home, plugin_id=plugin_id)
+        if changed_registration and 'codex-usage' in ids:
+            verify_registration(paseo, self.home, plugin_id='codex-usage')
+        if activated: self.record['activatedCommit'] = activated
         self.install_modules([row for row in rows if row['target'].parent == agent_directory])
         self.record['equipment'] = self.module_plan()
         self.agents(args.with_auto_update)
@@ -491,11 +501,22 @@ class Airport:
                 shutil.rmtree(file)
             else:
                 file.unlink()
-        if entry.get('enabled') is not False and read_paseo(self.home).get('pluginsEnabled') is not False:
-            self.command('plugin', 'reload', 'role-workflow')
-            verify_registration(cli_path(self.config), self.home, 'refresh')
-        else:
-            self.refresh_event('skipped', '꺼 둔 플러그인의 reload를 건너뜁니다.')
+        account = read_paseo(self.home)
+        fully_active = True
+        ids = self.expected()[2]
+        for plugin_id in ('role-workflow', 'codex-usage'):
+            plugin = account.get('plugins', {}).get(plugin_id, {})
+            owned = plugin.get('source') == 'directory' and Path(plugin.get('path', '')).resolve() == (ROOT/'plugin'/plugin_id).resolve()
+            if not owned: continue
+            if plugin.get('enabled') is False or account.get('pluginsEnabled') is False or (plugin_id == 'codex-usage' and plugin_id not in ids):
+                fully_active = False
+                self.refresh_event('skipped', '꺼 두었거나 허가하지 않은 플러그인 reload를 건너뜁니다: '+plugin_id)
+                continue
+            self.command('plugin', 'reload', plugin_id)
+            verify_registration(cli_path(self.config), self.home, 'refresh', plugin_id)
+        if fully_active:
+            activated = version(['git', 'rev-parse', 'HEAD'], self.home, raw=True)
+            if activated: self.record['activatedCommit'] = activated
         atomic_json(self.record_file, self.record)
         return {'refreshed': True}
 
@@ -531,6 +552,9 @@ class Airport:
         rows = differences(core, account, '명세서 ⊕ 지시서', 'config')
         rows += differences(desktop, read_json(desktop_file(self.home)), '프로필 ⊕ 지시서', 'desktopSettings')
         entry = account.get('plugins', {}).get('role-workflow')
+        current = version(['git', 'rev-parse', 'HEAD'], self.home, raw=True)
+        if same_plugin(entry) and current and self.record.get('activatedCommit') != current:
+            rows += differences(current, self.record.get('activatedCommit'), '설치 상태', 'installation.activatedCommit')
         if not same_plugin(entry):
             rows.append({'key': 'plugins.role-workflow', 'expected': str(ROOT/'plugin/role-workflow'), 'actual': entry.get('path') if isinstance(entry, dict) else None, 'source': '시설'})
         if isinstance(entry, dict) and entry.get('enabled') is not True:
@@ -728,13 +752,13 @@ def version(command, home, raw=False):
         return None
 
 
-def verify_registration(paseo, home, after='install'):
+def verify_registration(paseo, home, after='install', plugin_id='role-workflow'):
     for attempt in range(5):
-        result = run([paseo, 'plugin', 'ls', 'role-workflow', '--json', '--home', paseo_home(home)], home, check=False)
+        result = run([paseo, 'plugin', 'ls', plugin_id, '--json', '--home', paseo_home(home)], home, check=False)
         try:
             if result.returncode:
                 raise ValueError()
-            verify_plugin_entries(json.loads(result.stdout), ROOT, after)
+            verify_plugin_entries(json.loads(result.stdout), ROOT, after, plugin_id)
             return
         except (ValueError, RuntimeError):
             if attempt == 4:
