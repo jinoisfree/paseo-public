@@ -25,7 +25,7 @@ args=sys.argv[1:]
 home=Path(os.environ['PASEO_HOME'])
 file=home/'config.json'
 with Path(os.environ['FIXTURE_EVENTS']).open('a') as out: out.write(json.dumps([Path(sys.argv[0]).name,*args])+'\\n')
-if '--version' in args: print('26.0.0' if Path(sys.argv[0]).name=='node' else '0.15.3'); sys.exit(0)
+if '--version' in args: print('v26.0.0' if Path(sys.argv[0]).name=='node' else '0.15.3'); sys.exit(0)
 if Path(sys.argv[0]).name=='launchctl' and args[:1]==['bootstrap']:
  import plistlib
  spec=plistlib.loads(Path(args[-1]).read_bytes())
@@ -265,9 +265,18 @@ class SetupTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'다른 저장소'):self.execute('install','--with-auto-update')
         self.assertEqual(self.snapshot(),before)
 
+    def test_version_reads_real_node_and_product_formats(self):
+        # Real Node prints "v26.10.0"; a leading word boundary rejected it on the first live install.
+        original=setup.run
+        try:
+            for output,expected in [('v26.10.0\n','26.10.0'),('0.15.3\n','0.15.3'),('2.1.287 (Claude Code)\n','2.1.287'),('codex-cli 0.163.0\n','0.163.0'),('v1.2.3.4\n',None)]:
+                setup.run=lambda command,home,check=True,capture=True,output=output:subprocess.CompletedProcess(command,0,output,'')
+                self.assertEqual(setup.version(['node','--version'],self.home),expected,output)
+        finally: setup.run=original
+
     def test_unsupported_node_stops_before_owner_or_backup_write(self):
         # C30: app versions outside 0.15.x warn and proceed; Node's minimum remains mandatory.
-        for executable,version in [(self.bin/'node','20.0.0')]:
+        for executable,version in [(self.bin/'node','v20.0.0')]:
             original=executable.read_text();executable.write_text('#!'+sys.executable+'\nprint("'+version+'")\n')
             before=self.snapshot()
             with self.assertRaisesRegex(RuntimeError,'22 이상'):self.execute('install')

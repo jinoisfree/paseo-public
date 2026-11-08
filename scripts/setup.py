@@ -58,7 +58,7 @@ def cli_path(config):
 
 def verify_cli(paseo, home):
     result = run([paseo, '--version'], home, check=False)
-    version = re.search(r'\b(\d+)\.(\d+)\.(\d+)\b', result.stdout or '')
+    version = re.search(r'(?<![\d.])(\d+)\.(\d+)\.(\d+)(?![\d.])', result.stdout or '')
     if result.returncode or not version:
         raise RuntimeError('Paseo 앱 CLI 버전을 읽지 못했습니다. 앱 설치를 확인하세요.')
     warn_version(version[0], paseo_home(home), notify=lambda message: run(
@@ -833,7 +833,8 @@ def version(command, home, raw=False):
         result = run(command, home, check=False)
         if result.returncode:
             return None
-        found = re.search(r'\b\d+\.\d+\.\d+\b', result.stdout or '')
+        # Node prints a v prefix (v26.10.0), so a word boundary cannot precede the digits.
+        found = re.search(r'(?<![\d.])\d+\.\d+\.\d+(?![\d.])', result.stdout or '')
         return result.stdout.strip() if raw else found[0] if found else None
     except OSError:
         return None
