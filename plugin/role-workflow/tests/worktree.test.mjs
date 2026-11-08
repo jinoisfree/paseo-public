@@ -1,3 +1,4 @@
+import { gitTestEnvironment } from "./git-test-environment.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -11,7 +12,8 @@ import { settingsSchema } from "../shared/contracts.ts";
 import { checkWorktreeBase, integrateWorktree, worktreeContext } from "../server/worktree.ts";
 import { ManagedPushRunner, REMOTE_ADVANCED_ERROR, REMOTE_ADVANCED_NOTICE } from "../server/managed-push.ts";
 
-const run = promisify(execFile);
+const execute = promisify(execFile);
+const run = (file, args, options = {}) => execute(file, args, { ...options, env: gitTestEnvironment() });
 const git = (cwd, ...args) =>
   run("git", ["-c", "user.email=wt@example.invalid", "-c", "user.name=wt", ...args], { cwd }).then((r) => r.stdout.trim());
 const block = (status, extra = {}) =>
@@ -661,7 +663,9 @@ test("AC-12/AC-14: base inspection uses only read-only Git commands and fails cl
   });
   assert.equal((await checkWorktreeBase(w, probe, w.pushTargets)).ok, true);
   assert.ok(calls.some(args => args[0] === "merge-base"));
-  for (const args of calls) {
+  for (const raw of calls) {
+    if (raw[0] === "-c") assert.equal(raw[1], "protocol.ext.allow=never");
+    const args = raw[0] === "-c" ? raw.slice(2) : raw;
     assert.ok(["rev-parse", "branch", "check-ref-format", "for-each-ref", "cat-file", "merge-base", "remote", "ls-remote"].includes(args[0]), args.join(" "));
     if (args[0] === "branch") assert.deepEqual(args, ["branch", "--show-current"]);
     if (args[0] === "merge-base") assert.equal(args[1], "--is-ancestor");
@@ -674,6 +678,25 @@ test("AC-12/AC-14: base inspection uses only read-only Git commands and fails cl
   });
   assert.equal(await broken.isAncestor(f.repo, f.base, w.pushTargets[0].commit), null);
   assert.equal((await checkWorktreeBase(w, broken, w.pushTargets)).ok, false);
+});
+
+for (const phase of ["prepare", "execute"])
+test(`AC-302 R11-1/R11-2: ${phase} object read failure or remote timeout is unreadable with no merge notice`, async t => {
+  const f = await fixture(t);
+  const { w } = await readyWorktreePush(f);
+  const savedHas = f.probe.hasCommit;
+  const savedTip = f.probe.remoteTip;
+  for (const failure of ["object-read", "network-timeout"]) {
+    const record = phase === "execute" ? await f.engine.prepareManagedPush(f.id) : null;
+    if (failure === "object-read") f.probe.hasCommit = async () => null;
+    else f.probe.remoteTip = async () => { throw Object.assign(new Error("timeout"), { killed: true }); };
+    if (record) await assert.rejects(f.engine.executeManagedPush(f.id, record.id, true), /기준 브랜치를 확인하지 못했습니다/);
+    else await assert.rejects(f.engine.prepareManagedPush(f.id), /기준 브랜치를 확인하지 못했습니다/);
+    assert.equal((await f.state()).managedPush, null);
+    assert.equal(f.sent.length, 0);
+    assert.deepEqual((await f.state()).worktreeMergeNotices, []);
+    f.probe.hasCommit = savedHas; f.probe.remoteTip = savedTip;
+  }
 });
 
 

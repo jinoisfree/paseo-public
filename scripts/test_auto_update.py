@@ -12,12 +12,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-# Agent shells carry role-workflow's push guard (GIT_CONFIG_GLOBAL); the fixtures push to a
-# local origin with the user's plain Git, as launchd runs the updater.
-for _key in ('GIT_CONFIG_GLOBAL', 'GIT_CONFIG_COUNT'):
-    os.environ.pop(_key, None)
-
 sys.path.insert(0,str(Path(__file__).resolve().parent))
+from test_git_environment import git_test_environment
 spec=importlib.util.spec_from_file_location('auto_update',Path(__file__).with_name('auto-update.py'))
 auto=importlib.util.module_from_spec(spec);spec.loader.exec_module(auto)
 
@@ -50,6 +46,9 @@ if command=='ls':
 
 class AutoUpdateTests(unittest.TestCase):
     def setUp(self):
+        # Isolate only this fixture's lifetime; restore its caller's guard afterwards.
+        isolated = mock.patch.dict(os.environ, git_test_environment(), clear=True)
+        isolated.start(); self.addCleanup(isolated.stop)
         temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
         self.base=Path(temporary.name).resolve()
         self.origin=self.base/'origin.git'

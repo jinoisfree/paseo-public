@@ -1,3 +1,4 @@
+import { gitTestEnvironment } from "./git-test-environment.mjs";
 import { archiveSdk } from "./lifecycle-fixture.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -223,7 +224,7 @@ test("AC-202 N-4: ordinary archive preserves dirty/unpushed external linked work
   const dir = await mkdtemp(path.join(tmpdir(), "external-archive-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const repo = path.join(dir, "repo"), tree = path.join(dir, "tree"), remote = path.join(dir, "remote.git");
-  const git = (cwd, ...args) => exec("git", ["-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", ...args], { cwd });
+  const git = (cwd, ...args) => exec("git", ["-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", ...args], { cwd, env: gitTestEnvironment() });
   await git(dir, "init", "-q", "-b", "main", repo);
   await git(repo, "commit", "-q", "--allow-empty", "-m", "base");
   await git(repo, "worktree", "add", "-q", "-b", "feature", tree);

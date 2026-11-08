@@ -1,3 +1,7 @@
+/** Read remote refs without enabling Git's command-based ext transport. */
+export const GIT_REMOTE_READ_OPTIONS = ["-c", "protocol.ext.allow=never"] as const;
+export const GIT_REMOTE_QUERY_TIMEOUT_MS = 20_000;
+
 /** The daemon's own environment must not point git at another repository or config. */
 export function gitEnvironment(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {

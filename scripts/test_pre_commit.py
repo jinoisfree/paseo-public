@@ -1,9 +1,9 @@
-import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from test_git_environment import git_test_environment
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -17,13 +17,13 @@ class PreCommitTest(unittest.TestCase):
         (self.repo / '.githooks').mkdir()
         shutil.copy2(ROOT / 'scripts/privacy_scan.py', self.repo / 'scripts/privacy_scan.py')
         shutil.copy2(ROOT / '.githooks/pre-commit', self.repo / '.githooks/pre-commit')
-        subprocess.run(['git', 'init', '-q', str(self.repo)], check=True)
-        self.env = {**os.environ, 'HOME': str(self.repo)}
+        self.env = {**git_test_environment(), 'HOME': str(self.repo)}
         self.env.pop('PASEO_PUBLIC_DENY_FILE', None)
+        subprocess.run(['git', 'init', '-q', str(self.repo)], check=True, env=self.env)
 
     def check(self, content, expected, deny=None):
         (self.repo / 'sample.txt').write_text(content)
-        subprocess.run(['git', 'add', 'sample.txt'], cwd=self.repo, check=True)
+        subprocess.run(['git', 'add', 'sample.txt'], cwd=self.repo, check=True, env=self.env)
         env = dict(self.env)
         if deny is not None:
             env['PASEO_PUBLIC_DENY_FILE'] = str(deny)

@@ -4,7 +4,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import type { PushTarget } from "../shared/artifacts";
 import { resolvedFolder } from "./workspaces";
-import { gitEnvironment } from "./git-environment";
+import { gitEnvironment, GIT_REMOTE_READ_OPTIONS, GIT_REMOTE_QUERY_TIMEOUT_MS } from "./git-environment";
 
 export class CleanupQueryLimitError extends Error {}
 
@@ -30,6 +30,8 @@ export interface RepoProbe {
   repository?(cwd: string): Promise<string | null>;
   /** Resolve only a hash observed in a successful push; never substitute HEAD. */
   commit?(cwd: string, hash: string): Promise<string | null>;
+  /** A missing commit is false; repository/object read failures are null. */
+  hasCommit?(cwd: string, hash: string): Promise<boolean | null>;
   /** Checkout identity: top level, HEAD, current branch ("" when detached) and shared Git dir. */
   identity?(cwd: string): Promise<RepoIdentity | null>;
   /** Read the base branch and its tracking tip without fetching; unavailable refs fail closed. */
@@ -52,11 +54,11 @@ export interface RepoIdentity {
 }
 
 const execute = promisify(execFile);
-async function git(cwd: string, args: string[]): Promise<string> {
+async function git(cwd: string, args: string[], options: { timeout?: number } = {}): Promise<string> {
   // An agent-written core.fsmonitor would otherwise run as the daemon on every status probe.
   const { stdout } = await execute("git", ["-c", "core.fsmonitor=false", ...args], {
     cwd,
-    timeout: 5000,
+    timeout: options.timeout ?? 5000,
     maxBuffer: 32 * 1024 * 1024,
     // Agents run git in the same folder; a status refresh must not take the index lock.
     env: gitEnvironment(),
@@ -125,7 +127,7 @@ export function createRepoProbe(run: typeof git = git): RepoProbe {
       // ls-remote matches patterns as ref-name suffixes; only the exact branch counts.
       let output: string;
       try {
-        output = await run(target.repository, ["ls-remote", "--exit-code", "--", urls[0], ref]);
+        output = await run(target.repository, [...GIT_REMOTE_READ_OPTIONS, "ls-remote", "--exit-code", "--", urls[0], ref], { timeout: GIT_REMOTE_QUERY_TIMEOUT_MS });
       } catch (error) {
         return (error as { code?: unknown }).code === 2 ? "" : null;
       }
@@ -315,6 +317,16 @@ export function createRepoProbe(run: typeof git = git): RepoProbe {
         return (await run(cwd, ["rev-parse", "--verify", `${hash}^{commit}`])).trim();
       } catch {
         return null;
+      }
+    },
+    async hasCommit(cwd, hash) {
+      if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(hash)) return null;
+      try {
+        const resolved = (await run(cwd, ["rev-parse", "--verify", "--quiet", `${hash}^{commit}`])).trim();
+        return resolved === hash ? true : null;
+      } catch (error) {
+        const failed = error as { code?: unknown; stderr?: string };
+        return failed.code === 1 && !failed.stderr?.trim() ? false : null;
       }
     },
     repository,

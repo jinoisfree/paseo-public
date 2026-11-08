@@ -1,3 +1,4 @@
+import { gitTestEnvironment } from "./git-test-environment.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -69,8 +70,7 @@ test("a guarded shell cannot push to any remote while fetch and the user's confi
   await writeFile(path.join(home, ".gitconfig"), "[user]\n\tname = Guarded User\n\temail = guard@example.invalid\n");
   const remote = path.join(dir, "remote.git");
   const work = path.join(dir, "work");
-  const plain = { ...process.env, HOME: home, GIT_CONFIG_NOSYSTEM: "1" };
-  delete plain.GIT_CONFIG_GLOBAL;
+  const plain = gitTestEnvironment({ ...process.env, HOME: home }, { GIT_CONFIG_GLOBAL: path.join(home, ".gitconfig") });
   await run("git", ["init", "-q", "--bare", remote], { env: plain });
   await run("git", ["clone", "-q", remote, work], { env: plain });
   await run("git", ["commit", "-q", "--allow-empty", "-m", "first"], { cwd: work, env: plain });

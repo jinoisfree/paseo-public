@@ -1,3 +1,4 @@
+import { gitTestEnvironment } from "./git-test-environment.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile, symlink } from "node:fs/promises";
@@ -9,7 +10,7 @@ import { proseArtifacts } from "../shared/artifacts.ts";
 import { repositoryPaths, inspectVerification } from "../server/artifacts.ts";
 import { pathsOverlap } from "../server/workspaces.ts";
 
-const git = (cwd, ...args) => execFileSync("git", args, { cwd, stdio: "pipe" }).toString().trim();
+const git = (cwd, ...args) => execFileSync("git", args, { cwd, stdio: "pipe", env: gitTestEnvironment() }).toString().trim();
 async function repo(t) {
   const root = await mkdtemp(path.join(tmpdir(), "workflow-artifacts-"));
   t.after(() => rm(root, { recursive: true, force: true }));

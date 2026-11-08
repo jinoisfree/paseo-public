@@ -16,7 +16,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { managedPushSchema, type ManagedPush } from "../shared/managed-push";
 import { pushTargetSchema, type PushTarget } from "../shared/artifacts";
-import { gitEnvironment } from "./git-environment";
+import { gitEnvironment, GIT_REMOTE_READ_OPTIONS, GIT_REMOTE_QUERY_TIMEOUT_MS } from "./git-environment";
 
 export interface ManagedGitResult {
   stdout: string;
@@ -33,6 +33,21 @@ const unavailable = "푸시 기록을 읽거나 저장하지 못했습니다. �
 const OUTPUT_LIMIT = 1024 * 1024;
 export const REMOTE_ADVANCED_NOTICE = "원격이 앞서 있어 푸시가 거절되었습니다. 최신 원격을 합친 새 커밋을 검증한 뒤 다시 승인받으세요.";
 export const REMOTE_ADVANCED_ERROR = `기준 앞섬: ${REMOTE_ADVANCED_NOTICE}`;
+
+/** Keep a destination's failure attached to that row, including partially executed requests. */
+function targetErrorSummary(record: ManagedPush): string {
+  if (!record.error || record.targets.length === 1) return record.error;
+  const rows = record.targets.map((target, index) => {
+    const reason = target.verified === true ? "원격 반영을 확인했습니다." : target.error ||
+      (!target.startedAt ? "아직 실행하지 않았습니다." : target.exitCode === null
+        ? "종료 결과를 확인하지 못했습니다." : target.exitCode === 0
+          ? "원격 반영 확인이 필요합니다." : `Git 푸시가 종료 코드 ${target.exitCode}로 실패했습니다.`);
+    return `대상 ${index + 1} (${target.remote}/${target.branch}): ${reason}`;
+  });
+  const header = record.targets.some(target => target.error) ? [] :
+    ["승인한 대상과 실행 기록을 확인하세요. 자동 재푸시하지 않습니다."];
+  return [...header, ...rows].join("\n");
+}
 
 // No stdin and its own process group: a credential or host-key prompt cannot wait on input,
 // and a timeout stops ssh and remote helpers too, so no push can land after it is recorded.
@@ -63,7 +78,7 @@ const runGit: ManagedPushDriver = async (cwd, args) => {
     stderr += chunk.toString("utf8");
     if (stdout.length + stderr.length > OUTPUT_LIMIT) stop();
   });
-  const timer = setTimeout(stop, args.includes("push") ? 120_000 : 15_000);
+  const timer = setTimeout(stop, args.includes("push") ? 120_000 : args.includes("ls-remote") ? GIT_REMOTE_QUERY_TIMEOUT_MS : 15_000);
   try {
     const [code] = (await once(child, "close")) as [number | null];
     return { stdout, stderr, exitCode: !failed && typeof code === "number" ? code : null };
@@ -356,6 +371,7 @@ export class ManagedPushRunner {
       record.error =
         "실행이 중단되었거나 다른 실행기가 처리 중입니다. 재푸시 없이 기록을 재확인하세요.";
     }
+    record.error = targetErrorSummary(record);
     return record;
   }
 
@@ -406,6 +422,7 @@ export class ManagedPushRunner {
   }
 
   private async save(record: ManagedPush) {
+    record.error = targetErrorSummary(record);
     record.updatedAt = now();
     await atomicRecord(this.folder(record.id), record);
   }
@@ -438,8 +455,7 @@ export class ManagedPushRunner {
     const ref = `refs/heads/${target.branch}`;
     if (!(await this.fixedDestination(target.repository, target.remoteUrl))) return null;
     const result = await this.git(target.repository, [
-      "-c",
-      "protocol.ext.allow=never",
+      ...GIT_REMOTE_READ_OPTIONS,
       "ls-remote",
       "--exit-code",
       "--",
@@ -477,8 +493,7 @@ export class ManagedPushRunner {
       "push.followTags=false",
       "-c",
       "push.recurseSubmodules=no",
-      "-c",
-      "protocol.ext.allow=never",
+      ...GIT_REMOTE_READ_OPTIONS,
       // Repository hooks are agent-writable and could push other refs with these credentials.
       "-c",
       "core.hooksPath=/dev/null",
@@ -593,6 +608,7 @@ export class ManagedPushRunner {
         ? "failed"
         : "unknown";
       record.error = "성공 종료가 기록되지 않은 대상이 있어 재푸시 없이 확인이 필요합니다.";
+      record.error = targetErrorSummary(record);
       // An independent runner may still be executing; never overwrite its in-flight record.
       return record;
     }

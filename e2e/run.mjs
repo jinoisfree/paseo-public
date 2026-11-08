@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { gitTestEnvironment } from "../plugin/role-workflow/tests/git-test-environment.mjs";
 // Manual end-to-end check: an isolated Paseo daemon (temporary PASEO_HOME, random port) loads this
 // checkout's role-workflow and talks to a fake Claude model, so no real account or quota is used.
 // The harness shape follows babo-jeonguk/paseo-usage-auto-resume (MIT).
@@ -39,7 +40,7 @@ const freePort = () =>
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 const run = (file, args, options = {}) =>
   new Promise((done) =>
-    execFile(file, args, { timeout: 180_000, maxBuffer: 16 << 20, ...options }, (error, stdout, stderr) =>
+    execFile(file, args, { timeout: 180_000, maxBuffer: 16 << 20, ...options, env: file === "git" ? gitTestEnvironment(options.env ?? baseEnv) : options.env ?? baseEnv }, (error, stdout, stderr) =>
       done({ code: error ? (typeof error.code === "number" ? error.code : 1) : 0, stdout, stderr }),
     ),
   );
@@ -55,9 +56,9 @@ async function waitFor(what, check, ms = 20_000) {
 
 const [daemonPort, modelPort] = [await freePort(), await freePort()];
 const target = `127.0.0.1:${daemonPort}`;
-const baseEnv = { ...process.env };
+const baseEnv = gitTestEnvironment();
 for (const key of Object.keys(baseEnv))
-  if (/^(PASEO_|ANTHROPIC_|CLAUDE_|GIT_CONFIG)/.test(key)) delete baseEnv[key];
+  if (/^(PASEO_|ANTHROPIC_|CLAUDE_)/.test(key)) delete baseEnv[key];
 const env = { ...baseEnv, PASEO_HOME: home };
 const cli = (...args) => run(paseo, [...args, "--home", home], { env });
 

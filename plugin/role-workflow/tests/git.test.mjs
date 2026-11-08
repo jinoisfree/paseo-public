@@ -1,30 +1,59 @@
+import { gitTestEnvironment } from "./git-test-environment.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createRepoProbe } from "../server/git.ts";
 
-const git = (cwd, ...args) => execFileSync("git", args, { cwd, stdio: "pipe" }).toString();
+const git = (cwd, ...args) => execFileSync("git", args, { cwd, stdio: "pipe", env: gitTestEnvironment() }).toString();
 
 test("AC-302: remote tip reuses the exact push URL and distinguishes absent branches from query failures", async () => {
   const target = { repository: "/repo", remote: "origin", branch: "main", commit: "a".repeat(40) };
   const tip = "b".repeat(40), ref = "refs/heads/main", url = "ssh://git@example.invalid/push.git";
-  for (const variant of ["tip", "absent", "offline", "wrong-ref", "bad-hash", "multiple-urls"]) {
+  for (const variant of ["tip", "absent", "offline", "timeout", "wrong-ref", "bad-hash", "multiple-urls"]) {
     const calls = [];
-    const probe = createRepoProbe(async (cwd, args) => {
-      calls.push(structuredClone({ cwd, args }));
+    const probe = createRepoProbe(async (cwd, args, options) => {
+      calls.push(structuredClone({ cwd, args, options }));
       if (args[0] === "check-ref-format") return "";
       if (args[0] === "remote") return variant === "multiple-urls" ? `${url}\n${url}/other\n` : `${url}\n`;
-      assert.deepEqual(args, ["ls-remote", "--exit-code", "--", url, ref]);
+      assert.deepEqual(args, ["-c", "protocol.ext.allow=never", "ls-remote", "--exit-code", "--", url, ref]);
+      assert.deepEqual(options, { timeout: 20_000 });
+      if (variant === "timeout") throw Object.assign(new Error("timeout"), { killed: true, signal: "SIGTERM" });
       if (variant === "absent" || variant === "offline") throw Object.assign(new Error(variant), { code: variant === "absent" ? 2 : 128 });
       return `${variant === "bad-hash" ? "invalid" : tip}\t${variant === "wrong-ref" ? `refs/heads/nested/${ref}` : ref}\n`;
     });
     assert.equal(await probe.remoteTip(target), variant === "tip" ? tip : variant === "absent" ? "" : null, variant);
-    assert.ok(calls.every(call => call.cwd === "/repo" && ["check-ref-format", "remote", "ls-remote"].includes(call.args[0])));
-    assert.equal(calls.filter(call => call.args[0] === "ls-remote").length, variant === "multiple-urls" ? 0 : 1);
+    assert.ok(calls.every(call => call.cwd === "/repo" && ["check-ref-format", "remote", "-c"].includes(call.args[0])));
+    assert.equal(calls.filter(call => call.args.includes("ls-remote")).length, variant === "multiple-urls" ? 0 : 1);
   }
+});
+
+test("AC-302 R11-1: commit presence distinguishes missing objects from repository or permission errors", async () => {
+  const hash = "b".repeat(40);
+  for (const code of [0, 1, 128, "EACCES"]) {
+    const probe = createRepoProbe(async (cwd, args) => {
+      assert.deepEqual(args, ["rev-parse", "--verify", "--quiet", `${hash}^{commit}`]);
+      if (code) throw Object.assign(new Error("lookup failed"), { code });
+      return `${hash}\n`;
+    });
+    assert.equal(await probe.hasCommit("/repo", hash), code === 0 ? true : code === 1 ? false : null);
+  }
+  const denied = createRepoProbe(async () => { throw Object.assign(new Error("read failed"), { code: 1, stderr: "error: Permission denied" }); });
+  assert.equal(await denied.hasCommit("/repo", hash), null);
+});
+
+test("AC-302 R11-1: a real corrupt commit is unreadable rather than a missing object", async t => {
+  const dir = await mkdtemp(path.join(tmpdir(), "git-corrupt-object-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  git(dir, "init", "-q");
+  git(dir, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "--allow-empty", "-m", "base");
+  const hash = git(dir, "rev-parse", "HEAD").trim();
+  const object = path.join(dir, ".git", "objects", hash.slice(0, 2), hash.slice(2));
+  await chmod(object, 0o600);
+  await writeFile(object, "corrupt fixture object");
+  assert.equal(await createRepoProbe().hasCommit(dir, hash), null);
 });
 
 test("probe reads the baseline, what changed since it, and whether commits are pushed", async (t) => {
@@ -55,6 +84,8 @@ test("probe reads the baseline, what changed since it, and whether commits are p
   git(work, "fetch", "-q", "origin");
   assert.equal(await probe.pushed(work), true);
   const target = await probe.pushTarget(work);
+  assert.equal(await probe.hasCommit(work, target.commit), true);
+  assert.equal(await probe.hasCommit(work, "0".repeat(40)), false);
   assert.equal(await probe.commit(work, target.commit.slice(0, 7)), target.commit);
   assert.equal(
     await probe.commit(work, "HEAD"),

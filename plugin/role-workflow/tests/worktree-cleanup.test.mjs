@@ -1,3 +1,4 @@
+import { gitTestEnvironment } from "./git-test-environment.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -12,7 +13,8 @@ import { managedPushSchema } from "../shared/managed-push.ts";
 import { withCallBudgets, createPort } from "../server/paseo-port.ts";
 import { CLEANUP_RETRY_MS, preserveEvidence } from "../server/worktree-cleanup.ts";
 
-const execute = promisify(execFile);
+const exec = promisify(execFile);
+const execute = (file, args, options = {}) => exec(file, args, { ...options, env: gitTestEnvironment() });
 const git = (cwd, ...args) => execute("git", ["-c", "user.email=cleanup@example.invalid", "-c", "user.name=cleanup", ...args], { cwd }).then(r => r.stdout.trim());
 async function fixture(t, { defaultPins = false } = {}) {
   const dir = await realpath(await mkdtemp(path.join(tmpdir(), "worktree-cleanup-")));

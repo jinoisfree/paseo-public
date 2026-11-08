@@ -1,3 +1,4 @@
+import { gitTestEnvironment } from "./git-test-environment.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -13,7 +14,7 @@ async function git(cwd, args) {
     const result = await execute("git", args, {
       cwd,
       encoding: "utf8",
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      env: gitTestEnvironment(),
     });
     return { stdout: result.stdout, stderr: result.stderr, exitCode: 0 };
   } catch (error) {
@@ -63,6 +64,75 @@ const recordPath = (f, id) => path.join(f.records, id, "record.json");
 async function replaceRecord(f, record) {
   await writeFile(recordPath(f, record.id), `${JSON.stringify(record)}\n`);
 }
+
+test("AC-303 R11-4: a multi-target rejection labels only its destination and keeps unstarted rows distinct", async t => {
+  const f = await fixture(t);
+  const runner = new ManagedPushRunner(f.records, async (cwd, args) => {
+    if (args.includes("push")) {
+      f.calls.push(structuredClone({ cwd, args }));
+      return { stdout: "! x:refs/heads/main [rejected] (non-fast-forward)\n", stderr: "", exitCode: 1 };
+    }
+    return f.driver(cwd, args);
+  });
+  const prepared = await runner.prepare("flow", 0, [f.target, { ...f.target, branch: "second" }]);
+  const failed = await runner.execute(prepared.id);
+  assert.equal(failed.state, "failed");
+  const rows = failed.error.split("\n");
+  assert.equal(rows.length, 2);
+  assert.match(rows[0], /^대상 1 \(origin\/main\): 기준 앞섬:/);
+  assert.equal(rows[1], "대상 2 (origin/second): 아직 실행하지 않았습니다.");
+  assert.equal(failed.targets[1].error, "");
+  assert.equal((await runner.read(failed.id)).error, failed.error);
+  assert.equal((await runner.recheck(failed.id)).error, failed.error);
+  assert.equal(pushes(f.calls).length, 1);
+});
+
+test("AC-303 R11-4: read-only recheck summarizes mixed target errors without spreading base advancement", async t => {
+  const f = await fixture(t);
+  const receipt = await f.runner.prepare("flow", 0, [f.target, { ...f.target, branch: "second" }]);
+  receipt.state = "failed";
+  receipt.error = REMOTE_ADVANCED_ERROR;
+  for (const [index, target] of receipt.targets.entries()) {
+    target.exitCode = 1; target.startedAt = receipt.createdAt; target.finishedAt = receipt.updatedAt;
+    target.error = index === 0 ? REMOTE_ADVANCED_ERROR : "인증 실패";
+  }
+  await replaceRecord(f, receipt);
+  const checked = await f.runner.recheck(receipt.id);
+  const rows = checked.error.split("\n");
+  assert.equal(rows.length, 2);
+  assert.match(rows[0], /^대상 1 \(origin\/main\): 기준 앞섬:/);
+  assert.equal(rows[1], "대상 2 (origin/second): 인증 실패");
+  assert.equal(checked.targets[1].error, "인증 실패");
+  assert.deepEqual(await f.runner.read(receipt.id), checked);
+  assert.equal((await f.runner.recheck(receipt.id)).error, checked.error, "summary is idempotent");
+  assert.equal(pushes(f.calls).length, 0);
+  const seeded = await git(f.remote, ["fetch", "-q", f.repository, `${f.hash}:refs/heads/main`]);
+  assert.equal(seeded.exitCode, 0);
+  const resolved = await f.runner.recheck(receipt.id);
+  assert.doesNotMatch(resolved.error, /기준 앞섬/);
+  assert.match(resolved.error, /대상 1 \(origin\/main\): 원격 반영을 확인했습니다/);
+  assert.equal(resolved.targets[1].error, "인증 실패");
+});
+
+test("AC-303 R11-4: success followed by rejection keeps the first destination confirmed", async t => {
+  const f = await fixture(t);
+  const runner = new ManagedPushRunner(f.records, async (cwd, args) => {
+    if (args.includes("push") && args.at(-1).endsWith(":refs/heads/second")) {
+      f.calls.push(structuredClone({ cwd, args }));
+      return { stdout: "! x:refs/heads/second [rejected] (fetch first)\n", stderr: "", exitCode: 1 };
+    }
+    return f.driver(cwd, args);
+  });
+  const prepared = await runner.prepare("flow", 0, [f.target, { ...f.target, branch: "second" }]);
+  const result = await runner.execute(prepared.id);
+  assert.equal(result.state, "failed");
+  const rows = result.error.split("\n");
+  assert.equal(rows[0], "대상 1 (origin/main): 원격 반영을 확인했습니다.");
+  assert.match(rows[1], /^대상 2 \(origin\/second\): 기준 앞섬:/);
+  assert.equal(result.targets[0].error, "");
+  assert.equal(result.targets[0].verified, true);
+  assert.equal(pushes(f.calls).length, 2);
+});
 
 for (const [stdout, stderr, behind] of [
   ["! x:refs/heads/main [rejected] (non-fast-forward)\n", "", true],

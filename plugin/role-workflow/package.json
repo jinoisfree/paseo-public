@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsgo --noEmit",
-    "test": "env -u GIT_CONFIG_GLOBAL -u GIT_CONFIG_COUNT tsx --test tests/*.test.mjs",
+    "test": "tsx --test tests/*.test.mjs",
     "rules:sync": "tsx scripts/sync-rules.mts"
   },
   "devDependencies": {
