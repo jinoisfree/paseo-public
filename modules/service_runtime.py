@@ -4,7 +4,9 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
+import socket
 import shutil
 import subprocess
 import sys
@@ -13,6 +15,19 @@ import time
 from launcher_runtime import paseo_cli, find_cli, app_version, warn_version
 
 PREFIX = 'io.github.jinoisfree.paseo-public.'
+# C36/F1: module ids map explicitly to methods; ids with dashes never derive a method name.
+TASKS = {'daemon-service': 'daemon_service', 'update-watch': 'update_watch',
+         'paseo-watchdog': 'watchdog', 'archive-rotate': 'archive_rotate'}
+NOTIFY_INTERVAL = 3600
+RECHECK_SECONDS = 10
+
+
+def port_open(host, port, timeout=2):
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 def read(file, default=None):
@@ -36,8 +51,11 @@ def atomic(file, value):
 
 
 class Service:
-    def __init__(self, home=None, runner=None, now=time.time):
+    def __init__(self, home=None, runner=None, now=time.time, sleep=time.sleep, probe=port_open, daemon_plist=None):
         self.home = Path(home or os.environ.get('PASEO_HOME', Path.home()/'.paseo'))
+        self.sleep = sleep
+        self.probe = probe
+        self.daemon_plist = Path(daemon_plist or Path(os.environ.get('HOME') or Path.home())/'Library/LaunchAgents'/f'{PREFIX}daemon-service.plist')
         self.owner = read(self.home/'owner/policy.json')
         self.vault = read(self.home/'owner/vault.json')
         self.now = now
@@ -58,7 +76,14 @@ class Service:
         with file.open('a') as out:
             out.write(json.dumps({'at': self.now(), 'result': result, **details})+'\n')
 
-    def notify(self, message):
+    def notify(self, message, key=None):
+        if key:
+            # C36/F3: a repeating failure notifies once per key per hour; every run is still logged.
+            file = self.home/'airport/runtime/notifications.json'
+            sent = read(file)
+            if self.now() - sent.get(key, 0) < NOTIFY_INTERVAL:
+                self.event('notification', 'suppressed', key=key);return
+            sent[key] = self.now();atomic(file, sent)
         try:
             self.runner(['/usr/bin/osascript', '-e', 'display notification '+json.dumps(message)+' with title "Paseo 설비"'], capture_output=True, text=True, timeout=10)
         except (OSError, subprocess.SubprocessError):
@@ -74,7 +99,19 @@ class Service:
         state = read(self.home/'role-workflow/state.json', {'workflows': []})
         return any(w.get('status') == 'active' and ((w.get('pending') or {}).get('stage') == 'sending' or any((w.get(role) or {}).get('compaction') for role in ('plan', 'execute'))) for w in state['workflows'])
 
+    def owns_daemon_service(self):
+        try:
+            job = plistlib.loads(self.daemon_plist.read_bytes())
+        except (OSError, ValueError, plistlib.InvalidFileException):
+            return False
+        home = (job.get('EnvironmentVariables') or {}).get('PASEO_HOME')
+        return bool(home) and Path(home).expanduser().resolve() == self.home.resolve()
+
     def kickstart(self):
+        # The label is global to the macOS account: restart it only when it serves the checked home.
+        if not self.owns_daemon_service():
+            self.event('daemon-service', 'home-mismatch', home=str(self.home))
+            raise RuntimeError('daemon-service가 이 PASEO_HOME을 관리하지 않아 재시작하지 않습니다.')
         # Only the public daemon service, never an app or another user's process.
         result = self.runner(['/bin/launchctl', 'kickstart', '-k', f'gui/{os.getuid()}/{PREFIX}daemon-service'], capture_output=True, text=True, timeout=120)
         if result.returncode: raise RuntimeError('공항 데몬 설비 kickstart 실패')
@@ -101,7 +138,7 @@ class Service:
         if actual == version:
             self.event('update-watch', 'current');return
         if self.busy():
-            self.event('update-watch', 'busy');self.notify('작업 전송·압축 중이라 Paseo 버전 전환을 보류했습니다.');return
+            self.event('update-watch', 'busy');self.notify('작업 전송·압축 중이라 Paseo 버전 전환을 보류했습니다.', key='update-watch:busy');return
         # B's KeepAlive would race a separate stop with kickstart and restart twice.
         if self.daemon_variant() == 'A':
             self.command('daemon', 'stop')
@@ -109,11 +146,36 @@ class Service:
         self.event('update-watch', 'restarted', appVersion=version, daemonVersion=actual)
         self.notify('업데이트된 Paseo 데몬 supervisor를 다시 시작했습니다.')
 
+    def listen(self):
+        value = str(read(self.home/'config.json').get('daemon', {}).get('listen') or '127.0.0.1:6767')
+        host, _, port = value.rpartition(':')
+        return (host.strip('[]') or '127.0.0.1', int(port)) if port.isdigit() else None
+
+    def alive(self):
+        status = self.command('daemon', 'status', '--json', check=False)
+        try:
+            data = json.loads(status.stdout) if not status.returncode else {}
+        except ValueError:
+            data = {}
+        if isinstance(data, dict) and (data.get('workerPid') or data.get('pid')):
+            return 'status'
+        listen = self.listen()
+        # An unreadable listen address is not evidence of death; never restart on it.
+        if listen is None:
+            return 'listen-unknown'
+        return 'port' if self.probe(*listen) else None
+
     def watchdog(self):
         self.supported()
-        status = self.command('daemon', 'status', '--json', check=False)
-        if status.returncode or not (json.loads(status.stdout).get('workerPid') or json.loads(status.stdout).get('pid')):
-            self.kickstart();self.event('paseo-watchdog', 'daemon-restarted');return
+        evidence = self.alive()
+        if evidence != 'status':
+            # C36/F2: status failure alone never restarts every conversation; the port and a recheck must agree.
+            if evidence is None:
+                self.sleep(RECHECK_SECONDS)
+                evidence = self.alive()
+            if evidence is None:
+                self.kickstart();self.event('paseo-watchdog', 'daemon-restarted', reason='status-port-recheck');return
+            self.event('paseo-watchdog', 'status-unavailable', evidence=evidence);return
         listing = self.command('plugin', 'ls', '--json')
         history_file = self.home/'airport/runtime/plugin-reloads.json'
         history = read(history_file)
@@ -173,10 +235,10 @@ def main(task):
         with lock.open('a') as handle:
             try: fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError: return 0
-            getattr(service, task.replace('-', '_'))()
+            getattr(service, TASKS[task])()
         return 0
     except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError, subprocess.SubprocessError):
         if service:
-            service.event(task, 'failed');service.notify('Paseo 설비 실행에 실패했습니다. 설비 로그를 확인하세요.')
+            service.event(task, 'failed');service.notify('Paseo 설비 실행에 실패했습니다. 설비 로그를 확인하세요.', key=f'failed:{task}')
         print('Paseo 설비 실패: 앱·지시서·설비 로그를 확인하세요.', file=sys.stderr)
         return 1

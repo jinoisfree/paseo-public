@@ -249,7 +249,9 @@ class Acceptance:
             elif Path(command[0]).resolve() != self.cli.resolve(): raise RuntimeError('예상하지 못한 설비 명령')
             trace.append(command)
             return self.run(command,env=ctx['env'],check=False)
-        with _environment(ctx['env']): return Service(ctx['directory'],runner=runner)
+        # C36: the guarded kickstart checks that the (test) job serves this sandbox home.
+        job = next((file for name, file in self.jobs if name == label), None)
+        with _environment(ctx['env']): return Service(ctx['directory'],runner=runner,daemon_plist=job)
 
     def bootstrap(self, ctx, variant):
         label = LABELS[0 if variant == 'A' else 1]
@@ -337,7 +339,7 @@ class Acceptance:
         return results
 
     def claude(self):
-        cli=shutil.which('claude')
+        cli=shutil.which('claude') or next((str(p) for p in [REAL_HOME/'.local/bin/claude'] if p.is_file()), None)
         if not cli: raise RuntimeError('Claude CLI가 없습니다.')
         home=self.base/'claude-first-run';home.mkdir()
         env=clean_env(home,home/'.paseo',self.port+4)

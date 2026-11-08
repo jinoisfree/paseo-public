@@ -93,7 +93,11 @@ class EquipmentTests(unittest.TestCase):
             config=json.loads(self.config.read_text())
             for plugin in plugins: config['plugins'][plugin['id']]={'source':plugin.get('source','directory'),'enabled':True}
             setup.atomic_json(self.config,config)
-        return service_runtime.Service(self.paseo_home,runner=runner,now=lambda:100000),commands
+        # C36: kickstart requires the daemon-service job to serve this PASEO_HOME; probes are deterministic.
+        job=self.home/'fixture-daemon-service.plist'
+        job.write_bytes(plistlib.dumps({'Label':'fixture','EnvironmentVariables':{'PASEO_HOME':str(self.paseo_home)}}))
+        return service_runtime.Service(self.paseo_home,runner=runner,now=lambda:100000,sleep=lambda seconds:None,
+                                       probe=lambda host,port:False,daemon_plist=job),commands
 
     def test_C23_version_mismatch_replaces_supervisor_only_when_idle(self):
         service,commands=self.service()

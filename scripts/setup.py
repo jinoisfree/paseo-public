@@ -30,8 +30,10 @@ PREFIX = 'io.github.jinoisfree.paseo-public.'
 STABLE_PATHS = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin']
 
 
-def stable_path(node, python):
-    return os.pathsep.join(dict.fromkeys([str(Path(node).parent), str(Path(python).parent), *STABLE_PATHS]))
+def stable_path(node, python, home=None):
+    # C36/F4: ~/.local/bin is Claude Code's default install location; it goes last so system tools win.
+    user_bin = [str(Path(home)/'.local/bin')] if home else []
+    return os.pathsep.join(dict.fromkeys([str(Path(node).parent), str(Path(python).parent), *STABLE_PATHS, *user_bin]))
 
 
 def run(command, home, *, check=True, capture=True):
@@ -108,7 +110,7 @@ def read_json(file, default=None):
 def launch_plist(config, node, home):
     python = config.get('python', sys.executable)
     values = {'__PYTHON__': python, '__REPOSITORY__': str(ROOT), '__HOME__': str(home),
-              '__PATH__': stable_path(node, python), '__APP__': str(app_path(config)),
+              '__PATH__': stable_path(node, python, home), '__APP__': str(app_path(config)),
               '__PASEO_HOME__': str(paseo_home(home)), '__LOGS__': str(paseo_home(home)/'airport/logs'),
               '__CONFIG__': str(config_path())}
     content = (ROOT/'launchd/auto-update.plist.in').read_text()
@@ -189,7 +191,7 @@ def module_files(ids, home, config=None):
                 python = config.get('python', sys.executable)
                 replacements = {'__HOME__': str(home), '__PASEO_HOME__': str(paseo_home(home)),
                     '__INSTALL_ROOT__': str(install_root), '__REPOSITORY__': str(ROOT),
-                    '__NODE__': node, '__PYTHON__': python, '__PATH__': stable_path(node, python), '__APP__': str(app_path(config))}
+                    '__NODE__': node, '__PYTHON__': python, '__PATH__': stable_path(node, python, home), '__APP__': str(app_path(config))}
                 text = content.decode()
                 for key, value in replacements.items():
                     text = text.replace(key, escape(value) if target.suffix == '.plist' else value)
