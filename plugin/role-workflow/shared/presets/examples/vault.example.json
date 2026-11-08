@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "revision": 0,
+  "keychain": {
+    "claude": {
+      "service": "<키체인 서비스>",
+      "account": "<키체인 계정>"
+    }
+  },
+  "codexAccounts": [
+    "<계정 이름>"
+  ],
+  "paths": {
+    "app": "<Paseo.app 절대경로>",
+    "backupDir": "<백업 폴더>"
+  }
+}

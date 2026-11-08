@@ -1,11 +1,10 @@
 paseo-public
 
-This distribution includes a workflow plugin and patches derived from Paseo.
+This distribution includes a workflow plugin derived from Paseo.
 Paseo: Copyright (c) 2025-present Mohamed Boudra.
 Original project: https://github.com/getpaseo/paseo
 Paseo is licensed under the Apache License, Version 2.0.
 
-The directory-search-symlink reference patches modify Paseo sources.
 This distribution adapts the workflow plugin and local installation scripts
 for portable account-local installation, optional phone notifications, generic
 test fixtures, and user-owned configuration, state and log directories.

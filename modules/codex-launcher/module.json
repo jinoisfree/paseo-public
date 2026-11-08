@@ -1,0 +1,25 @@
+{
+  "id": "codex-launcher",
+  "description": "codex 제공자 실행기",
+  "requires": [
+    "python3",
+    "codex"
+  ],
+  "installationImpact": [
+    "선택한 제공자 command 변경(2차 설치기에서만 적용)"
+  ],
+  "installs": [
+    {
+      "source": "modules/codex-launcher/launcher.py",
+      "target": "$INSTALL_ROOT/modules/codex-launcher/launcher.py"
+    },
+    {
+      "source": "modules/launcher_runtime.py",
+      "target": "$INSTALL_ROOT/modules/launcher_runtime.py"
+    }
+  ],
+  "vaultKeys": [],
+  "policyKeys": [
+    "decisions.modules"
+  ]
+}

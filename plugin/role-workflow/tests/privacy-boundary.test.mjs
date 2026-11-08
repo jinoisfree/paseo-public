@@ -4,7 +4,7 @@ import { readdir, readFile } from "node:fs/promises";
 
 // Personal home/volume paths and account identifiers must never become shared defaults.
 const personal =
-  /[/](?:Users|Volumes|home)[/][^/\s"']+|github\.com\/(?!example\/)[^/\s]+\/|\b(?:mac-mini|macbook|desktop)[-_][\w-]+/i;
+  /[/](?:Users|Volumes|home)[/][^/\s"']+|github\.com\/(?!example\/)[^/\s]+\/|\b(?!(?:desktop-(?:attachments|settings\.json))(?:["'/\s]|$))(?:mac-mini|macbook|desktop)[-_][\w-]+/i;
 const email = /[\w.%+-]+@([\w.-]+\.[a-z]{2,})/gi;
 const exampleDomain = /^(?:[\w-]+\.)*example\.(?:com|org|net|invalid)$/i;
 
@@ -36,4 +36,10 @@ test("shared plugin sources, generated rules and tests contain no personal confi
     assert.doesNotMatch(text, personal, file.pathname);
     for (const match of text.matchAll(email)) assert.match(match[1], exampleDomain, file.pathname);
   }
+});
+
+// Public Paseo artifact names are not machine names; similarly named hosts still fail.
+test("public desktop artifacts do not hide personal host identifiers", () => {
+  for (const name of ['desktop-attachments','desktop-settings.json']) assert.doesNotMatch(name, personal);
+  for (const name of ['desktop'+'-fixture','desktop-attachments'+'-private','macbook'+'-fixture','mac-mini'+'-fixture']) assert.match(name, personal);
 });

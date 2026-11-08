@@ -10,65 +10,43 @@ import {
   verdictViewSchema,
 } from "./artifacts";
 import { managedPushSchema } from "./managed-push";
-import { folderRootsSchema } from "./folders";
 
-import { claudeCompressionSchema } from "./compression";
+import { settingsValuesSchema } from "./settings-schema";
+import { recommendedSettings } from "./recommended";
 
 export const settingsSchema = z.object({
-  folderRoots: folderRootsSchema,
-  autoPinStarted: z.boolean().default(true),
-  autoPinPushed: z.boolean().default(true),
-  autoArchivePushed: z.boolean().default(true),
-  autoArchiveWorktree: z.boolean().default(true),
-  archiveAfterDays: z.number().int().nonnegative().default(3),
-  notifyPermission: z.boolean().default(true),
-  notifyStopped: z.boolean().default(true),
-  notifyCompleted: z.boolean().default(true),
-  titleMarker: z.boolean().default(true),
-  koreanTitle: z.boolean().default(true),
-  executorThinking: z
-    .string()
-    .trim()
-    .max(40)
-    .regex(/^[A-Za-z0-9_.-]*$/)
-    .default(""),
-  askMode: z.boolean().default(true),
-  // Used for new conversations while the mode question is off.
-  defaultMode: z.enum(["general", "federated"]).default("federated"),
-  askExecutorModel: z.boolean().default(true),
-  rememberProjectChoices: z.boolean().default(true),
-  autoStart: z.boolean().default(true),
-  autoResumeQuota: z.boolean().default(true),
-  autoResumeTransient: z.boolean().default(true),
-  shellPushGuard: z.boolean().default(true),
-  executorPlacement: z.enum(["ask", "worktree", "wait"]).catch("ask").default("ask"),
-  threshold: z.number().min(0.05).max(0.9).default(0.8),
-  claudeCompression: claudeCompressionSchema,
-  codexCompression: z.enum(["threshold", "native"]).default("threshold"),
-  maxCycles: z.number().int().min(1).max(50).default(5),
-  maxTurns: z.number().int().min(2).max(200).default(30),
-  executorModel: z
-    .string()
-    .trim()
-    .regex(/^codex(?:\/[^\s]+)?$/, "codex 또는 codex/모델 ID를 입력하세요.")
-    .max(120)
-    .default("codex"),
-  executorMode: z.string().trim().min(1).max(80).default("auto"),
-  claudeExecutorModel: z
-    .string()
-    .trim()
-    .max(120)
-    .regex(/^claude(?:\/[^\s]+)?$/, "claude 또는 claude/모델 ID를 입력하세요.")
-    .default("claude"),
-  claudeExecutorThinking: z
-    .string()
-    .trim()
-    .max(40)
-    .regex(/^[A-Za-z0-9_.-]*$/)
-    .default(""),
-  claudeExecutorMode: z.string().trim().min(1).max(80).default("acceptEdits"),
-  // An empty value keeps the mode chosen for new Claude conversations.
-  claudeStartMode: z.string().trim().max(80).default("bypassPermissions"),
+  folderRoots: settingsValuesSchema.shape.folderRoots.default(recommendedSettings.folderRoots),
+  autoPinStarted: settingsValuesSchema.shape.autoPinStarted.default(recommendedSettings.autoPinStarted),
+  autoPinPushed: settingsValuesSchema.shape.autoPinPushed.default(recommendedSettings.autoPinPushed),
+  autoArchivePushed: settingsValuesSchema.shape.autoArchivePushed.default(recommendedSettings.autoArchivePushed),
+  autoArchiveWorktree: settingsValuesSchema.shape.autoArchiveWorktree.default(recommendedSettings.autoArchiveWorktree),
+  archiveAfterDays: settingsValuesSchema.shape.archiveAfterDays.default(recommendedSettings.archiveAfterDays),
+  notifyPermission: settingsValuesSchema.shape.notifyPermission.default(recommendedSettings.notifyPermission),
+  notifyStopped: settingsValuesSchema.shape.notifyStopped.default(recommendedSettings.notifyStopped),
+  notifyCompleted: settingsValuesSchema.shape.notifyCompleted.default(recommendedSettings.notifyCompleted),
+  titleMarker: settingsValuesSchema.shape.titleMarker.default(recommendedSettings.titleMarker),
+  koreanTitle: settingsValuesSchema.shape.koreanTitle.default(recommendedSettings.koreanTitle),
+  executorThinking: settingsValuesSchema.shape.executorThinking.default(recommendedSettings.executorThinking),
+  askMode: settingsValuesSchema.shape.askMode.default(recommendedSettings.askMode),
+  defaultMode: settingsValuesSchema.shape.defaultMode.default(recommendedSettings.defaultMode),
+  askExecutorModel: settingsValuesSchema.shape.askExecutorModel.default(recommendedSettings.askExecutorModel),
+  rememberProjectChoices: settingsValuesSchema.shape.rememberProjectChoices.default(recommendedSettings.rememberProjectChoices),
+  autoStart: settingsValuesSchema.shape.autoStart.default(recommendedSettings.autoStart),
+  autoResumeQuota: settingsValuesSchema.shape.autoResumeQuota.default(recommendedSettings.autoResumeQuota),
+  autoResumeTransient: settingsValuesSchema.shape.autoResumeTransient.default(recommendedSettings.autoResumeTransient),
+  shellPushGuard: settingsValuesSchema.shape.shellPushGuard.default(recommendedSettings.shellPushGuard),
+  executorPlacement: settingsValuesSchema.shape.executorPlacement.catch(recommendedSettings.executorPlacement).default(recommendedSettings.executorPlacement),
+  threshold: settingsValuesSchema.shape.threshold.default(recommendedSettings.threshold),
+  claudeCompression: settingsValuesSchema.shape.claudeCompression.default(recommendedSettings.claudeCompression),
+  codexCompression: settingsValuesSchema.shape.codexCompression.default(recommendedSettings.codexCompression),
+  maxCycles: settingsValuesSchema.shape.maxCycles.default(recommendedSettings.maxCycles),
+  maxTurns: settingsValuesSchema.shape.maxTurns.default(recommendedSettings.maxTurns),
+  executorModel: settingsValuesSchema.shape.executorModel.default(recommendedSettings.executorModel),
+  executorMode: settingsValuesSchema.shape.executorMode.default(recommendedSettings.executorMode),
+  claudeExecutorModel: settingsValuesSchema.shape.claudeExecutorModel.default(recommendedSettings.claudeExecutorModel),
+  claudeExecutorThinking: settingsValuesSchema.shape.claudeExecutorThinking.default(recommendedSettings.claudeExecutorThinking),
+  claudeExecutorMode: settingsValuesSchema.shape.claudeExecutorMode.default(recommendedSettings.claudeExecutorMode),
+  claudeStartMode: settingsValuesSchema.shape.claudeStartMode.default(recommendedSettings.claudeStartMode),
 });
 export type Settings = z.infer<typeof settingsSchema>;
 const savedExecutorSchema = z.object({ model: z.string().max(120), thinking: z.string().max(40) });

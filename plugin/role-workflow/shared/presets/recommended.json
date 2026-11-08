@@ -1,0 +1,108 @@
+{
+  "version": 1,
+  "roleWorkflow": {
+    "folderRoots": [
+      "~/paseo-work"
+    ],
+    "autoPinStarted": true,
+    "autoPinPushed": true,
+    "autoArchivePushed": true,
+    "autoArchiveWorktree": true,
+    "archiveAfterDays": 2,
+    "notifyPermission": true,
+    "notifyStopped": true,
+    "notifyCompleted": true,
+    "titleMarker": true,
+    "koreanTitle": true,
+    "executorThinking": "",
+    "askMode": true,
+    "defaultMode": "federated",
+    "askExecutorModel": true,
+    "rememberProjectChoices": true,
+    "autoStart": true,
+    "autoResumeQuota": true,
+    "autoResumeTransient": true,
+    "shellPushGuard": true,
+    "executorPlacement": "ask",
+    "threshold": 0.7,
+    "claudeCompression": {
+      "threshold": 0.55,
+      "oneMillionTokenLimit": 500000
+    },
+    "codexCompression": "native",
+    "maxCycles": 20,
+    "maxTurns": 50,
+    "executorModel": "codex",
+    "executorMode": "full-access",
+    "claudeExecutorModel": "claude",
+    "claudeExecutorThinking": "",
+    "claudeExecutorMode": "bypassPermissions",
+    "claudeStartMode": "bypassPermissions"
+  },
+  "core": {
+    "pluginsEnabled": true,
+    "agents": {
+      "resumeOnStartup": true,
+      "skills": {
+        "selection": {
+          "mode": "all"
+        }
+      }
+    },
+    "daemon": {
+      "mcp": {
+        "enabled": false,
+        "injectIntoAgents": true
+      },
+      "browserTools": {
+        "enabled": true
+      },
+      "autoArchiveAfterMerge": true,
+      "relay": {
+        "enabled": true
+      }
+    },
+    "features": {
+      "dictation": {
+        "enabled": false
+      },
+      "voiceMode": {
+        "enabled": false
+      },
+      "webUi": {
+        "enabled": false
+      }
+    },
+    "log": {
+      "file": {
+        "level": "info",
+        "rotate": {
+          "maxSize": "10m",
+          "maxFiles": 3
+        }
+      }
+    }
+  },
+  "profiles": {
+    "server": {
+      "desktopSettings": {
+        "daemon": {
+          "manageBuiltInDaemon": false
+        }
+      },
+      "modules": [
+        "daemon-service",
+        "update-watch",
+        "paseo-watchdog"
+      ]
+    },
+    "desktop": {
+      "desktopSettings": {
+        "daemon": {
+          "manageBuiltInDaemon": true
+        }
+      },
+      "modules": []
+    }
+  }
+}

@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "keychain": {
+      "type": "object",
+      "properties": {
+        "claude": {
+          "type": "object",
+          "properties": {
+            "service": {
+              "type": "string",
+              "minLength": 1
+            },
+            "account": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "service",
+            "account"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "codexAccounts": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "paths": {
+      "type": "object",
+      "properties": {
+        "node": {
+          "type": "string",
+          "minLength": 1
+        },
+        "python": {
+          "type": "string",
+          "minLength": 1
+        },
+        "app": {
+          "type": "string",
+          "minLength": 1
+        },
+        "backupDir": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "version",
+    "revision"
+  ],
+  "additionalProperties": false
+}

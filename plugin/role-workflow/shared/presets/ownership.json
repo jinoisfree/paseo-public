@@ -1,0 +1,381 @@
+{
+  "version": 1,
+  "slots": [
+    {
+      "id": "core-config",
+      "description": "본체 설정"
+    },
+    {
+      "id": "core-desktop",
+      "description": "본체 데스크톱 설정"
+    },
+    {
+      "id": "core-runtime",
+      "description": "본체 런타임·로그·화면 상태"
+    },
+    {
+      "id": "core-identity",
+      "description": "본체 신원·비밀"
+    },
+    {
+      "id": "core-install",
+      "description": "본체 설치 기록"
+    },
+    {
+      "id": "facility",
+      "description": "공항 시설"
+    },
+    {
+      "id": "facility-generated",
+      "description": "시설 런타임 생성물"
+    },
+    {
+      "id": "equipment",
+      "description": "시설 설비"
+    },
+    {
+      "id": "enforcement",
+      "description": "직원 도구 집행"
+    },
+    {
+      "id": "manuals",
+      "description": "매뉴얼 서가"
+    },
+    {
+      "id": "presets",
+      "description": "직책 명세서"
+    },
+    {
+      "id": "vault",
+      "description": "사장 금고"
+    },
+    {
+      "id": "policy",
+      "description": "사장 지시서"
+    },
+    {
+      "id": "roster",
+      "description": "직원 명부"
+    },
+    {
+      "id": "owner-manuals",
+      "description": "사장 매뉴얼"
+    },
+    {
+      "id": "owner-shell",
+      "description": "사장 셸"
+    },
+    {
+      "id": "lockers",
+      "description": "직원 사물함"
+    },
+    {
+      "id": "schedule",
+      "description": "운항 시간표"
+    },
+    {
+      "id": "installation",
+      "description": "설치 상태"
+    },
+    {
+      "id": "maintenance",
+      "description": "정비 격납고"
+    }
+  ],
+  "paseoHome": {
+    "agent-requests": {
+      "slot": "lockers"
+    },
+    "agents": {
+      "slot": "lockers"
+    },
+    "analysis": {
+      "slot": "lockers"
+    },
+    "ck-captures": {
+      "slot": "lockers"
+    },
+    "codex-accounts": {
+      "slot": "lockers"
+    },
+    "codex-home": {
+      "slot": "lockers"
+    },
+    "creations": {
+      "slot": "lockers"
+    },
+    "projects": {
+      "slot": "lockers"
+    },
+    "schedules": {
+      "slot": "lockers"
+    },
+    "task-artifacts": {
+      "slot": "lockers"
+    },
+    "task-logs": {
+      "slot": "lockers"
+    },
+    "uploads": {
+      "slot": "lockers"
+    },
+    "verification": {
+      "slot": "lockers"
+    },
+    "worktree-archives": {
+      "slot": "lockers"
+    },
+    "backups": {
+      "slot": "maintenance"
+    },
+    "role-workflow-backups": {
+      "slot": "maintenance"
+    },
+    "cli-client-id": {
+      "slot": "core-runtime"
+    },
+    "daemon.log": {
+      "slot": "core-runtime"
+    },
+    "desktop-attachments": {
+      "slot": "core-runtime"
+    },
+    "logs": {
+      "slot": "core-runtime"
+    },
+    "paseo.pid": {
+      "slot": "core-runtime"
+    },
+    "runtime": {
+      "slot": "core-runtime"
+    },
+    "terminal-worker": {
+      "slot": "core-runtime"
+    },
+    "terminal-worker.log": {
+      "slot": "core-runtime"
+    },
+    "daemon-keypair.json": {
+      "slot": "core-identity"
+    },
+    "local-credential": {
+      "slot": "core-identity"
+    },
+    "push-tokens.json": {
+      "slot": "core-identity"
+    },
+    "server-id": {
+      "slot": "core-identity"
+    },
+    "config.json": {
+      "slot": "core-config"
+    },
+    "claude-provider.sh": {
+      "slot": "equipment",
+      "migration": "기존 운영 설치물·잔재. 대체 후 4차 정리"
+    },
+    "plugin-mirror": {
+      "slot": "equipment",
+      "migration": "기존 운영 설치물·잔재. 대체 후 4차 정리"
+    },
+    "role-workflow": {
+      "slot": "facility",
+      "children": {
+        "state.json": "lockers",
+        "rules": "facility-generated",
+        "guides": "facility-generated",
+        "push-guard.gitconfig": "facility-generated",
+        "push-guard.global.gitconfig": "facility-generated",
+        "handoffs": "lockers",
+        "pushes": "lockers",
+        "evidence": "lockers",
+        "artifacts": "lockers",
+        "task-artifacts": "lockers",
+        "rules-status.json": "facility-generated"
+      },
+      "migration": "state.json.settings만 현재 지시서 역할. 2차 owner/policy.json 이관 뒤 동결 사본; projects 기억은 사물함 유지"
+    },
+    "pipeline": {
+      "slot": "installation",
+      "migration": "기존 운영 설치물·잔재. 대체 후 4차 정리"
+    },
+    "owner": {
+      "slot": "policy",
+      "children": {
+        "vault.json": "vault",
+        "policy.json": "policy"
+      },
+      "note": "컨테이너만 공유하며 각 파일의 칸은 독립적"
+    },
+    "claude-home": {
+      "slot": "lockers",
+      "children": {
+        "settings.json": "equipment",
+        "skills": "owner-manuals"
+      },
+      "note": "후속 조립 파일과 세션을 파일별로 분리"
+    }
+  },
+  "config": {
+    "$schema": {
+      "slot": "core-config"
+    },
+    "version": {
+      "slot": "core-config"
+    },
+    "daemon.listen": {
+      "slot": "core-config"
+    },
+    "daemon.mcp.*": {
+      "slot": "core-config"
+    },
+    "daemon.browserTools.*": {
+      "slot": "core-config"
+    },
+    "daemon.autoArchiveAfterMerge": {
+      "slot": "core-config"
+    },
+    "daemon.relay.*": {
+      "slot": "core-config"
+    },
+    "pluginsEnabled": {
+      "slot": "core-config"
+    },
+    "plugins.*": {
+      "slot": "core-config"
+    },
+    "worktrees.root": {
+      "slot": "core-config"
+    },
+    "agents.providers.*.command": {
+      "slot": "core-config"
+    },
+    "agents.providers.*.env.*": {
+      "slot": "core-config",
+      "note": "인증 비밀은 본체 신원·비밀, 경로는 금고에서 조립. 소유 원본은 본체 config"
+    },
+    "agents.providers.*.additionalModels": {
+      "slot": "core-config"
+    },
+    "agents.providers.*.enabled": {
+      "slot": "core-config"
+    },
+    "agents.resumeOnStartup": {
+      "slot": "core-config"
+    },
+    "agents.skills.*": {
+      "slot": "core-config"
+    },
+    "features.*": {
+      "slot": "core-config"
+    },
+    "log.*": {
+      "slot": "core-config"
+    },
+    "daemon.agentProfiles": {
+      "slot": "roster"
+    }
+  },
+  "publicConfig": {
+    "node": {
+      "slot": "vault",
+      "target": "paths.node"
+    },
+    "python": {
+      "slot": "vault",
+      "target": "paths.python"
+    },
+    "paseo": {
+      "slot": "vault",
+      "target": "paths.app"
+    },
+    "app": {
+      "slot": "vault",
+      "target": "paths.app"
+    },
+    "backupDir": {
+      "slot": "vault",
+      "target": "paths.backupDir"
+    },
+    "phoneNotifications": {
+      "slot": "policy",
+      "target": "decisions.phoneNotifications"
+    },
+    "phoneNotificationEndpoint": {
+      "slot": "policy",
+      "target": "decisions.phoneNotificationEndpoint"
+    },
+    "dependenciesLock": {
+      "slot": "installation",
+      "target": "체크아웃별 설치 상태"
+    },
+    "profiles.*": {
+      "slot": "maintenance",
+      "target": "옛 프로필 합성값, 2차 이관 후 4차 제거"
+    },
+    "buildDir": {
+      "slot": "maintenance",
+      "target": "읽는 곳 없는 잔재"
+    },
+    "distTemplate": {
+      "slot": "maintenance",
+      "target": "읽는 곳 없는 잔재"
+    },
+    "pluginPath": {
+      "slot": "maintenance",
+      "target": "읽는 곳 없는 잔재"
+    },
+    "foldLabel": {
+      "slot": "maintenance",
+      "target": "읽는 곳 없는 잔재"
+    }
+  },
+  "desktopSettings": {
+    "version": {
+      "slot": "core-desktop"
+    },
+    "settings.releaseChannel": {
+      "slot": "core-desktop"
+    },
+    "settings.notifications.*": {
+      "slot": "core-desktop"
+    },
+    "settings.daemon.manageBuiltInDaemon": {
+      "slot": "core-desktop"
+    },
+    "settings.daemon.keepRunningAfterQuit": {
+      "slot": "core-desktop"
+    },
+    "migrations.*": {
+      "slot": "core-desktop"
+    }
+  },
+  "locations": {
+    "plugin/role-workflow/rules/": "manuals",
+    "plugin/role-workflow/shared/presets/": "presets",
+    "modules/": "equipment",
+    "scripts/": "facility",
+    "$PASEO_HOME/role-workflow/rules/": "facility-generated",
+    "$PASEO_HOME/role-workflow/guides/": "facility-generated",
+    "~/Library/LaunchAgents/": "schedule",
+    "~/Library/Application Support/paseo-public/": "installation",
+    "~/Library/Logs/paseo-public/": "installation",
+    "~/Library/Application Support/Paseo/window-state.json": "core-runtime",
+    "~/Library/Application Support/Paseo/Local Storage/": "core-runtime",
+    "~/Library/Application Support/Paseo/IndexedDB/": "core-runtime",
+    "~/Library/Logs/Paseo/": "core-runtime",
+    "Homebrew/cask/Paseo": "core-install",
+    "~/.zshrc": "owner-shell",
+    "~/.claude/skills/": "owner-manuals",
+    "~/.agents/skills/": "owner-manuals",
+    "~/.config/paseo-public/sync-deny.txt": "maintenance",
+    "docs/changes/": "maintenance"
+  },
+  "externalDependencies": [
+    "다른 macOS 계정의 앱 공유·데몬",
+    "외부 자동화의 Paseo CLI 참조",
+    "외부 사용량 앱의 제품 홈 참조",
+    "VPN·휴대폰 연결"
+  ],
+  "inventoryRule": "정확한 이름을 우선하고 *는 한 config 키, 끝의 *는 하위 트리다. 미일치 항목은 미확정으로 보고하며 자동 삭제하지 않는다."
+}

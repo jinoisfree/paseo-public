@@ -146,7 +146,8 @@ for (const provider of ["claude", "codex"])
     await f.finish("planner", "p1", "plan");
     const executor = f.created[0].member.id;
     assert.equal(f.created[0].member.config.provider, provider === "claude" ? "codex" : "claude");
-    assert.equal(f.created[0].member.config.modeId, provider === "claude" ? "auto" : "acceptEdits");
+    // U4: new executors use the public full-access / bypassPermissions recommendation.
+    assert.equal(f.created[0].member.config.modeId, provider === "claude" ? "full-access" : "bypassPermissions");
     assert.equal(f.created.length, 1);
     assert.equal(f.created[0].w.projectId, "project");
     assert.equal(f.sent[0].id, executor);
@@ -164,6 +165,8 @@ for (const provider of ["claude", "codex"])
   });
 test("80% compacts both roles once per turn and preserves workspace and agent identities", async (t) => {
   const f = await fixture(t);
+  // U2 defaults changed: this regression exercises explicitly saved legacy ratio policy.
+  await f.engine.configure({ ...await f.engine.settings(), threshold: 0.8, claudeCompression: null, codexCompression: "threshold" });
   f.agents.get("planner").usage = 0.79;
   await f.finish("planner", "p1", "plan");
   assert.equal(f.compacted.length, 0);
@@ -186,6 +189,8 @@ test("80% compacts both roles once per turn and preserves workspace and agent id
 });
 test("compaction waits for completion, accepts pause, and preserves the queued handoff", async (t) => {
   const f = await fixture(t);
+  // U2 defaults changed: this regression exercises explicitly saved legacy ratio policy.
+  await f.engine.configure({ ...await f.engine.settings(), threshold: 0.8, claudeCompression: null, codexCompression: "threshold" });
   let done;
   f.port.compact = () =>
     new Promise((resolve) => {
@@ -204,6 +209,8 @@ test("compaction waits for completion, accepts pause, and preserves the queued h
 });
 test("failed compaction never dispatches work or creates a replacement workspace", async (t) => {
   const f = await fixture(t);
+  // U2 defaults changed: this regression exercises explicitly saved legacy ratio policy.
+  await f.engine.configure({ ...await f.engine.settings(), threshold: 0.8, claudeCompression: null, codexCompression: "threshold" });
   f.port.compact = async () => {
     throw new Error("native compaction failed");
   };
@@ -1087,6 +1094,8 @@ test("archive state-write failure rolls back and retries removal", async (t) => 
 
 test("review report occurs once; second-cycle and resume omit own context until compaction", async (t) => {
   const f = await fixture(t);
+  // U2 defaults changed: this regression exercises explicitly saved legacy ratio policy.
+  await f.engine.configure({ ...await f.engine.settings(), threshold: 0.8, claudeCompression: null, codexCompression: "threshold" });
   await f.finish("planner", "p1", "plan");
   const executor = f.created[0].member.id;
   assert.match(f.sent[0].prompt, /원래 목표:\noriginal goal/);
@@ -1239,6 +1248,8 @@ const rememberedDecision = (status, remember) =>
 
 test("remember accumulates normalized unique entries in handoff, sends once then fully after compaction", async (t) => {
   const f = await fixture(t);
+  // U2 defaults changed: this regression exercises explicitly saved legacy ratio policy.
+  await f.engine.configure({ ...await f.engine.settings(), threshold: 0.8, claudeCompression: null, codexCompression: "threshold" });
   await f.engine.ended(
     "planner",
     "p1",
@@ -1361,6 +1372,8 @@ for (const provider of ["claude", "codex"]) {
 
 test("GPT planner uses and repairs only Claude settings then preserves assignment after reload and compaction", async (t) => {
   const f = await fixture(t, undefined, "federated", false, "codex/planner-model");
+  // U2 defaults changed: this regression exercises explicitly saved legacy ratio policy.
+  await f.engine.configure({ ...await f.engine.settings(), threshold: 0.8, claudeCompression: null, codexCompression: "threshold" });
   await f.engine.configure({
     ...(await f.engine.settings()),
     executorModel: "codex/keep",
@@ -4231,6 +4244,8 @@ test("failed advance resumes keep the original error status and exhaust after fi
 
 test("compaction timeout after an automatic resume clears recovery and requires manual action", async (t) => {
   const f = await quotaFixture(t);
+  // U2 defaults changed: this regression exercises explicitly saved legacy ratio policy.
+  await f.engine.configure({ ...await f.engine.settings(), threshold: 0.8, claudeCompression: null, codexCompression: "threshold" });
   await f.fail("capacity", capacityError);
   f.agents.get("planner").usage = 0.8;
   f.port.compact = async () => {
@@ -6956,7 +6971,8 @@ for (const limit of ["cycles", "turns"]) {
 for(const [provider,max,before,at] of [["claude",1000000,499999,500000],["claude",200000,109999,110000],["codex",300000,209999,210000]])
 test(`provider compression ${provider}/${max} boundary, duplicate event and restart`,async t=>{
  const f=await fixture(t,undefined,undefined,undefined,provider);
- await f.engine.configure({...await f.engine.settings(),threshold:0.7,claudeCompression:{threshold:0.55,oneMillionTokenLimit:500000}});
+ // U2: explicitly select Codex threshold for this serialized boundary regression.
+ await f.engine.configure({...await f.engine.settings(),codexCompression:"threshold",threshold:0.7,claudeCompression:{threshold:0.55,oneMillionTokenLimit:500000}});
  const a=f.agents.get("planner");a.contextUsage={contextWindowUsedTokens:before,contextWindowMaxTokens:max};a.usage=0.99;
  await f.finish("planner","boundary","plan");assert.equal(f.compacted.length,0);assert.equal((await f.view()).planUsage,before/max);
  a.contextUsage.contextWindowUsedTokens=at;await f.engine.tick();await new Promise(r=>setImmediate(r));await f.engine.tick();

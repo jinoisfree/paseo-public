@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { compressionDecision, contextUsage, contextRatio } from "../shared/compression.ts";
 import { settingsSchema } from "../shared/contracts.ts";
 
-const settings=settingsSchema.parse({threshold:0.7,claudeCompression:{threshold:0.55,oneMillionTokenLimit:500000}});
+// U2: boundary tests explicitly select the legacy Codex threshold mode.
+const settings=settingsSchema.parse({codexCompression:"threshold",threshold:0.7,claudeCompression:{threshold:0.55,oneMillionTokenLimit:500000}});
 const sample=(used,max)=>({usage:0.99,contextUsage:{contextWindowUsedTokens:used,contextWindowMaxTokens:max}});
 for(const [provider,max,below,at,policy] of [
  ["claude/sonnet[1m]",1000000,499999,500000,"claude-1m"],
@@ -17,11 +18,16 @@ for(const [provider,max,below,at,policy] of [
  const before=compressionDecision(provider,settings,sample(below,max));assert.equal(before.due,false);assert.equal(before.policy,policy);
  const after=compressionDecision(provider,settings,sample(at,max));assert.equal(after.due,true);assert.equal(after.policy,policy);
 });
-test("old settings retain their common threshold; override is disabled by default",()=>{
- const old=settingsSchema.parse({threshold:0.7});assert.equal(old.claudeCompression,null);
+test("missing settings use U2 recommendations; explicit null and threshold preserve legacy behavior",()=>{
+ const recommended=settingsSchema.parse({});
+ assert.deepEqual(recommended.claudeCompression,{threshold:0.55,oneMillionTokenLimit:500000});
+ assert.equal(recommended.threshold,0.7);assert.equal(recommended.codexCompression,"native");
+ assert.equal(compressionDecision("claude",recommended,sample(500000,1000000)).due,true);
+ assert.equal(compressionDecision("codex",recommended,sample(900000,1000000)).policy,"native");
+ const legacy=settingsSchema.parse({threshold:0.7,claudeCompression:null,codexCompression:"threshold"});
  for(const provider of ["claude","codex"]){
-  assert.equal(compressionDecision(provider,old,sample(500000,1000000)).due,false);
-  assert.equal(compressionDecision(provider,old,{usage:0.7}).due,true);
+  assert.equal(compressionDecision(provider,legacy,sample(500000,1000000)).due,false);
+  assert.equal(compressionDecision(provider,legacy,{usage:0.7}).due,true);
  }
  assert.equal(compressionDecision("codex",{...settings,claudeCompression:{threshold:0.05,oneMillionTokenLimit:1}},sample(699999,1000000)).due,false);
 });

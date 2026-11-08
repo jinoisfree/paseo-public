@@ -391,7 +391,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
         <Text style={s.muted}>
           {draft.claudeCompression
             ? `Claude 실제 용량이 정확히 1,000,000이면 ${draft.claudeCompression.oneMillionTokenLimit.toLocaleString("en-US")}토큰, 그 외 용량은 ${Math.round(draft.claudeCompression.threshold * 100)}%에서 압축합니다. ${draft.codexCompression === "native" ? "Codex는 자체 압축을 사용합니다." : `이전 Codex 역할 분리 작업은 ${Math.round(draft.threshold * 100)}% 기준을 사용합니다.`} 사용 토큰·용량이 없으면 Claude를 자동 압축하지 않습니다.`
-            : "Claude도 기본 압축 기준을 사용합니다. 별도 정책은 기본적으로 꺼져 있습니다."}
+            : "Claude도 기본 압축 기준을 사용합니다. 별도 정책을 끈 상태입니다."}
           {" "}Claude 자동 압축은 연합개발·역할 분리 작업과 신규 일반개발 단일 대화에 적용됩니다. 유휴 상태의 같은 대화에서만 압축하고 역할 전달·자동 계속 메시지를 만들지 않습니다.
         </Text>
         <Text style={s.text}>최대 계획·실행 반복 / 최대 자동 응답 수</Text>
@@ -482,7 +482,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
           }),
         )}
         {field(
-          "Claude 새 대화 권한 모드 (모든 새 Claude 대화에 적용 · 기본 bypassPermissions · 비우면 앱에서 고른 그대로)",
+          "Claude 새 대화 권한 모드 (모든 새 Claude 대화에 적용 · 권장 bypassPermissions · 비우면 앱에서 고른 그대로)",
           draft.claudeStartMode,
           (value) => setDraft({ ...draft, claudeStartMode: value }),
         )}

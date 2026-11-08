@@ -1,5 +1,9 @@
 # 작업 지침
 
+## 구조 기준
+
+모든 개발은 [공항 구조](docs/ARCHITECTURE.md)를 근간으로 한다. 새 기능은 먼저 소유 칸과 원본을 정하고 문서의 새 기능 점검표를 따른다.
+
 <!-- handoff-rule:v1 -->
 ## 도구 간 인계 (Paseo ↔ Codex 앱)
 
@@ -10,7 +14,7 @@
 
 ## 개발 원본과 검증
 
-- 이 저장소에서 role-workflow 플러그인과 공용 스크립트·패치를 직접 개발한다. 개인 설정과 실행 데이터는 저장소 밖에서 읽는다.
+- 이 저장소에서 role-workflow 플러그인과 공용 스크립트를 직접 개발한다. 개인 설정과 실행 데이터는 저장소 밖에서 읽는다.
 - 준비: `npm install`, `git config core.hooksPath .githooks`.
 - 검사: `npm test`, `npm run typecheck`, `python3 -m unittest discover -s scripts -p 'test_*.py'`. CI(`.github/workflows/check.yml`)가 같은 검사를 돌린다.
 - 실제 데몬 검증: `npm run e2e`(격리 데몬·가짜 모델, 수동). 훅·상태 저장·재시작 동작을 바꾸면 실행한다.

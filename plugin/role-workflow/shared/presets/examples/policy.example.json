@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "revision": 0,
+  "decisions": {
+    "operatingProfile": {
+      "value": "desktop",
+      "date": "2026-01-01"
+    },
+    "roleWorkflow": {
+      "value": {
+        "folderRoots": [
+          "~/projects"
+        ]
+      },
+      "date": "2026-01-01"
+    }
+  }
+}

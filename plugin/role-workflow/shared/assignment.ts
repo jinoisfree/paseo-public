@@ -1,4 +1,5 @@
 import type { Settings } from "./contracts";
+import { recommendedSettings } from "./recommended";
 
 export type WorkflowProvider = "claude" | "codex";
 export type WorkflowRole = "plan" | "execute";
@@ -11,8 +12,7 @@ export function oppositeProvider(provider: string): WorkflowProvider {
 }
 
 export function executorDefaults(settings: Settings | null, provider: WorkflowProvider) {
-  if (!settings)
-    return { model: provider, thinking: "", mode: provider === "claude" ? "acceptEdits" : "auto" };
+  settings ??= recommendedSettings;
   return provider === "claude"
     ? {
         model: settings.claudeExecutorModel,

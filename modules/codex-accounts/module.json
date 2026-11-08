@@ -1,0 +1,30 @@
+{
+  "id": "codex-accounts",
+  "description": "명시적으로 고른 Codex 계정의 등록·전환 틀",
+  "requires": [
+    "python3",
+    "codex",
+    "Paseo.app"
+  ],
+  "installationImpact": [
+    "사물함 codex-accounts의 auth 링크 변경",
+    "use 실행 시 유휴 Codex 대화 다시 열기"
+  ],
+  "installs": [
+    {
+      "source": "modules/codex-accounts/codex-account.py",
+      "target": "$INSTALL_ROOT/modules/codex-accounts/codex-account.py"
+    },
+    {
+      "source": "modules/launcher_runtime.py",
+      "target": "$INSTALL_ROOT/modules/launcher_runtime.py"
+    }
+  ],
+  "vaultKeys": [
+    "codexAccounts",
+    "paths.app"
+  ],
+  "policyKeys": [
+    "decisions.modules"
+  ]
+}

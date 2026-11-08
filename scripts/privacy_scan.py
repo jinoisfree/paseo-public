@@ -14,6 +14,9 @@ IP=re.compile(r'(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])')
 SECRETS=re.compile(r'(?<![\w])(?:sk(?:-ant)?-[A-Za-z0-9_-]{12,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[a-z]-[A-Za-z0-9-]{12,}|AKIA[A-Z0-9]{16}|Expo(?:nent)?PushToken\[[^\]]+\]|Bearer\s+[A-Za-z0-9._~+/=-]+|-----BEGIN [A-Z ]*PRIVATE KEY-----)')
 PERSONAL_PATHS=re.compile('/'+r'''(?:Users|Volumes)/[^\s"'`]+''')
 LOCAL_HOST=re.compile(r'(?i)\b[A-Za-z0-9._-]+\.local\b')
+# Reverse-domain service identifiers can reveal a private deployment even without a home path.
+SERVICE_LABEL=re.compile(r"\b(?:com|net|org|io|dev|ai|app|sh|co|me)\.[A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)+\b")
+PUBLIC_SERVICE_PREFIX="io.github.jinoisfree.paseo-public."
 EXCLUDED={'node_modules','evidence','backups','build','automation','icloud-PASEO','paseo-home','codex-home','__pycache__'}
 
 
@@ -33,6 +36,11 @@ def scan(text,deny=()):
             else: issues.append({'line':number,'kind':'ip-address'})
         for kind,pattern in [('personal-path',PERSONAL_PATHS),('local-hostname',LOCAL_HOST),('credential-pattern',SECRETS)]:
             if pattern.search(line):issues.append({'line':number,'kind':kind})
+        for value in SERVICE_LABEL.findall(line):
+            if value == PUBLIC_SERVICE_PREFIX.rstrip(".") or value.startswith(PUBLIC_SERVICE_PREFIX):
+                allowed.append({'line':number,'kind':'public-service-label','value':value})
+            else:
+                issues.append({'line':number,'kind':'private-service-label'})
         if any(value.casefold() in line.casefold() for value in deny if value):issues.append({'line':number,'kind':'private-deny-list'})
     return issues,allowed
 

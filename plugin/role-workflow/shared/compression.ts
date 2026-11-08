@@ -1,12 +1,12 @@
 import { z } from "zod";
 
 export const ONE_MILLION_TOKENS = 1_000_000;
-// Null keeps the existing common threshold. Personal policy values have no defaults.
-export const claudeCompressionSchema = z.object({
+// Explicit null selects the common threshold; missing settings use the airport preset.
+export const claudeCompressionValueSchema = z.object({
   threshold: z.number().min(0.05).max(0.9),
   oneMillionTokenLimit: z.number().int().positive().max(ONE_MILLION_TOKENS),
-}).nullable().default(null);
-export type ClaudeCompression = z.infer<typeof claudeCompressionSchema>;
+}).nullable();
+export type ClaudeCompression = z.infer<typeof claudeCompressionValueSchema>;
 export type ContextUsage = { contextWindowUsedTokens: number; contextWindowMaxTokens: number };
 export function contextUsage(usage?: Partial<ContextUsage> | null): ContextUsage | null {
   const used = usage?.contextWindowUsedTokens;

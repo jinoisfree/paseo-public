@@ -506,7 +506,8 @@ test("old state loads default archive settings and an empty archive list", async
   const engine = new WorkflowEngine(f.file, f.port);
   t.after(() => engine.close());
   assert.equal((await engine.settings()).autoArchivePushed, true);
-  assert.equal((await engine.settings()).archiveAfterDays, 3);
+  // U2: missing settings now use the public airport recommendation (2 days).
+  assert.equal((await engine.settings()).archiveAfterDays, 2);
   assert.deepEqual((await engine.list()).archives, []);
 });
 test("archive retains only the most recent 500 entries and survives a new engine", async (t) => {

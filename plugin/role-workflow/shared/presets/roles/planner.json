@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "role": "planner",
+  "description": "사용자가 계정에서 사용할 수 있는 프로필을 확인한 뒤 추가하는 권장 틀",
+  "profiles": [
+    {
+      "provider": "claude",
+      "model": "sonnet",
+      "thinking": "high",
+      "mode": "bypassPermissions"
+    },
+    {
+      "provider": "codex",
+      "model": "gpt-6.1-sol",
+      "thinking": "high",
+      "mode": "full-access"
+    }
+  ],
+  "autoSelect": false
+}

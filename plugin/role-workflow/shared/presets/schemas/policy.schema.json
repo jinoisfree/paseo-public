@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "decisions": {
+      "type": "object",
+      "properties": {
+        "operatingProfile": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "enum": [
+                "server",
+                "desktop"
+              ]
+            },
+            "date": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          "required": [
+            "value",
+            "date"
+          ],
+          "additionalProperties": false
+        },
+        "modules": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "boolean"
+              }
+            },
+            "date": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          "required": [
+            "value",
+            "date"
+          ],
+          "additionalProperties": false
+        },
+        "schedule": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "date": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          "required": [
+            "value",
+            "date"
+          ],
+          "additionalProperties": false
+        },
+        "phoneNotifications": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "boolean"
+            },
+            "date": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          "required": [
+            "value",
+            "date"
+          ],
+          "additionalProperties": false
+        },
+        "phoneNotificationEndpoint": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "minLength": 1
+            },
+            "date": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          "required": [
+            "value",
+            "date"
+          ],
+          "additionalProperties": false
+        },
+        "core": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "object"
+            },
+            "date": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          "required": [
+            "value",
+            "date"
+          ],
+          "additionalProperties": false
+        },
+        "roleWorkflow": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "object"
+            },
+            "date": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          "required": [
+            "value",
+            "date"
+          ],
+          "additionalProperties": false
+        },
+        "manuals": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "date": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          "required": [
+            "value",
+            "date"
+          ],
+          "additionalProperties": false
+        },
+        "keepRunningAfterQuit": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "boolean"
+            },
+            "date": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          "required": [
+            "value",
+            "date"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "version",
+    "revision"
+  ],
+  "additionalProperties": false
+}

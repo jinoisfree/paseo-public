@@ -173,7 +173,6 @@ sudo rm /Library/LaunchDaemons/io.github.jinoisfree.paseo-public.fold-reapply.pl
 ```
 
 이미 재서명된 앱은 공식 Paseo 앱을 다시 설치해야 원래 서명과 자동 업데이트가 돌아옵니다.
-`directory-search-symlink-*.patch`는 이전 앱 검색 보완의 참고용이며 설치에 쓰지 않습니다.
 
 ## 사용자 설정과 데이터
 
@@ -249,4 +248,6 @@ GitHub Actions(`.github/workflows/check.yml`)가 푸시와 PR마다 macOS·Node 
 
 ## 라이선스
 
-Apache-2.0입니다. Paseo 파생 패치의 원저작권과 변경 사항은 `NOTICE`를 확인하세요.
+Apache-2.0입니다. Paseo 파생 코드의 원저작권과 변경 사항은 `NOTICE`를 확인하세요.
+
+공항 구조와 각 설정의 소유 경계는 [구조 기준](docs/ARCHITECTURE.md)을 따릅니다.

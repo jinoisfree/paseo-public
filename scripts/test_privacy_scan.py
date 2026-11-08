@@ -29,5 +29,17 @@ class PrivacyTests(unittest.TestCase):
         issues,_=privacy.scan('sample-private-identifier',['sample-private-identifier'])
         self.assertEqual(issues[0]['kind'],'private-deny-list')
 
+    def test_service_labels_require_the_exact_public_namespace(self):
+        for label in ['com.'+'fixture.private-daemon', 'ai.'+'fixture.daemon', 'io.github.'+'fixture.daemon',
+                      'io.github.jinoisfree.paseo-public'+'-other.daemon']:
+            issues,_=privacy.scan(label)
+            self.assertTrue(any(i['kind']=='private-service-label' for i in issues))
+        issues,allowed=privacy.scan('io.github.jinoisfree.paseo-public.auto-update')
+        self.assertEqual(issues,[])
+        self.assertEqual(allowed[0]['kind'],'public-service-label')
+        self.assertEqual(privacy.scan('7.0.0-dev.20260423.1')[0],[])
+        # A private deny entry still wins over the public label allow list.
+        issues,_=privacy.scan('io.github.jinoisfree.paseo-public.auto-update',['auto-update'])
+        self.assertEqual(issues[0]['kind'],'private-deny-list')
 
 if __name__=='__main__':unittest.main()
