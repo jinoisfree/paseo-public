@@ -133,7 +133,7 @@ async function freshUser(
               input: {
                 questions: [
                   {
-                    question: "진행 방식",
+                    question: "진행 방식을 선택하세요",
                     header: "방식",
                     options: [{ label: "일반개발" }, { label: "연합개발" }],
                   },
@@ -211,7 +211,7 @@ async function assertRules(prompt, home) {
 }
 
 for (const provider of ["claude", "codex"]) for (const catalog of [false,true])
-test(`fresh ${provider} contract5 gates roles to federation with catalog=${catalog}`,async t=>{
+test(`fresh ${provider} contract6 gates roles to federation with catalog=${catalog}`,async t=>{
  const f=await freshUser(t,{catalog});const prompt=await f.prompt(provider);await assertRules(prompt,f.home);
  assert.match(prompt,/<paseo-work-mode-v4>/);assert.match(prompt,/실제 답변 전/);
  assert.match(block(prompt,"role-workflow"),/연합개발 전용/);assert.match(block(prompt,"automation"),/연합개발 전용/);
@@ -268,10 +268,10 @@ test("the selected replacement conversation receives general rules without askin
 });
 
 for (const provider of ["claude", "codex"])
-  test(`fresh ${provider} federation enrollment uses contract 5 and exactly one verdict instruction`, async (t) => {
+  test(`fresh ${provider} federation enrollment uses contract 6 and exactly one verdict instruction`, async (t) => {
     const f = await freshUser(t);
     const result = await f.enroll(provider);
-    assert.equal(result.state.contract, 5);
+    assert.equal(result.state.contract, 6);
     assert.equal(result.state.mode, "federated");
     assert.equal(result.state.completeRepairs, 0);
     assert.equal(
@@ -280,12 +280,12 @@ for (const provider of ["claude", "codex"])
     );
   });
 
-test("fresh saved general enrollment uses contract5 standalone behavior",async t=>{
+test("fresh saved general enrollment uses contract6 standalone behavior",async t=>{
  const f=await freshUser(t,{general:true});const result=await f.enroll("claude");
- assert.equal(result.state.contract,5);assert.equal(result.state.mode,"general");assert.equal(result.state.execute,null);
+ assert.equal(result.state.contract,6);assert.equal(result.state.mode,"general");assert.equal(result.state.execute,null);
  assert.doesNotMatch(result.prompt,/<paseo-automation-v1>/);
 });
-test("fresh ask-mode general choice retains contract5 without role separation",async t=>{
+test("fresh ask-mode general choice retains contract6 without role separation",async t=>{
  const f=await freshUser(t);const result=await f.enroll("codex","일반개발");
- assert.equal(result.state.mode,"general");assert.equal(result.state.contract,5);assert.equal(result.state.execute,null);
+ assert.equal(result.state.mode,"general");assert.equal(result.state.contract,6);assert.equal(result.state.execute,null);
 });

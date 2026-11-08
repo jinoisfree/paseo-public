@@ -4,10 +4,10 @@ import type { AgentPermissionResponse, AgentTimelineItem } from "@getpaseo/proto
 import { capabilities } from "../shared/capabilities";
 import type { ProjectDefaults, Settings } from "../shared/contracts";
 import { generalAgentLabel, type GeneralAgent } from "../shared/general-agent";
-import { requestedMode } from "../shared/mode-request";
+import { workflowRequestedMode } from "../shared/mode-request";
 import type { Workflow, WorkflowPort } from "./engine";
 import type { ExecutorChoice } from "./executor-choice";
-import { timelineMode, timelineSelections } from "./executor-selection";
+import { timelineMode, timelineBrainstorm, timelineSelections } from "./executor-selection";
 import {
   asyncGeneralAnswers,
   choiceFromAnswers,
@@ -45,6 +45,7 @@ export interface GeneralModeHost {
   renameWorkspaces(w: Workflow, marker: boolean, keep?: boolean): Promise<unknown>;
   handoffPath(w: Workflow): string;
   captureArtifacts(w: Workflow, text: string, evidence: TurnEvidence | undefined, agentId: string, turnKey: string): Promise<unknown>;
+  startBrainstorm(w: Workflow): Promise<void>;
   allowMode(w: Workflow, mode: "general" | "federated"): Promise<boolean>;
   busyWriter(w: Workflow): Promise<Workflow | null>;
 }
@@ -64,7 +65,7 @@ export class GeneralMode {
     failed: string | null,
     key: string,
   ) {
-    if (w.mode === "undecided" && requestedMode(userText(request)) === "general")
+    if (w.mode === "undecided" && workflowRequestedMode(w, userText(request)) === "general")
       this.generalize(w);
     if (w.mode !== "general" || w.plan?.id !== agentId || capabilities(w).current) return false;
     if (!w.goal) w.goal = goal || request;
@@ -161,18 +162,23 @@ export class GeneralMode {
     selectionEvents?: ReturnType<typeof timelineSelections>,
     modeAnswer?: "general" | "federated",
     initialRequest = "",
+    brainstormAnswer = false,
+    normalizedModeAnswer?: "general" | "federated",
   ) {
     return this.host.serial(async () => {
       const w = (await this.host.db()).workflows.find(
         (row) => row.plan?.id === agentId && (row.mode === "general" || capabilities(row).current),
       );
       if (w && capabilities(w).current) {
-        const mode = w.mode === "undecided" ? (modeAnswer ?? timelineMode(items) ?? requestedMode(initialRequest)) : null;
+        if (capabilities(w).brainstorm && (brainstormAnswer || timelineBrainstorm(items))) await this.host.startBrainstorm(w);
+        const answer = w.contract >= 6 ? (normalizedModeAnswer ?? modeAnswer ?? timelineMode(items)) : (modeAnswer ?? timelineMode(items, false));
+        const mode = w.mode === "undecided" ? (answer ?? workflowRequestedMode(w, initialRequest)) : null;
         if (mode) {
           if (!await this.host.allowMode(w, mode)) { await this.host.save(); return; }
           w.mode = mode; await this.host.rememberProject(w); await this.host.save();
         }
         if (!capabilities(w).executorSelection) return;
+        if (capabilities(w).firstPlanGate && !w.execute && !w.lastInstruction) return;
         for (const answer of selectionEvents ?? timelineSelections(items))
           await this.host.executorChoice().acceptSelection(w, answer.id, answer.values, answer.fields);
         // A native question can predate mode enrollment, and permission events are not

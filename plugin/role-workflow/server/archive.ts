@@ -28,6 +28,7 @@ export interface ArchiveFlow {
   projectId: string;
   cwd: string;
   mode: string;
+  brainstorm?: boolean;
   progress: string;
   status: string;
   isolation?: string;
@@ -41,9 +42,9 @@ export interface ArchiveFlow {
   generalTransition?: boolean;
   generalDelivery?: { stage: string } | null;
 }
-export function isFinished(w: Pick<ArchiveFlow, "progress" | "mode">): boolean {
+export function isFinished(w: Pick<ArchiveFlow, "progress" | "mode" | "brainstorm">): boolean {
   return (
-    w.mode !== "undecided" &&
+    (w.mode !== "undecided" || (!!w.brainstorm && w.progress === "no_push")) &&
     (w.progress === "done" || w.progress === "pushed" || w.progress === "no_push")
   );
 }

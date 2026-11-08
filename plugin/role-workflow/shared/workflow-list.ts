@@ -11,9 +11,9 @@ export function workflowLabel(w: WorkflowView) {
   if (w.status === "paused") return "일시정지";
   if (w.progress === "no_push") return "완료 · 푸시 불필요";
   if (w.progress === "pushed") return "푸시 완료";
-  if (w.status === "completed" || (w.mode !== "federated" && w.progress === "done"))
+  if (w.status === "completed" || (w.mode === "general" && w.progress === "done"))
     return "구현 완료 · 미푸시";
-  if (w.mode === "undecided") return "방식 선택 전";
+  if (w.mode === "undecided") return w.brainstorm ? "논의 중" : "방식 선택 전";
   if (w.progress === "plan") return "계획";
   if (w.automatic)
     return { plan: "기획·설계", execute: "구현", review: "검증" }[w.phase];

@@ -1,3 +1,5 @@
+import { decisionHash } from "../shared/plan-approval";
+import type { Decision } from "../shared/decision";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { useRpc, type PluginHostProps, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
@@ -10,6 +12,8 @@ type Workflow = Parameters<typeof picksExecutor>[0] & {
   id: string;
   planAgentId?: string | null;
   heldPlan?: boolean;
+  firstPlan?: boolean;
+  heldApproval?: { id: number; decisionHash: string; summary: string; handoff: string } | null;
   selection?: { provider?: WorkflowProvider | null; model?: string; thinking?: string | null; error?: string } | null;
 };
 const PROVIDERS: [WorkflowProvider, string][] = [["codex", "Codex"], ["claude", "Claude Code"]];
@@ -23,6 +27,10 @@ export function ExecutorPicker({
   const readModels = useRpc(models),
     choose = useRpc(selectExecutor);
   const s = workflow.selection;
+  // Capture what is displayed. Polling must not silently approve a newer hold.
+  const [approval] = useState(workflow.heldApproval);
+  const gated = workflow.firstPlan ?? (workflow.contract ?? 1) >= 6;
+  const canSubmit = !gated || !!approval;
   const [provider, setProvider] = useState<WorkflowProvider>(s?.provider ?? "codex");
   const [catalog, setCatalog] = useState<{ models: ExecutorModel[]; error: string | null } | null>(null);
   const [model, setModel] = useState(s?.provider === provider ? (s.model ?? "") : "");
@@ -53,18 +61,18 @@ export function ExecutorPicker({
   }, [provider, readModels]);
   const selected = catalog?.models.find((row) => row.id === model);
   const submit = useCallback(async () => {
-    if (!model || thinking === null) return;
+    if (!canSubmit || !model || thinking === null) return;
     setBusy(true);
     try {
-      const result = await choose({ id: workflow.id, provider, model, thinking });
+      const result = await choose({ id: workflow.id, provider, model, thinking, ...(gated && approval ? {holdId: approval.id} : {}) });
       setMessage(result.detail);
-      if (result.ok) onChanged?.();
+      onChanged?.();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "구현 담당을 선택하지 못했습니다.");
     } finally {
       setBusy(false);
     }
-  }, [choose, model, onChanged, provider, thinking, workflow.id]);
+  }, [choose, model, onChanged, provider, thinking, workflow.id, gated, approval, canSubmit]);
   const option = (label: string, on: boolean, press: () => void, key = label) => (
     <Pressable key={key} accessibilityRole="button" accessibilityState={{ selected: on }} disabled={busy}
       onPress={press} style={on ? styles.chosen : styles.choice}>
@@ -76,6 +84,8 @@ export function ExecutorPicker({
       <Text style={styles.text}>
         {workflow.heldPlan ? "구현 담당을 선택하면 보관한 계획을 바로 전달합니다." : "구현 담당 선택"}
       </Text>
+      {gated && !approval && <Text style={styles.muted}>계획이 나오면 그 계획을 확인하고 구현 담당을 고르면 전달합니다.</Text>}
+      {gated && approval && <Text selectable style={styles.text}>{`보관 계획 #${approval.id}\n${approval.summary}\n${approval.handoff}`}</Text>}
       {!!s?.error && <Text style={styles.muted}>{s.error}</Text>}
       <View style={styles.row}>
         {PROVIDERS.map(([id, label]) => option(label, provider === id, () => {
@@ -94,7 +104,7 @@ export function ExecutorPicker({
           {pickerThinking(selected).map((row) => option(row.label, thinking === row.id, () => setThinking(row.id), row.id || "none"))}
         </View>
       )}
-      <Pressable accessibilityRole="button" disabled={busy || !model || thinking === null} onPress={() => void submit()}
+      <Pressable accessibilityRole="button" disabled={busy || !canSubmit || !model || thinking === null} onPress={() => void submit()}
         style={styles.choice}>
         <Text style={model && thinking !== null ? styles.text : styles.muted}>
           {busy ? "확인 중…" : "이 담당으로 확정"}
@@ -106,7 +116,7 @@ export function ExecutorPicker({
 }
 
 /** Loads the live workflow that `find` names and offers the picker while it is open. */
-function LivePicker({ find, theme }: { find: (rows: Workflow[]) => Workflow | undefined; theme: PluginHostProps["theme"] }) {
+function LivePicker({ find, theme, decision }: { find: (rows: Workflow[]) => Workflow | undefined; theme: PluginHostProps["theme"]; decision?: Decision }) {
   const read = useRpc(status);
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const load = useCallback(() => {
@@ -115,16 +125,19 @@ function LivePicker({ find, theme }: { find: (rows: Workflow[]) => Workflow | un
       .catch(() => setWorkflow(null));
   }, [find, read]);
   useEffect(load, [load]);
-  return workflow ? <ExecutorPicker workflow={workflow} theme={theme} onChanged={load} /> : null;
+  if (!workflow) return null;
+  if (decision && (workflow.firstPlan ?? (workflow.contract ?? 1) >= 6) && (!workflow.heldApproval || decisionHash(decision) !== workflow.heldApproval.decisionHash))
+    return <Text style={{color: theme.colors.foregroundMuted}}>이전 계획입니다. 현재 계획을 확인하세요.</Text>;
+  return <ExecutorPicker key={`${workflow.id}:${workflow.heldApproval?.id ?? 0}`} workflow={workflow} theme={theme} onChanged={load} />;
 }
 
 /** Shown under a plan card: finds the planner's open workflow and offers the picker. */
-export function PlanExecutorPicker({ agentId, theme }: { agentId: string; theme: PluginHostProps["theme"] }) {
+export function PlanExecutorPicker({ agentId, theme, decision }: { agentId: string; theme: PluginHostProps["theme"]; decision?: Decision }) {
   const find = useCallback((rows: Workflow[]) => rows.find((row) => row.planAgentId === agentId), [agentId]);
-  return <LivePicker find={find} theme={theme} />;
+  return <LivePicker find={find} theme={theme} decision={decision} />;
 }
 
-/** Posted into the planner conversation as soon as the flow becomes federated. */
+/** Contract 5 posts at federation; contract 6 posts after the first plan is held. */
 export function ExecutorPickerCard({ item, theme }: PluginTimelineItemProps<z.infer<typeof executorPickerCardSchema>>) {
   const id = item.data.workflowId;
   const find = useCallback((rows: Workflow[]) => rows.find((row) => row.id === id), [id]);

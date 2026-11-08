@@ -115,14 +115,17 @@ export function composePrompt(
 /** Contract 4 keeps the initial configuration; only federation activates role instructions. */
 export function composeCurrentPrompt(
   provider: string, existing: string | undefined, mode: "general" | "federated" | "undecided",
-  rulesReadme: string | null, selection: string, trailing: string,
+  rulesReadme: string | null, selection: string, trailing: string, contract = 5,
 ) {
   const original = stripManagedBlocks((existing ?? "").replace(BLOCK, ""));
   const choice = mode === "undecided"
     ? "첫 응답 전에 질문 도구로 진행 방식을 단독 질문한다. 질문·설명·읽기 전용 조사 요청이어도 생략하지 않는다. 질문/header: 진행 방식을 선택하세요/방식. 제목은 그대로 쓰고 설명은 제목 밖에 둔다. 선택지는 정확히 일반개발, 연합개발이다. 실제 답변 전에는 답변·조사·구현하지 않는다. 비동기 도구 반환은 답변이 아니다. 첫 사용자 요청의 첫 문장이 '연합개발', '연합개발로 진행해줘', '일반개발로 해줘'처럼 방식만 지정한 경우만 이미 답한 것으로 인정한다. '연합개발 테스트'처럼 방식 이름이 들어간 그 밖의 요청도 질문 도구로 묻는다. 도구가 없으면 채팅으로 묻고 기다린다."
     : `진행 방식은 ${mode === "general" ? "일반개발" : "연합개발"}이다. 진행 방식을 다시 묻지 않는다.`;
+  const currentChoice = contract >= 6 ? choice
+    .replace("선택지는 정확히 일반개발, 연합개발이다.", "선택지는 정확히 브레인스토밍, 일반개발, 연합개발이다. 브레인스토밍은 파일을 바꾸지 않고 논의·조사하며 규칙 15-design-guide 5절을 따르고, 끝나면 같은 제목으로 일반개발, 연합개발, 개발 안 함을 묻는다.")
+    .replace("첫 문장이 '연합개발'", "첫 문장이 '브레인스토밍', '연합개발'") : choice;
   const modeBlock = `<paseo-work-mode-v4>
-${choice}
+${currentChoice}
 일반개발: 최초 대화와 처음 설정한 모델·추론으로 직접 조사·구현·자체 검증한다. 아래 연합개발 전용 블록, 구현 담당 선택, 상태 블록·인계 문서는 적용하지 않는다. 검증은 자체 점검으로 표시한다.
 연합개발: 최초 대화는 기획·설계·검증 담당이고 구현은 사용자가 화면에서 고른 별도 대화가 맡는다. 최초 담당의 모델·추론을 바꾸지 않는다. 질문·설명 요청에는 note로 답하며 설명 요청만으로 구현 승인으로 보지 않는다.
 정한 진행 방식은 이 작업 도중 바꾸지 않고(다른 방식은 새 작업) 압축 뒤에도 유지한다.

@@ -66,7 +66,7 @@ export function WorkflowCard({
             style={styles.muted}
           >{`검증 ${d.checks.length}건\n${d.checks.slice(0, 3).join("\n")}${d.checks.length > 3 ? "\n나머지 검증은 상세에서 확인" : ""}`}</Text>
         )}
-        {d.status === "plan" && <PlanExecutorPicker agentId={agentId} theme={theme} />}
+        {d.status === "plan" && <PlanExecutorPicker agentId={agentId} theme={theme} decision={d} />}
         {d.status === "input" && !!d.next && (
           <Text selectable style={styles.text}>
             {d.next}

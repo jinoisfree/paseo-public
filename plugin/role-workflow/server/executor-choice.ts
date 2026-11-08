@@ -72,6 +72,14 @@ export class ExecutorChoice {
   }
   async selectionReady(w: Workflow): Promise<boolean> {
     const state = w.selection!;
+    if (capabilities(w).firstPlanGate && !w.execute && !w.lastInstruction &&
+        (!w.heldApproval || !w.approvedHold || w.approvedHold !== w.heldApproval.id)) {
+      w.status = "needs_input";
+      w.asker = "plan";
+      this.host.touch(w, "계획이 나오면 그 계획을 확인하고 구현 담당을 고르면 전달합니다. 계획 메시지나 자동 작업 화면에서 현재 계획을 확인하세요.");
+      await this.host.save();
+      return false;
+    }
     try {
       if (!state.pending && await validateSelection(state, provider => this.catalog(w, provider))) return true;
     } catch (error) { state.error = error instanceof Error ? error.message : String(error); }

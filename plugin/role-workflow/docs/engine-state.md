@@ -104,3 +104,13 @@
 | worktree | `server/worktree.ts` | 구현 worktree 배치·확인, 푸시 후 ff-only 반영 | 없음 |
 
 남은 분리 후보는 전달(`queue`, `deliver`, `confirmDelivery`, `resend`, `busyWriter`, `context`)과 턴 접수·판정(`admitTurn`, `consume`, `act`, `plan`, `complete`)입니다. 이 둘은 상태 전이의 중심이고 서로 강하게 얽혀 있어, 나누면 오히려 흐름을 추적하기 어려워집니다. 분리는 회귀 테스트를 더 갖춘 뒤에 검토합니다.
+
+## 계약6: 논의와 첫 계획 승인
+
+진행 방식 enum은 유지한다. 미정에서 brainstorm은 논의 표시이며 일반·연합 선택 때 기존 전환 경로를 탄다.
+첫 plan은 holdSeq를 올려 heldApproval과 inbox/selectionPlan에 보관한다. selectionDraft는 미리 채움이며 실행 권한이 없다.
+현재 보관 번호의 화면 제출만 approvedHold와 selection을 확정한다. 전달 큐 저장 때 heldApproval을 지운다.
+새 응답·취소는 승인을 지우고 확정 선택을 초안으로 되돌린다. holdSeq는 줄이지 않는다.
+ensurePickerCard는 보관 번호별 실제 조회·게시 완료까지 한 요청만 유지한다. 시간선의 같은 카드 ID 또는 보관 계획 경계로 중복을 판정한다.
+조회 실패·reset·페이지 상한·시간 초과는 게시 보류이며 다음 저장 때 재확인한다. 늦은 이전 게시가 새 번호의 기록을 바꾸지 않는다.
+계약5 이하의 pickerPosted와 선택·전달 흐름은 그대로 유지한다.

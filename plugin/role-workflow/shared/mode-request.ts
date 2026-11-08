@@ -50,3 +50,16 @@ export function requestsFederation(text: string): boolean {
     )
   );
 }
+
+/** Normalize only choice labels; free chat retains its own intent parser. */
+export function normalizeModeLabel(label: string): string {
+  return label.trim().replace(/\s*\((?:추천|Recommended)\)\s*$/i, "").trim();
+}
+export function requestsBrainstorm(text: string): boolean {
+  return text.trim().split(/\n|[.!。]/, 1)[0].trim() === "브레인스토밍";
+}
+export function workflowRequestedMode(w: {contract?: number; brainstorm?: boolean}, text: string): "general" | "federated" | null {
+  if ((w.contract ?? 1) < 6 || !w.brainstorm) return requestedMode(text);
+  const match = /^(일반개발|연합개발)(?:로\s*(?:진행해줘|해줘))?$/.exec(text.trim());
+  return match ? (match[1] === "일반개발" ? "general" : "federated") : null;
+}

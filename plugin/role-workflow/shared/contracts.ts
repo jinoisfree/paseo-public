@@ -91,6 +91,9 @@ export const workflowViewSchema = z.object({
   contract: z.number().int().default(1),
   selection: executorSelectionSchema.nullable().default(null),
   heldPlan: z.boolean().default(false),
+  brainstorm: z.boolean().default(false),
+  firstPlan: z.boolean().default(false),
+  heldApproval: z.object({ id: z.number().int().positive(), decisionHash: z.string(), summary: z.string(), handoff: z.string() }).nullable().default(null),
   planConflict: planConflictSchema.nullable().default(null),
   planIssue: z.object({ key: z.string(), reason: z.string() }).nullable().default(null),
   id: z.string(),
@@ -162,7 +165,7 @@ export const setRepositories = defineRpc({
 });
 export const selectMode = defineRpc({
   name: "workflow.select-mode",
-  input: z.object({ id: z.string(), mode: z.enum(["general", "federated"]) }),
+  input: z.object({ id: z.string(), mode: z.enum(["brainstorm", "general", "federated"]) }),
   output: z.object({ ok: z.boolean(), detail: z.string() }),
 });
 export const selectPlacement = defineRpc({
@@ -174,6 +177,7 @@ export const selectExecutor = defineRpc({
   name: "workflow.select-executor",
   input: z.object({
     id: z.string(),
+    holdId: z.number().int().positive().optional(),
     provider: z.enum(["codex", "claude"]),
     model: z.string().trim().min(1).max(120),
     // An empty value is only valid for a model without thinking options.

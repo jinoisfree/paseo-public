@@ -1,8 +1,8 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { useRpc, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { z } from "zod";
-import { selectMode } from "../shared/contracts";
+import { selectMode, status } from "../shared/contracts";
 
 import { modePickerCardSchema } from "../shared/timeline-cards";
 export { modePickerCardSchema };
@@ -10,6 +10,11 @@ export { modePickerCardSchema };
 /** Posted when a request names a mode without choosing it; one press records the choice. */
 export function ModePickerCard({ item, theme }: PluginTimelineItemProps<z.infer<typeof modePickerCardSchema>>) {
   const choose = useRpc(selectMode);
+  const read = useRpc(status);
+  const [contract, setContract] = useState(5);
+  useEffect(() => { let live = true; read({}).then(({workflows}) => {
+    if (live) setContract(workflows.find(w => w.id === item.data.workflowId)?.contract ?? 5);
+  }).catch(() => {}); return () => { live = false; }; }, [read, item.data.workflowId]);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
@@ -25,7 +30,7 @@ export function ModePickerCard({ item, theme }: PluginTimelineItemProps<z.infer<
     [c],
   );
   const pick = useCallback(
-    async (mode: "general" | "federated") => {
+    async (mode: "brainstorm" | "general" | "federated") => {
       setBusy(true);
       try {
         const result = await choose({ id: item.data.workflowId, mode });
@@ -46,6 +51,7 @@ export function ModePickerCard({ item, theme }: PluginTimelineItemProps<z.infer<
         <View style={styles.row}>
           {(
             [
+              ...(contract >= 6 ? [["brainstorm", "브레인스토밍"] as const] : []),
               ["federated", "연합개발"],
               ["general", "일반개발"],
             ] as const

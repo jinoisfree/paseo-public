@@ -1,3 +1,5 @@
+import { parseDecision } from "../shared/decision";
+import { decisionHash } from "../shared/plan-approval";
 import type { PaseoApi } from "@getpaseo/client";
 import { timelineCardSchemas, type TimelineCardKind } from "../shared/timeline-cards";
 
@@ -55,4 +57,27 @@ function sourceFor(api: PaseoApi | OperationalApi): PaseoApi {
   if (source) return source;
   // Public read helpers also accept an SDK API directly; no raw handle escapes them.
   return api as PaseoApi;
+}
+
+/** Read newest first to the held plan boundary. Any incomplete query fails closed. */
+export async function pickerCardPresence(api: PaseoApi | OperationalApi, agentId: string, id: string, hash: string,
+  budgetMs = 20_000): Promise<"present" | "absent" | "unknown"> {
+  const deadline = Date.now() + budgetMs;
+  try {
+    let cursor: NonNullable<Parameters<typeof readTimelinePage>[2]>["cursor"];
+    for (let pageNumber = 0; pageNumber < 25; pageNumber++) {
+      const page = await readTimelinePage(api, agentId, { limit: 200, ...(cursor ? { direction: "before" as const, cursor } : {}) });
+      if (Date.now() >= deadline || page.reset) return "unknown";
+      for (const { item } of [...page.entries].reverse()) {
+        if (item.type === "plugin" && item.id === id) return "present";
+        if (item.type === "assistant_message") {
+          try { if (decisionHash(parseDecision(item.text)) === hash) return "absent"; } catch { /* Not a plan message. */ }
+        }
+      }
+      if (!page.hasOlder) return "absent";
+      if (!page.startCursor) return "unknown";
+      cursor = page.startCursor;
+    }
+  } catch { /* Unknown is retried on the next save; never speculate by posting. */ }
+  return "unknown";
 }

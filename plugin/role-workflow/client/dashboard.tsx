@@ -719,7 +719,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
           {w.selection && capabilities(w).executorSelection && (
             <Text style={s.muted}>구현 선택: {selectionStageLabel[w.selection.stage ?? "provider"]} {w.selection.error}</Text>
           )}
-          {picksExecutor(w) && <ExecutorPicker workflow={w} theme={theme} onChanged={() => void load()} />}
+          {picksExecutor(w) && <ExecutorPicker key={`${w.id}:${w.heldApproval?.id ?? 0}`} workflow={w} theme={theme} onChanged={() => void load()} />}
           {w.planConflict && w.planConflict.stage !== "resolved" && (
             <Text style={s.text}>적용 보류 계획: {w.planConflict.next}{"\n"}{w.planConflict.reason}{w.planConflict.rejected ? `\n${w.planConflict.rejected.reason}` : ""}</Text>
           )}

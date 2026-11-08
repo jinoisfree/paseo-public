@@ -120,7 +120,7 @@ export default function contribute(server: PluginServerContext) {
         titlePrompts(addsTitle, automated && settings.titleMarker) + pushApprovalPrompt();
       const currentSelection = current && mode !== "general" ? SCREEN_SELECTION_PROMPT : "";
       const systemPrompt = current && mode
-        ? composeCurrentPrompt(provider, request.config.systemPrompt, mode, rulesReadme, currentSelection, titles)
+        ? composeCurrentPrompt(provider, request.config.systemPrompt, mode, rulesReadme, currentSelection, titles, 6)
         : ready
           ? await generalPrompt(
               directory,
@@ -201,7 +201,7 @@ export default function contribute(server: PluginServerContext) {
         const snapshot = await port.inspect(agent.id).catch(() => null);
         if (!snapshot) continue;
         await engine
-          .enroll(snapshot, seed.config, seed.env, seed.mode, seed.titled, 5)
+          .enroll(snapshot, seed.config, seed.env, seed.mode, seed.titled, 6)
           .catch(report);
         return;
       }
@@ -224,7 +224,7 @@ export default function contribute(server: PluginServerContext) {
       if (event.outcome.kind === "failed") failure = event.outcome.error.message;
       if (event.outcome.kind === "canceled") failure = event.outcome.reason;
       if (event.outcome.kind === "completed")
-        await engine.generalTimeline(event.agent.id, eventItems(event), turn.generalAnswers, turn.selectionAnswers, turn.modeAnswer, turn.goal);
+        await engine.generalTimeline(event.agent.id, eventItems(event), turn.generalAnswers, turn.selectionAnswers, turn.modeAnswer, turn.goal, turn.brainstormAnswer, turn.normalizedModeAnswer);
       await engine
         .ended(
           event.agent.id,

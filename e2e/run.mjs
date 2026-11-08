@@ -12,7 +12,8 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { build } from "esbuild";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { createPaseoApi } from "@getpaseo/client";
 
@@ -286,7 +287,8 @@ try {
       const { models } = await rpc("workflow.models", { provider: "claude" });
       const model = models.find(m => m.isDefault) ?? models[0];
       const thinking = model.thinkingOptions.find(o => o.isDefault)?.id ?? model.thinkingOptions[0]?.id ?? "";
-      const selected = await rpc("workflow.select-executor", { id: flow.id, provider: "claude", model: model.id, thinking });
+      const selected = await rpc("workflow.select-executor", { id: flow.id, provider: "claude", model: model.id, thinking, holdId: flow.heldApproval?.id });
+      assert(flow.contract === 6 && flow.heldApproval?.id > 0, "fresh flow did not hold a contract6 plan");
       assert(selected.ok, selected.detail);
       flow = await waitFor("shared executor tab", async () => state().workflows.find(w => w.id === flow.id && w.execute?.workspaceId), 60_000);
       assert(flow.isolation === "shared", `isolation ${flow.isolation}`);
@@ -365,7 +367,7 @@ try {
       const model = models.find((m) => m.isDefault) ?? models[0];
       assert(model, "no Claude model in the catalog");
       const thinking = model.thinkingOptions.find((o) => o.isDefault)?.id ?? model.thinkingOptions[0]?.id ?? "";
-      const selected = await rpc("workflow.select-executor", { id: flow.id, provider: "claude", model: model.id, thinking });
+      const selected = await rpc("workflow.select-executor", { id: flow.id, provider: "claude", model: model.id, thinking, holdId: flow.heldApproval?.id });
       assert(selected.ok, `executor selection failed: ${selected.detail}`);
       flow = await waitFor("overlapping placement choice", async () => state().workflows.find(w => w.id === flow.id && w.placement?.stage === "choice"));
       assert(flow.isolation === "undecided" && !flow.execute.workspaceId, "executor started before the choice");
@@ -640,6 +642,49 @@ try {
     } finally {
       writeFileSync(control, JSON.stringify({ mode: "text", text: "2" }));
     }
+  });
+
+  await step("AC-4/5/15/23: brainstorm, exact chat choice, held plan card and real timeline identities", async () => {
+    // Compile the actual client decision parser/hash and server read helper; don't duplicate them.
+    const helperFile = join(root, "brainstorm-helpers.mjs");
+    await build({ stdin: { contents: `export { parseDecision } from "./shared/decision"; export { decisionHash } from "./shared/plan-approval"; export { pickerCardPresence } from "./server/timeline-cards";`, resolveDir: pluginDir }, bundle: true, platform: "node", format: "esm", outfile: helperFile });
+    const { parseDecision, decisionHash, pickerCardPresence } = await import(pathToFileURL(helperFile).href);
+    writeFileSync(control, JSON.stringify({ mode: "role", scenario: "brainstorm-discussion", plan: [workflowBlock("note", "")] }));
+    try {
+      const planner = await runAgent("브레인스토밍");
+      let flow = await waitFor("brainstorm flag", async () => state().workflows.find(w => w.plan?.id === planner && w.brainstorm));
+      assert(flow.contract === 6 && flow.mode === "undecided", "brainstorm changed the persisted mode");
+      await rpc("workflow.status", {});
+      const api = createPaseoApi(client);
+      const timeline = async () => (await api.agents.ref(planner).timeline.refetch({ direction: "tail", limit: 200 })).entries.map(e => e.item);
+      assert(!(await timeline()).some(i => i.type === "plugin" && ["mode-picker", "executor-picker"].includes(i.kind)), "brainstorm posted a picker");
+      await cli("send", planner, "연합개발");
+      flow = await waitFor("brainstorm to federation", async () => state().workflows.find(w => w.id === flow.id && w.mode === "federated"));
+      assert(flow.plan.id === planner && !flow.execute && !flow.heldApproval, "federation started an executor before a plan");
+      assert(!(await timeline()).some(i => i.type === "plugin" && i.kind === "executor-picker"), "federation posted a premature executor picker");
+      writeFileSync(control, JSON.stringify({ mode: "role", scenario: "brainstorm-plan", plan: [workflowBlock("plan", "확인한 보관 계획을 구현한다")] }));
+      await cli("send", planner, "계획을 확정해줘.");
+      flow = await waitFor("held plan and posted marker", async () => state().workflows.find(w => w.id === flow.id && w.heldApproval && w.pickerPostedFor === w.heldApproval.id));
+      const expectedId = `role-workflow-executor-picker:${flow.id}:${flow.heldApproval.id}`;
+      let items = await timeline();
+      const cards = items.filter(i => i.type === "plugin" && i.kind === "executor-picker");
+      assert(cards.length === 1 && cards[0].id === expectedId, "daemon timeline did not return the posted PluginTimelineItem.id");
+      const message = items.findLast(i => { if (i.type !== "assistant_message") return false; try { return decisionHash(parseDecision(i.text)) === flow.heldApproval.decisionHash; } catch { return false; } });
+      assert(message, "client message hash differs from server inbox hash");
+      assert(await pickerCardPresence(api, planner, expectedId, flow.heldApproval.decisionHash) === "present", "read-before-post did not find the real card");
+      const reload = await cli("plugin", "reload", "role-workflow");
+      assert(reload.code === 0, reload.stderr);
+      await waitFor("plugin reloaded", async () => { const r = await rpc("workflow.status", {}); return r.workflows.some(w => w.id === flow.id && w.heldApproval?.id === flow.heldApproval.id); });
+      items = await timeline();
+      assert(items.filter(i => i.type === "plugin" && i.id === expectedId).length === 1, "reload duplicated the held picker");
+      assert(!state().workflows.find(w => w.id === flow.id).execute, "reload dispatched an unapproved plan");
+      writeFileSync(join(root, "brainstorm-identities.json"), JSON.stringify({ workflowId: flow.id, hold: flow.heldApproval, card: cards[0], clientDecisionHash: decisionHash(parseDecision(message.text)), serverDecisionHash: flow.heldApproval.decisionHash, presence: "present", cardsAfterReload: 1 }, null, 2));
+      writeFileSync(control, JSON.stringify({ mode: "role", scenario: "brainstorm-general", plan: [workflowBlock("note", "")] }));
+      const general = await runAgent("브레인스토밍");
+      await cli("send", general, "일반개발");
+      const direct = await waitFor("brainstorm to general", async () => state().workflows.find(w => w.plan?.id === general && w.mode === "general"));
+      assert(!direct.execute && direct.plan.id === general, "general mode created a second conversation");
+    } finally { writeFileSync(control, JSON.stringify({ mode: "text", text: "2" })); }
   });
 
   await step("state and plugin survive a daemon restart", async () => {

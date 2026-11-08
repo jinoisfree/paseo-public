@@ -1,3 +1,4 @@
+import { normalizeModeLabel } from "../shared/mode-request";
 import { unknownData } from "./data-records";
 import { EXECUTOR_QUESTIONS, type ExecutorSelection, type SelectionField, type SelectionStage } from "../shared/executor-selection";
 import type { ExecutorModel } from "./protocol";
@@ -54,7 +55,7 @@ export function timelineSelections(items: readonly AgentTimelineItem[]) {
     return fields.length ? [{id:item.callId, fields, values}] : [];
   });
 }
-export function timelineMode(items: readonly AgentTimelineItem[]): "general" | "federated" | null {
+export function timelineMode(items: readonly AgentTimelineItem[], normalize = true): "general" | "federated" | null {
   for (const [index, item] of items.entries()) {
     if (item.type !== "tool_call" || !["request_user_input_async", "request_user_input"].includes(item.name) ||
         item.status !== "completed" || item.error !== null || item.detail.type !== "plain_text") continue;
@@ -62,11 +63,25 @@ export function timelineMode(items: readonly AgentTimelineItem[]): "general" | "
     if (!detail.startsWith("진행 방식을 선택하세요\n")) continue;
     const next = items.slice(index + 1).find(row => row.type === "user_message");
     if (next?.type !== "user_message" || next.text !== "Answers to your questions:\n\n" + detail) continue;
-    const value = detail.slice("진행 방식을 선택하세요\n".length).trim();
+    const answer = detail.slice("진행 방식을 선택하세요\n".length);
+    const value = normalize ? normalizeModeLabel(answer) : answer.trim();
     if (value === "일반개발") return "general";
     if (value === "연합개발") return "federated";
   }
   return null;
+}
+export function timelineBrainstorm(items: readonly AgentTimelineItem[]): boolean {
+  for (const [index, item] of items.entries()) {
+    if (item.type !== "tool_call" || !["request_user_input_async", "request_user_input"].includes(item.name) ||
+        item.status !== "completed" || item.error !== null || item.detail.type !== "plain_text") continue;
+    const detail = item.detail.text ?? "";
+    if (!detail.startsWith("진행 방식을 선택하세요\n")) continue;
+    const next = items.slice(index + 1).find(row => row.type === "user_message");
+    if (next?.type !== "user_message" || next.text !== "Answers to your questions:\n\n" + detail) continue;
+    const value = normalizeModeLabel(detail.slice("진행 방식을 선택하세요\n".length));
+    if (value === "브레인스토밍") return true;
+  }
+  return false;
 }
 export function selectableModel(models: readonly ExecutorModel[], id: string) {
   return models.find(model => model.id === id && model.isSelectable !== false);
@@ -177,5 +192,5 @@ export async function applySelectionBatch(state: ExecutorSelection, values: Part
 /** Contract 5: the executor is picked on the plugin screen, so no catalog or questions here. */
 export const SCREEN_SELECTION_PROMPT = `\n<paseo-executor-selection-v5>
 연합개발의 구현 담당(제품·모델·추론)은 사용자가 플러그인 화면에서 고른다. 질문 도구로 묻지 않고 모델 목록도 안내하지 않는다.
-계획이 확정되면 그대로 plan을 낸다. 선택 전이면 호스트가 계획을 보관했다가 선택 직후 한 번 전달한다. 최초 담당의 모델·추론은 바꾸지 않는다.
+계획이 확정되면 그대로 plan을 낸다. 계획이 나오면 그 계획을 확인하고 구현 담당을 고르면 전달한다. 최초 담당의 모델·추론은 바꾸지 않는다.
 </paseo-executor-selection-v5>`;

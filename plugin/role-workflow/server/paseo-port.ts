@@ -1,6 +1,6 @@
 import { federationAvailability } from "./federation";
 import { contextUsage, contextRatio } from "../shared/compression";
-import { timelineSelections, timelineMode } from "./executor-selection";
+import { timelineSelections, timelineMode, timelineBrainstorm } from "./executor-selection";
 import { asyncGeneralAnswers } from "./general-agent";
 import { lstat, realpath, readFile } from "node:fs/promises";
 import { paseoHome } from "./paths";
@@ -13,7 +13,7 @@ import { decorateTitle } from "./protocol";
 import type { WorkflowPort, History } from "./engine";
 import type { ArchiveInspection, ArchiveConversation } from "./archive";
 import { turnEvidence } from "./push-evidence";
-import { appendTimelineCard, readTimelinePage, subscribeAgentEvents, type TimelinePage, type OperationalApi } from "./timeline-cards";
+import { appendTimelineCard, pickerCardPresence, readTimelinePage, subscribeAgentEvents, type TimelinePage, type OperationalApi } from "./timeline-cards";
 import { createProjectTitleSync } from "./project-titles";
 import { withBudget } from "./call-budget";
 
@@ -105,7 +105,9 @@ export function readTurn(
     text,
     generalAnswers: asyncGeneralAnswers(items),
     ...(timelineSelections(items).length ? { selectionAnswers: timelineSelections(items) } : {}),
-    ...(timelineMode(items) ? { modeAnswer: timelineMode(items)! } : {}),
+    brainstormAnswer: timelineBrainstorm(items),
+    ...(timelineMode(items, false) ? { modeAnswer: timelineMode(items, false)! } : {}),
+    ...(timelineMode(items) ? { normalizedModeAnswer: timelineMode(items)! } : {}),
     // Keep persisted text/key/request semantics; only the tool evidence spans an async answer.
     evidence: turnEvidence(items.slice(evidenceBoundary(items, turnIds) + 1), cwd),
     compacted: turn.some((item) => item.type === "compaction" && item.status === "completed"),
@@ -623,6 +625,13 @@ export function createPort(
     },
     async executorPicker(agentId, workflowId) {
       await appendTimelineCard(getApi(), agentId, `role-workflow-executor-picker:${workflowId}`, "executor-picker", { workflowId });
+    },
+    async ensurePickerCard(agentId, workflowId, hold) {
+      const id = `role-workflow-executor-picker:${workflowId}:${hold.id}`;
+      const presence = await pickerCardPresence(getApi(), agentId, id, hold.decisionHash);
+      if (presence === "unknown") return false;
+      if (presence === "absent") await appendTimelineCard(getApi(), agentId, id, "executor-picker", { workflowId });
+      return true;
     },
     async placementPicker(agentId, workflowId, blocker, generation) {
       await appendTimelineCard(getApi(), agentId, `role-workflow-placement-picker:${workflowId}${generation === undefined ? "" : `:${generation}`}`, "placement-picker", { workflowId, ...blocker });

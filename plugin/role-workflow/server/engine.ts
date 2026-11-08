@@ -1,3 +1,4 @@
+import { decisionHash } from "../shared/plan-approval";
 import { OwnerPolicyStore } from "./owner-policy";
 import { recommendedSettings } from "../shared/recommended";
 import { unknownData } from "./data-records";
@@ -35,7 +36,7 @@ import {
   type TitleRole,
 } from "./protocol";
 import { executorDefaults, oppositeProvider } from "../shared/assignment";
-import { requestedMode, requestsFederation } from "../shared/mode-request";
+import { requestsFederation, requestsBrainstorm, normalizeModeLabel, workflowRequestedMode } from "../shared/mode-request";
 import { JsonStore } from "./store";
 import { ManagedPushRunner } from "./managed-push";
 import { managedPushSchema, type ManagedPush } from "../shared/managed-push";
@@ -227,6 +228,13 @@ const workflowSchema = z.object({
   selectionPlan: z.string().default(""),
   // The in-chat executor picker was posted once the flow became federated (contract 5).
   pickerPosted: z.boolean().default(false),
+  brainstorm: z.boolean().default(false),
+  brainstormBaseline: z.array(z.string()).default([]),
+  holdSeq: z.number().int().nonnegative().default(0),
+  heldApproval: z.object({ id: z.number().int().positive(), inboxKey: z.string(), decisionHash: z.string(), summary: z.string(), handoff: z.string(), at: z.string() }).nullable().default(null),
+  approvedHold: z.number().int().nonnegative().default(0),
+  selectionDraft: executorSelectionSchema.nullable().default(null),
+  pickerPostedFor: z.number().int().nonnegative().default(0),
   /** The in-chat mode card was offered once, after a turn that ended with the mode undecided. */
   modePickerPosted: z.boolean().default(false),
   resumeNote: z.string().default(""),
@@ -354,6 +362,8 @@ export interface History {
   generalAnswers?: Partial<Record<GeneralQuestion, string>>;
   selectionAnswers?: ReturnType<typeof timelineSelections>;
   modeAnswer?: "general" | "federated";
+  brainstormAnswer?: boolean;
+  normalizedModeAnswer?: "general" | "federated";
   text: string;
   key: string;
   messageIds: string[];
@@ -401,6 +411,8 @@ export interface WorkflowPort {
   ): Promise<void>;
   /** Posts the executor picker card into the planner conversation. */
   executorPicker?(agentId: string, workflowId: string): Promise<void>;
+  /** Unbudgeted underlying request: retain the in-flight entry until it actually settles. */
+  ensurePickerCard?(agentId: string, workflowId: string, hold: { id: number; decisionHash: string }): Promise<boolean>;
   /** Posts the work-mode card into an undecided conversation. */
   modePicker?(agentId: string, workflowId: string): Promise<void>;
   placementPicker?(agentId: string, workflowId: string, blocker: { number: number; title: string }, generation?: number): Promise<void>;
@@ -556,6 +568,7 @@ export class WorkflowEngine {
   // Flows showing a permission wait this tick; a second status line must not fight it.
   private readonly asking = new Set<string>();
   private readonly modeQuestions = new Map<string, { question: string; header?: string }>();
+  private readonly pickerInFlight = new Map<string, Promise<void>>();
   private savedDatabase: string | undefined;
   private readonly savedHandoffs = new Map<string, string>();
   private readonly scopeCache = new Map<string, Promise<string>>();
@@ -602,6 +615,7 @@ export class WorkflowEngine {
     captureArtifacts: (w, text, evidence, agentId, turnKey) => this.captureArtifacts(w, text, evidence, agentId, turnKey),
     busyWriter: (w) => this.busyWriter(w),
     allowMode: (w, mode) => this.allowMode(w, mode),
+    startBrainstorm: (w) => this.startBrainstorm(w),
   });
   private readonly worktreeCleanup = new WorktreeCleanup({
     lifecycle: () => this.lifecycle,
@@ -763,7 +777,7 @@ export class WorkflowEngine {
     }
     // Contract 5 offers the picker as soon as the flow is federated, not after the plan.
     const pickers = db.workflows.filter(
-      (w) => capabilities(w).screenSelection && !w.pickerPosted && w.plan && !w.execute &&
+      (w) => capabilities(w).screenSelection && !capabilities(w).firstPlanGate && !w.pickerPosted && w.plan && !w.execute &&
         w.status !== "completed" && !this.executorChoice.selectedExecutor(w),
     );
     for (const w of pickers) w.pickerPosted = true;
@@ -786,7 +800,64 @@ export class WorkflowEngine {
     for (const event of events) this.dispatch(event);
     // A failed post leaves the plan card and dashboard pickers as the fallback.
     for (const w of pickers) void this.port.executorPicker?.(w.plan!.id, w.id).catch(() => {});
-    for (const w of db.workflows) await this.saveHandoff(w);
+    for (const w of db.workflows) {
+      if (this.firstPlan(w) && w.heldApproval && w.pickerPostedFor !== w.heldApproval.id)
+        void this.ensurePickerCard(w.id, w.heldApproval.id);
+      await this.saveHandoff(w);
+    }
+  }
+  private firstPlan(w: Workflow) {
+    return capabilities(w).firstPlanGate && !w.execute && !w.lastInstruction;
+  }
+  private invalidateApproval(w: Workflow) {
+    if (!this.firstPlan(w)) return;
+    if (w.approvedHold && w.selection) w.selectionDraft = structuredClone(w.selection);
+    w.selection = executorSelectionSchema.parse({});
+    w.heldApproval = null;
+    w.approvedHold = 0;
+  }
+  private ensurePickerCard(workflowId: string, holdId: number): Promise<void> {
+    const key = `${workflowId}:${holdId}`;
+    const running = this.pickerInFlight.get(key);
+    if (running) return running;
+    const request = (async () => {
+      const w = (await this.db()).workflows.find(w => w.id === workflowId);
+      if (!w?.plan || w.heldApproval?.id !== holdId || !this.port.ensurePickerCard) return;
+      const posted = await this.port.ensurePickerCard(w.plan.id, w.id, { ...w.heldApproval });
+      if (posted) await this.serial(async () => {
+        if (w.heldApproval?.id !== holdId) return;
+        w.pickerPostedFor = holdId;
+        await this.save();
+      });
+    })().catch(() => {}).finally(() => { this.pickerInFlight.delete(key); });
+    this.pickerInFlight.set(key, request);
+    return request;
+  }
+  private async brainstormDirty(w: Workflow): Promise<string[]> {
+    const snapshot = await this.probe?.snapshot(w.cwd).catch(() => null);
+    if (!snapshot || snapshot.incomplete) return [];
+    // Ignore file-size/mtime changes on paths that were already dirty at entry.
+    return [...snapshot.dirty.map(row => row.split("\t")[0]),
+      ...(snapshot.repositories ?? []).flatMap(repo => repo.dirty.map(row => `${repo.name}/${row.split("\t")[0]}`))];
+  }
+  private async startBrainstorm(w: Workflow) {
+    if (!capabilities(w).brainstorm || w.brainstorm) return;
+    w.brainstormBaseline = await this.brainstormDirty(w);
+    w.brainstorm = true;
+    w.modePickerPosted = true;
+    this.touch(w, "브레인스토밍: 파일을 바꾸지 않고 논의·조사합니다. 규칙 15-design-guide 5절을 따르세요.");
+    await this.save();
+  }
+  private async warnBrainstormChanges(w: Workflow) {
+    if (!capabilities(w).brainstorm || !w.brainstorm) return;
+    const dirty = await this.brainstormDirty(w);
+    const added = dirty.filter(row => !w.brainstormBaseline.includes(row));
+    if (!added.length) return;
+    w.brainstormBaseline = [...new Set([...w.brainstormBaseline, ...dirty])];
+    const detail = "브레인스토밍 중 저장소 변경이 늘었습니다. 파일을 바꾸지 않고 논의·조사하세요.";
+    this.touch(w, detail);
+    if (w.plan) this.dispatch({ kind: "stopped", title: `브레인스토밍 변경 확인 · ${w.title}`, body: detail, agentId: w.plan.id, workspaceId: w.plan.workspaceId ?? "" });
+    await this.save();
   }
   private async saveHandoff(w: Workflow) {
     const artifact = new JsonStore<unknown>(
@@ -925,11 +996,38 @@ export class WorkflowEngine {
     });
   }
   /** The executor chosen on the plugin screen; a held plan goes out once it is valid. */
-  selectExecutor(id: string, choice: { provider: "codex" | "claude"; model: string; thinking: string }) {
+  selectExecutor(id: string, choice: { provider: "codex" | "claude"; model: string; thinking: string; holdId?: number }) {
     return this.serial(async () => {
       const w = (await this.db()).workflows.find((entry) => entry.id === id);
       if (!w) throw new Error("작업을 찾을 수 없습니다.");
       if (!capabilities(w).executorSelection) throw new Error("연합개발 작업에서만 구현 담당을 선택할 수 있습니다.");
+      if (capabilities(w).firstPlanGate && choice.holdId && w.approvedHold === choice.holdId)
+        return { ok: true, detail: "승인한 계획을 이미 처리했습니다." };
+      if (this.firstPlan(w)) {
+        const draft = structuredClone(w.selectionDraft ?? executorSelectionSchema.parse({}));
+        try {
+          await applySelectionBatch(draft, { provider: choice.provider, model: choice.model,
+            thinking: choice.thinking || "추론 없음" }, provider => this.executorChoice.catalog(w, provider));
+        } catch (error) { draft.error = error instanceof Error ? error.message : String(error); }
+        w.selectionDraft = draft;
+        const hold = w.heldApproval;
+        if (!choice.holdId || hold?.id !== choice.holdId || !w.selectionPlan ||
+            w.inbox?.key !== w.selectionPlan || w.selectionPlan !== hold.inboxKey) {
+          await this.save();
+          return { ok: false, detail: "계획이 바뀌었습니다. 현재 계획을 확인하고 다시 고르세요." };
+        }
+        if (draft.stage !== "ready" || draft.pending || !draft.provider || draft.thinking === null) {
+          await this.save();
+          return { ok: false, detail: draft.error || "구현 담당 선택을 확인하세요." };
+        }
+        w.selection = structuredClone(draft);
+        w.approvedHold = choice.holdId;
+        w.asker = null;
+        if (w.status === "needs_input") w.status = "active";
+        await this.save();
+        await this.advance(w);
+        return { ok: true, detail: "승인한 계획을 구현 담당에게 전달합니다." };
+      }
       if (w.execute) throw new Error("구현 담당이 이미 생성되어 바꿀 수 없습니다.");
       const state = w.selection!;
       // A still-open chat question is retired; its late answer cannot override this choice.
@@ -1193,7 +1291,10 @@ export class WorkflowEngine {
       workflows: db.workflows.map((w) => ({
         id: w.id,
         contract: w.contract,
-        selection: w.selection,
+        selection: this.firstPlan(w) ? w.selectionDraft ?? w.selection : w.selection,
+        brainstorm: w.brainstorm,
+        firstPlan: this.firstPlan(w),
+        heldApproval: w.heldApproval,
         heldPlan: !!w.selectionPlan && w.inbox?.key === w.selectionPlan,
         planConflict: w.planConflict,
         planIssue: w.planIssue ? { key: w.planIssue.response.key, reason: w.planIssue.reason } : null,
@@ -1343,6 +1444,13 @@ export class WorkflowEngine {
         limitPlan: "",
         selectionPlan: "",
         pickerPosted: false,
+        brainstorm: false,
+        brainstormBaseline: [],
+        holdSeq: 0,
+        heldApproval: null,
+        approvedHold: 0,
+        selectionDraft: null,
+        pickerPostedFor: 0,
         modePickerPosted: false,
         resumeNote: "",
         generalHandoff: "",
@@ -1391,6 +1499,7 @@ export class WorkflowEngine {
       );
       if (!w) return;
       if (w.processed.includes(key) || w.inbox?.key === key || w.planIssue?.response.key === key) return;
+      if (capabilities(w).brainstorm && requestsBrainstorm(userText(request || goal))) await this.startBrainstorm(w);
       if (canceled) w.transientPause = null;
       this.pushAudit.invalidatePushAudit(w);
       await this.recordTurnEvidence(w, text, failed, evidence, agentId, key);
@@ -1412,10 +1521,26 @@ export class WorkflowEngine {
         w.mode === "undecided" &&
         w.plan?.id === agentId &&
         !w.modePickerPosted &&
-        !requestedMode(userText(request || goal))
+        !w.brainstorm &&
+        !workflowRequestedMode(w, userText(request || goal))
       ) {
         w.modePickerPosted = true;
         void this.port.modePicker?.(agentId, w.id).catch(() => {});
+      }
+      if (w.contract >= 6 && w.mode === "undecided") {
+        const requested = workflowRequestedMode(w, userText(request || goal));
+        if (requested && await this.allowMode(w, requested)) { w.mode = requested; await this.rememberProject(w); }
+      }
+      await this.warnBrainstormChanges(w);
+      if (this.firstPlan(w) && w.plan?.id === agentId && !w.selectionDraft?.explicitRead) {
+        const draft = w.selectionDraft ?? executorSelectionSchema.parse({});
+        draft.explicitRead = true;
+        const explicit = explicitSelection(userText(goal || request));
+        try {
+          if (Object.keys(explicit).length) await applySelectionBatch(draft, explicit, provider => this.executorChoice.catalog(w, provider));
+        } catch (error) { draft.error = error instanceof Error ? error.message : String(error); }
+        w.selectionDraft = draft;
+        await this.save();
       }
       // An informational turn with no outstanding work must not consume the initial
       // selection or trigger recovery/continuation. Live deliveries keep their existing
@@ -1429,10 +1554,10 @@ export class WorkflowEngine {
         return;
       }
       if (capabilities(w).current && w.mode === "undecided") {
-        const requested = requestedMode(userText(request || goal));
+        const requested = workflowRequestedMode(w, userText(request || goal));
         if (requested && await this.allowMode(w, requested)) w.mode = requested;
       }
-      if (capabilities(w).executorSelection && w.plan?.id === agentId && !w.selection!.explicitRead) {
+      if (capabilities(w).executorSelection && !this.firstPlan(w) && w.plan?.id === agentId && !w.selection!.explicitRead) {
         w.selection!.explicitRead = true;
         const explicit = explicitSelection(userText(goal || request));
         if (Object.keys(explicit).length) {
@@ -1537,7 +1662,11 @@ export class WorkflowEngine {
       await this.save();
       return;
     }
-    if (w.inbox) this.seen(w, w.inbox.key);
+    if (w.inbox) {
+      this.invalidateApproval(w);
+      this.seen(w, w.inbox.key);
+      w.selectionPlan = "";
+    }
     const resumed = !chatBlocked && w.status === "needs_input";
     if (resumed) w.status = "active";
     // A failure pause ends when the user carries the failed instruction on to a decision.
@@ -1610,7 +1739,7 @@ export class WorkflowEngine {
     messageIds?: readonly string[],
   ) {
     if (capabilities(w).current) {
-      const requested = requestedMode(userText(request));
+      const requested = workflowRequestedMode(w, userText(request));
       if (requested && requested !== w.mode) {
         if (w.mode === "undecided") {
           if (await this.allowMode(w, requested)) {
@@ -1626,8 +1755,8 @@ export class WorkflowEngine {
       automates(w) &&
       !!w.execute &&
       w.plan?.id === turn.agentId &&
-      requestedMode(userText(request)) === "general";
-    if (splitGeneral(w) && requestedMode(userText(request)) === "federated" && await this.allowMode(w, "federated")) {
+      workflowRequestedMode(w, userText(request)) === "general";
+    if (splitGeneral(w) && workflowRequestedMode(w, userText(request)) === "federated" && await this.allowMode(w, "federated")) {
       w.mode = "federated";
       await this.rememberProject(w);
       await this.save();
@@ -1674,7 +1803,7 @@ export class WorkflowEngine {
     report = text,
   ): Promise<boolean> {
     let transitioned = false;
-    if (!capabilities(w).current && automates(w) && !w.execute && requestedMode(userText(request)) === "general") {
+    if (!capabilities(w).current && automates(w) && !w.execute && workflowRequestedMode(w, userText(request)) === "general") {
       this.generalMode.generalize(w);
       await this.rememberProject(w);
       await this.save();
@@ -1772,7 +1901,7 @@ export class WorkflowEngine {
   /** A general conversation federates only after the user names that mode. */
   private async noteModeRequest(w: Workflow, said: string) {
     if (w.mode === "federated") return;
-    const mode = requestedMode(said);
+    const mode = workflowRequestedMode(w, said);
     if (!mode) return;
     if (mode === "general") {
       if (w.mode === "undecided") this.generalMode.generalize(w);
@@ -2463,11 +2592,11 @@ export class WorkflowEngine {
       const key = `${agentId}:${request.id}`;
       if (w && capabilities(w).current && w.mode === "undecided" && w.plan?.id === agentId) {
         const history = await this.port.history(agentId).catch(() => null);
-        const requested = requestedMode(history?.goal ?? "");
+        const requested = workflowRequestedMode(w, history?.goal ?? "");
         if (requested && await this.allowMode(w, requested)) { w.mode = requested; await this.rememberProject(w); }
       }
       const questionId = request.id.replace(/^permission-/, "");
-      if (w && capabilities(w).executorSelection && w.plan?.id === agentId && request.kind === "question") {
+      if (w && capabilities(w).executorSelection && !this.firstPlan(w) && w.plan?.id === agentId && request.kind === "question") {
         this.executorChoice.rememberSelectionQuestion(w, questionId, request.input);
         await this.save();
       } else await this.generalMode.rememberGeneralQuestion(w, agentId, request, db.settings);
@@ -2486,8 +2615,9 @@ export class WorkflowEngine {
         const question = parsed.success
           ? parsed.data.questions.find(
               (item) =>
-                item.options.some((option) => option.label === "일반개발") &&
-                item.options.some((option) => option.label === "연합개발"),
+                (w.contract < 6 || item.question === "진행 방식을 선택하세요") &&
+                item.options.some((option) => (w.contract >= 6 ? normalizeModeLabel(option.label) : option.label) === "일반개발") &&
+                item.options.some((option) => (w.contract >= 6 ? normalizeModeLabel(option.label) : option.label) === "연합개발"),
             )
           : undefined;
         if (question) {
@@ -2520,7 +2650,7 @@ export class WorkflowEngine {
     return this.serial(async () => {
       const key = `${agentId}:${requestId}`;
       const workflow = (await this.db()).workflows.find(w => w.plan?.id === agentId);
-      if (workflow && capabilities(workflow).executorSelection) {
+      if (workflow && capabilities(workflow).executorSelection && !this.firstPlan(workflow)) {
         const pending = workflow.selection?.pending;
         if (pending?.id === requestId.replace(/^permission-/, "") && resolution.behavior === "allow") {
           const values = selectionAnswers(resolution.updatedInput, pendingFields(pending));
@@ -2537,11 +2667,16 @@ export class WorkflowEngine {
       const answers = parsed.data.answers;
       const answer =
         answers[question.question] ?? (question.header ? answers[question.header] : undefined);
-      if (answer !== "일반개발" && answer !== "연합개발") return;
+      const label = typeof answer === "string" ? ((workflow?.contract ?? 1) >= 6 ? normalizeModeLabel(answer) : answer) : "";
+      if (label !== "브레인스토밍" && label !== "일반개발" && label !== "연합개발") return;
       const w = (await this.db()).workflows.find(
         (candidate) => candidate.plan?.id === agentId || candidate.execute?.id === agentId,
       );
-      const mode = answer === "일반개발" ? "general" : "federated";
+      if (label === "브레인스토밍") {
+        if (w) await this.startBrainstorm(w);
+        return;
+      }
+      const mode = label === "일반개발" ? "general" : "federated";
       if (!w || !w.plan || w.mode === mode) return;
       await this.applyModeChoice(w, agentId, mode);
     });
@@ -2584,12 +2719,20 @@ export class WorkflowEngine {
       await this.renameWorkspaces(w, (await this.settings()).titleMarker);
   }
   /** The mode card: chooses the mode, then tells the planner so the request continues. */
-  selectMode(id: string, mode: "general" | "federated") {
+  selectMode(id: string, mode: "brainstorm" | "general" | "federated") {
     return this.serial(async () => {
       const w = (await this.db()).workflows.find((candidate) => candidate.id === id);
       if (!w?.plan) return { ok: false, detail: "작업을 찾을 수 없습니다." };
       if (w.mode !== "undecided")
         return { ok: w.mode === mode, detail: `진행 방식은 이미 ${w.mode === "general" ? "일반개발" : "연합개발"}입니다.` };
+      if (mode === "brainstorm") {
+        if (!capabilities(w).brainstorm) return { ok: false, detail: "이 작업은 브레인스토밍을 지원하지 않습니다." };
+        await this.startBrainstorm(w);
+        const snapshot = await this.port.inspect(w.plan.id).catch(() => null);
+        if (snapshot && this.quiet(snapshot)) await this.port.send(w.plan.id,
+          `작업 ID: ${w.id}\n진행 방식: 브레인스토밍 (사용자가 화면에서 선택). 진행 방식을 다시 묻지 않고 규칙 15-design-guide 5절에 따라 파일을 바꾸지 않고 논의·조사한다.`, `role-workflow-mode:${w.id}:brainstorm`).catch(() => {});
+        return { ok: true, detail: "브레인스토밍으로 논의·조사합니다." };
+      }
       await this.applyModeChoice(w, w.plan.id, mode);
       // applyModeChoice may refuse; read the mode again after it.
       if ((w.mode as Workflow["mode"]) !== mode) return { ok: false, detail: w.detail };
@@ -3793,6 +3936,10 @@ export class WorkflowEngine {
     replaces: boolean,
   ) {
     const settings = await this.startSettings(w.cwd, w.plan?.config.provider ?? "claude");
+    if (this.firstPlan(w) && w.heldApproval?.inboxKey !== inbox.key) {
+      this.invalidateApproval(w);
+      w.heldApproval = { id: ++w.holdSeq, inboxKey: inbox.key, decisionHash: decisionHash(d), summary: d.summary, handoff: d.handoff, at: new Date().toISOString() };
+    }
     if (capabilities(w).executorSelection && !(await this.executorChoice.selectionReady(w))) {
       if (capabilities(w).screenSelection) {
         // Like the cycle limit, keep the plan unread so the screen choice dispatches it once.
@@ -3881,6 +4028,7 @@ export class WorkflowEngine {
       const note = w.resumeNote;
       w.limitPlan = "";
       w.selectionPlan = "";
+      w.heldApproval = null;
       w.resumeNote = "";
       this.queue(w, "execute", note ? `${d.next}\n\n${note}` : d.next, "execute", true);
     }
