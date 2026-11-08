@@ -11,6 +11,8 @@ Paseo용 한국어 개발 워크플로 플러그인입니다.
 
 ## 기능
 
+- 공항 구조에 따라 공용 권장값과 사장 금고·지시서를 분리합니다. 설치기는 `install`·`check`·`doctor`·
+  `refresh`·`uninstall`로 설치 수명을 관리하고, `server`·`desktop` 프로필에 맞는 설비를 조립합니다.
 - Paseo 0.15.x에서 검증했습니다. 서버 이벤트를 `addHook`으로 등록합니다. 검증 범위 밖의 앱 버전은
   경고만 남기며 설치·실행을 계속합니다. 호환성 알림은 버전마다 한 번이고 기록은 `$PASEO_HOME/airport/runtime/`에 둡니다.
 - 설치 보강: 다른 경로(사본)의 `role-workflow` 등록은 `--replace-registration`으로 백업·복원을
