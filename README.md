@@ -3,6 +3,12 @@
 Paseo용 한국어 개발 워크플로 플러그인입니다.
 이 저장소에서 플러그인과 공용 스크립트를 직접 개발하고 배포합니다.
 
+## 개발 기준
+
+모든 개발은 언제나 [공항 구조](docs/ARCHITECTURE.md)를 기준으로 합니다. 새 기능과 변경은 먼저 소유 칸과
+공식 원본을 정하고 [새 기능 점검표](docs/ARCHITECTURE.md#단계-경계와-새-기능-점검표)를 통과해야 하며,
+두 번째 원본을 만들지 않습니다. 기여 절차는 [AGENTS.md](AGENTS.md)를 따릅니다.
+
 ## 기능
 
 - Paseo 0.15.x에서 검증했습니다. 서버 이벤트를 `addHook`으로 등록합니다. 검증 범위 밖의 앱 버전은
@@ -173,8 +179,6 @@ GitHub Actions(`.github/workflows/check.yml`)가 푸시와 PR마다 macOS·Node 
 ## 라이선스
 
 Apache-2.0입니다. Paseo 파생 코드의 원저작권과 변경 사항은 `NOTICE`를 확인하세요.
-
-공항 구조와 각 설정의 소유 경계는 [구조 기준](docs/ARCHITECTURE.md)을 따릅니다.
 
 설정 원본은 `$PASEO_HOME/owner/policy.json`입니다. 기존 state.settings는 1회 이관 뒤 롤백용으로 동결됩니다.
 옛 코드로 롤백하면 이관 이후 설정 변경이 사라집니다. 상세는 [플러그인 지시서 안내](plugin/role-workflow/README.md#사장-지시서와-롤백)를 확인하세요.
