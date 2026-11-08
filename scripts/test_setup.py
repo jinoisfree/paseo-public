@@ -84,6 +84,8 @@ class SetupTests(unittest.TestCase):
         return {**old, **old['profiles'][str(self.root)], **read_owner(self.paseo_home/'owner/vault.json','vault').get('paths',{})}
 
     def execute(self,*args):
+        if args and args[0]=='install' and '--profile' not in args:
+            args=(*args,'--profile','desktop')
         with contextlib.redirect_stdout(io.StringIO()) as out:
             code=setup.main(args)
         return code,json.loads(out.getvalue())
@@ -286,6 +288,31 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(self.config.read_bytes(),before)
         self.assertFalse((self.home/'Library/LaunchAgents'/(setup.AUTO_UPDATE_LABEL+'.plist')).exists())
         self.assertTrue((self.paseo_home/'owner/policy.json').exists())
+
+    def test_C20_old_updater_install_refuses_every_legacy_trace_without_writing(self):
+        source=Path(__file__).with_name('setup.py')
+        for trace in ('registration','state','legacy','agent'):
+            with self.subTest(trace=trace),tempfile.TemporaryDirectory() as directory:
+                home=Path(directory);ph=home/'paseo';ph.mkdir()
+                if trace=='registration': (ph/'config.json').write_text(json.dumps({'plugins':{'role-workflow':{'enabled':True}}}))
+                if trace=='state':
+                    (ph/'role-workflow').mkdir();(ph/'role-workflow/state.json').write_text('{}')
+                if trace=='legacy':
+                    file=home/'.config/paseo-public/config.json';file.parent.mkdir(parents=True);file.write_text('{}')
+                if trace=='agent':
+                    file=home/'Library/LaunchAgents/io.github.jinoisfree.paseo-public.fixture.plist';file.parent.mkdir(parents=True);file.write_bytes(plistlib.dumps({}))
+                before={str(p):p.read_bytes() for p in home.rglob('*') if p.is_file()}
+                env={**os.environ,'HOME':str(home),'PASEO_HOME':str(ph),'PASEO_PUBLIC_CONFIG':str(home/'.config/paseo-public/config.json')}
+                result=subprocess.run([sys.executable,'-B',str(source),'install'],env=env,capture_output=True,text=True)
+                self.assertEqual(result.returncode,2,result.stderr);self.assertIn('--profile server|desktop',result.stdout)
+                self.assertEqual({str(p):p.read_bytes() for p in home.rglob('*') if p.is_file()},before)
+                self.assertFalse((ph/'owner').exists())
+                self.assertFalse((ph/'airport').exists())
+
+    def test_C20_only_new_home_defaults_to_desktop(self):
+        a=setup.Airport();self.legacy.unlink();self.config.write_text('{}')
+        self.assertEqual(a.profile(installing=True),'desktop')
+        self.assertEqual(a.profile('server',installing=True),'server')
 
 
 if __name__=='__main__':

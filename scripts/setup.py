@@ -232,6 +232,10 @@ def generated_cleanup(home):
         return []
 
 
+class ProfileRequired(RuntimeError):
+    """Old updater calls must stop before their first write, with a distinct exit code."""
+
+
 class Airport:
     def __init__(self, home=None):
         self.home = Path(home or Path.home())
@@ -248,8 +252,19 @@ class Airport:
     def decision(self, key, default=None):
         return self.policy['decisions'].get(key, {}).get('value', default)
 
-    def profile(self, option=None):
-        return self.decision('profile', option or 'desktop')
+    def legacy_installation(self):
+        return bool(read_paseo(self.home).get('plugins', {}).get('role-workflow') or
+                    (self.directory/'role-workflow/state.json').exists() or config_path().exists() or
+                    (self.home/'.config/paseo-public/config.json').exists() or
+                    list((self.home/'Library/LaunchAgents').glob(PREFIX+'*.plist')))
+
+    def profile(self, option=None, *, installing=False):
+        choice = self.decision('profile') or option
+        if choice:
+            return choice
+        if installing and self.legacy_installation():
+            raise ProfileRequired('기존 설치의 운영 프로필 결정이 없습니다. ./install.sh --profile server|desktop 으로 명시하세요.')
+        return 'desktop'
 
     def expected(self, option=None):
         profile = self.recommended['profiles'][self.profile(option)]
@@ -312,6 +327,7 @@ class Airport:
             install_agent(AUTO_UPDATE_LABEL, plistlib.dumps(launch_plist({**self.config, 'python': python}, node, self.home), sort_keys=False), self.home)
 
     def install(self, args):
+        self.profile(args.profile, installing=True)
         account = read_paseo(self.home)
         entry = account.get('plugins', {}).get('role-workflow')
         if entry and not same_plugin(entry) and not args.replace_registration:
@@ -632,6 +648,12 @@ def main(argv=None):
                 out.write(json.dumps({'result': 'failed', 'message': '사장 칸 형식 오류'})+'\n')
             run(['/usr/bin/osascript', '-e', 'display notification "사장 칸 형식 오류로 refresh 실패" with title "Paseo refresh"'], Path.home(), check=False)
         raise
+    if args.action == 'install':
+        try:
+            airport.profile(args.profile, installing=True)
+        except ProfileRequired as error:
+            print(json.dumps({'error': str(error), 'exitCode': 2}, ensure_ascii=False))
+            return 2
     if args.dry_run:
         result = {'action': args.action, 'dryRun': True, 'profile': airport.profile(args.profile),
                   'cleanup': [str(p) for p in generated_cleanup(airport.home)], 'notices': airport.notices(),
