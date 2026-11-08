@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import { mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { ownerPolicySchema, effectiveSettings, type OwnerPolicy } from "../shared/owner-policy";
@@ -30,6 +30,7 @@ export async function legacyNotifications(files: readonly string[]) {
   return {};
 }
 export class OwnerPolicyStore {
+  private cache: { key: string; policy: OwnerPolicy } | null = null;
   constructor(readonly file: string, private readonly legacyFiles: readonly string[] = []) {}
   private serial<T>(operation: () => Promise<T>): Promise<T> {
     const key = path.resolve(this.file), previous = queues.get(key) ?? Promise.resolve();
@@ -44,14 +45,23 @@ export class OwnerPolicyStore {
     return { version: 1, revision: 0, roleWorkflow: {}, notifications: {},
       decisions: { roleWorkflow: { date }, notifications: { date } } };
   }
-  private async read(): Promise<OwnerPolicy> {
-    try { return ownerPolicySchema.parse(JSON.parse(await readFile(this.file, "utf8"))); }
+  private async read(fresh = false): Promise<OwnerPolicy> {
+    try {
+      const info = await stat(this.file);
+      const key = `${info.mtimeMs}:${info.size}:${info.ino}`;
+      if (!fresh && this.cache?.key === key) return structuredClone(this.cache.policy);
+      const policy = ownerPolicySchema.parse(JSON.parse(await readFile(this.file, "utf8")));
+      this.cache = { key, policy: structuredClone(policy) };
+      return policy;
+    }
     catch (error) {
+      this.cache = null;
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return this.blank();
       throw new Error(`지시서를 읽을 수 없습니다: ${this.file}. 파일을 복구한 뒤 다시 시도하세요.`);
     }
   }
   private async write(policy: OwnerPolicy) {
+    this.cache = null;
     ownerPolicySchema.parse(policy);
     await mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
     const temporary = path.join(path.dirname(this.file), `.policy-${randomUUID()}.tmp`);
@@ -83,7 +93,7 @@ export class OwnerPolicyStore {
   }
   save(settings: Settings, expectedRevision: number) {
     return this.serial(async () => {
-      const policy = await this.read();
+      const policy = await this.read(true);
       if (policy.revision !== expectedRevision)
         throw new Error(`지시서 revision 충돌: ${this.file}. 설정을 다시 읽고 저장하세요.`);
       const validated = settingsValuesSchema.strict().parse(settings);

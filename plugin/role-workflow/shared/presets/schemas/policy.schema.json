@@ -13,26 +13,6 @@
     "decisions": {
       "type": "object",
       "properties": {
-        "operatingProfile": {
-          "type": "object",
-          "properties": {
-            "value": {
-              "enum": [
-                "server",
-                "desktop"
-              ]
-            },
-            "date": {
-              "type": "string",
-              "format": "date"
-            }
-          },
-          "required": [
-            "value",
-            "date"
-          ],
-          "additionalProperties": false
-        },
         "modules": {
           "type": "object",
           "properties": {
@@ -151,6 +131,43 @@
             }
           },
           "required": [
+            "date"
+          ],
+          "additionalProperties": false
+        },
+        "profile": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "enum": [
+                "server",
+                "desktop"
+              ]
+            },
+            "date": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          "required": [
+            "value",
+            "date"
+          ],
+          "additionalProperties": false
+        },
+        "desktopSettings": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "object"
+            },
+            "date": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          "required": [
+            "value",
             "date"
           ],
           "additionalProperties": false

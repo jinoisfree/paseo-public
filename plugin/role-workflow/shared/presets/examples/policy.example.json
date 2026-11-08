@@ -16,7 +16,7 @@
     "notifications": {
       "date": "2026-01-01"
     },
-    "operatingProfile": {
+    "profile": {
       "value": "desktop",
       "date": "2026-01-01"
     }

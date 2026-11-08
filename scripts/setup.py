@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Account-local installer. Dry runs never change files or contact Paseo."""
+"""공항 조립·갱신·읽기 전용 검사. 개인값은 owner, 생성물은 airport가 소유한다."""
 import argparse
-import pwd
+import copy
+import datetime
 import hashlib
 import json
 import os
@@ -12,327 +13,666 @@ import shutil
 import subprocess
 import sys
 import time
-import datetime
 from xml.sax.saxutils import escape
-from public_runtime import ROOT, LEGACY_FOLD_LABEL, AUTO_UPDATE_LABEL, load_config, config_path, data_root, logs_root, auto_update_logs, node_executable, app_path, backup_root, busy_workflows, verify_plugin_entries, auto_update_agent_state
+sys.dont_write_bytecode = True
+from public_runtime import (ROOT, AUTO_UPDATE_LABEL, paseo_home, config_path,
+    load_config, node_executable, app_path, busy_workflows, verify_plugin_entries,
+    auto_update_agent_state, auto_update_agent_installed)
+from owner_store import atomic_bytes, atomic_json, read_owner, save_owner, today
+from airport_schema import validate_schema, SCHEMAS
+
+PREFIX = 'io.github.jinoisfree.paseo-public.'
+STABLE_PATHS = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin']
 
 
-# role-workflow paseo-plugin.json requires >=0.15.0 <0.16.0; newer CLIs are left to the daemon's check.
-MIN_PASEO = (0, 15)
+def stable_path(node, python):
+    return os.pathsep.join(dict.fromkeys([str(Path(node).parent), str(Path(python).parent), *STABLE_PATHS]))
 
-def run(command, home, *, check=True, capture=False):
+
+def run(command, home, *, check=True, capture=True):
     env = os.environ.copy()
-    env['PASEO_HOME'] = str(home/'.paseo')
+    env.update(HOME=str(home), PASEO_HOME=str(paseo_home(home)), PYTHONDONTWRITEBYTECODE='1')
     env.pop('PASEO_HOST', None)
-    env['PATH'] = str(Path(node_executable()).parent)+os.pathsep+env.get('PATH', '')
-    return subprocess.run(list(map(str, command)), cwd=ROOT, env=env, check=check,
-                          capture_output=capture, text=True)
-
-
-def is_file(path):
     try:
-        return path.is_file()
-    except OSError:
-        return False
-
-
-def link_target(path):
-    """None for a regular file, the resolved target for a readable link, False for an unreadable link."""
-    try:
-        if not path.is_symlink():
-            return None
-        os.readlink(path)
-        return path.resolve()
-    except OSError:
-        return False
+        result = subprocess.run(list(map(str, command)), cwd=ROOT, env=env, capture_output=capture, text=True, timeout=3600 if Path(str(command[0])).name == 'npm' else 30)
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f'명령 시간 초과: {Path(str(command[0])).name}') from error
+    if check and result.returncode:
+        # CLI output may contain secrets; keep it out of terminal, JSON and refresh logs.
+        raise RuntimeError(f'명령 실패: {Path(str(command[0])).name} (종료 코드 {result.returncode})')
+    return result
 
 
 def cli_path(config):
-    # The CLI inside the app wins over a PATH link, which may belong to another account and be unreadable.
-    # Automatically detected paths are never saved, so a stale path cannot override this later.
+    # Product-owned CLI only. A PATH installation is diagnosed, never selected.
     bundled = app_path(config)/'Contents/Resources/bin/paseo'
-    value = config.get('paseo')
-    if value:
-        candidate = Path(value).expanduser()
-        if not candidate.is_absolute():
-            candidate = Path(shutil.which(str(candidate)) or str(candidate))
-    elif is_file(bundled):
-        return bundled
-    else:
-        candidate = Path(shutil.which('paseo') or str(bundled))
-    if candidate != bundled and is_file(bundled):
-        target = link_target(candidate)
-        if target is False or (target is not None and target == bundled.resolve()):
-            return bundled
-    if not is_file(candidate):
-        raise RuntimeError('Paseo CLI를 찾지 못했습니다. Paseo 설치 후 config.json의 paseo 경로를 확인하세요.')
-    return candidate
-
-
-def path_cli_warning():
-    """A PATH `paseo` link this account cannot read makes the terminal command fail silently. File access only."""
-    for directory in os.environ.get('PATH', '').split(os.pathsep):
-        link = Path(directory or '.')/'paseo'
-        try:
-            if not link.is_symlink():
-                if link.exists():
-                    return None  # The first real `paseo` on PATH is not a link.
-                continue
-        except OSError:
-            continue
-        if link_target(link) is not False:
-            return None
-        try:
-            uid = link.lstat().st_uid
-            try:
-                owner = pwd.getpwuid(uid).pw_name
-            except KeyError:
-                owner = str(uid)
-        except OSError:
-            owner = '알 수 없음'
-        return (f'경고: PATH의 {link}는 이 계정에서 읽을 수 없는 심볼릭 링크입니다(소유자: {owner}). '
-                f'터미널의 paseo 명령이 출력 없이 실패할 수 있습니다. 링크 소유 계정에서 `chmod -h 755 {link}`를 실행하세요. '
-                '설치기는 이 파일을 수정하지 않으며 앱 안의 CLI로 설치합니다.')
-    return None
+    if not bundled.is_absolute() or not bundled.is_file():
+        raise RuntimeError('Paseo 앱 내장 CLI를 찾지 못했습니다. 앱을 설치하고 금고 paths.app을 확인하세요.')
+    return bundled
 
 
 def verify_cli(paseo, home):
-    hint = (f'선택한 CLI: {paseo}\n다른 계정 소유 심볼릭 링크의 권한 때문일 수 있습니다. `ls -l {paseo}`로 확인하고 '
-            '`chmod -h 755`로 고치거나 ~/.config/paseo-public/config.json의 paseo에 앱 안의 CLI '
-            '(Paseo.app/Contents/Resources/bin/paseo) 경로를 지정하세요.')
-    try:
-        result = run([paseo, '--version'], home, check=False, capture=True)
-    except OSError as error:
-        raise RuntimeError(f'Paseo CLI를 실행하지 못했습니다: {error}\n{hint}') from error
-    if result.returncode:
-        output = ((result.stdout or '')+(result.stderr or '')).strip() or '출력 없음'
-        raise RuntimeError(f'Paseo CLI --version이 종료 코드 {result.returncode}로 끝났습니다 ({output}).\n{hint}')
-    found = re.search(r'(\d+)\.(\d+)\.(\d+)', result.stdout or '')
-    if found and (int(found[1]), int(found[2])) < MIN_PASEO:
-        raise RuntimeError(f'Paseo CLI {found[0]}은 지원 범위(0.15.x) 밖입니다. 선택한 CLI: {paseo}\n'
-                           'Paseo 앱을 0.15로 업데이트하거나 ~/.config/paseo-public/config.json의 paseo에 '
-                           '앱 안의 CLI(Paseo.app/Contents/Resources/bin/paseo) 경로를 지정하세요.')
+    result = run([paseo, '--version'], home, check=False)
+    version = re.search(r'\b(\d+)\.(\d+)\.(\d+)\b', result.stdout or '')
+    if result.returncode or not version or tuple(map(int, version.groups()[:2])) != (0, 15):
+        raise RuntimeError('Paseo 앱 CLI 지원 범위는 0.15.x입니다. 앱 자체 업데이트를 확인하세요.')
 
 
 def read_paseo(home):
-    file = home/'.paseo/config.json'
+    file = paseo_home(home)/'config.json'
     return json.loads(file.read_text()) if file.exists() else {}
 
 
 def same_plugin(entry, root=None):
-    root = ROOT if root is None else root
-    return entry.get('source') == 'directory' and Path(entry.get('path', '')).resolve() == (root/'plugin/role-workflow').resolve()
+    return (isinstance(entry, dict) and entry.get('source') == 'directory' and
+            Path(entry.get('path', '')).resolve() == ((root or ROOT)/'plugin/role-workflow').resolve())
 
 
-AGENT_LABELS = {'installed': '등록됨', 'foreign': '다른 저장소에 등록됨', 'missing': '미등록'}
-CONFLICT_KINDS = {'not-directory': 'source가 directory가 아님', 'missing-path': 'path 없음',
-                  'copy-without-git': '.git 없는 사본', 'other-git-repo': '다른 git 저장소'}
+def merge(base, overlay):
+    result = copy.deepcopy(base)
+    for key, value in overlay.items():
+        result[key] = merge(result.get(key, {}) if isinstance(result.get(key), dict) else {}, value) if isinstance(value, dict) else copy.deepcopy(value)
+    return result
 
 
-def registration_conflict(entry):
-    source, path = entry.get('source'), entry.get('path')
-    if source != 'directory':
-        kind = 'not-directory'
-    elif not path or not Path(path).expanduser().exists():
-        kind = 'missing-path'
-    else:
-        place = Path(path).expanduser().resolve()
-        kind = 'other-git-repo' if any((parent/'.git').exists() for parent in (place, *place.parents)) else 'copy-without-git'
-    return {'source': source, 'path': path, 'kind': kind}
+def differences(expected, actual, source, prefix='', strict=False):
+    rows = []
+    if isinstance(expected, dict):
+        for key, value in expected.items():
+            rows += differences(value, actual.get(key) if isinstance(actual, dict) else None, source, f'{prefix}.{key}' if prefix else key, strict)
+        if strict and isinstance(actual, dict):
+            rows += [{'key': f'{prefix}.{key}', 'expected': '없음', 'actual': '<추가 항목>', 'source': source} for key in actual.keys() - expected.keys()]
+    elif expected != actual or type(expected) is not type(actual):
+        secret = bool(re.search(r'token|secret|password|authorization|keychain|credential|api.?key|endpoint|command|env(?:\.|$)', prefix, re.I))
+        mismatched = type(expected) is not type(actual) and actual is not None
+        rows.append({'key': prefix, 'expected': '<가림>' if secret else expected,
+                     'actual': '<가림>' if secret else '<형식 불일치>' if mismatched else actual, 'source': source})
+    return rows
 
 
-def conflict_message(conflict, options):
-    command = ' '.join(['./install.sh', '--replace-registration', *options])
-    return (f"다른 경로의 role-workflow가 이미 등록돼 있습니다: source={conflict['source']}, path={conflict['path']} "
-            f"({CONFLICT_KINDS[conflict['kind']]}).\n진행 중인 작업이 없을 때 다음 명령으로 이 저장소로 전환하세요.\n  {command}")
+def desktop_file(home):
+    return home/'Library/Application Support/Paseo/desktop-settings.json'
 
 
-def verify_registration(paseo, home, after='install'):
-    result = None
-    for attempt in range(5):
-        result = run([paseo, 'plugin', 'ls', 'role-workflow', '--json', '--home', home/'.paseo'], home, check=False, capture=True)
-        problem = None
-        if result.returncode:
-            problem = RuntimeError(f'plugin ls 실패({result.returncode}): {(result.stderr or "").strip()}')
-        else:
-            try:
-                verify_plugin_entries(json.loads(result.stdout), ROOT, after)
-                return
-            except (ValueError, RuntimeError) as error:
-                problem = error if isinstance(error, RuntimeError) else RuntimeError('plugin ls 출력을 해석하지 못했습니다.')
-        if attempt < 4:
-            time.sleep(1)  # A plugin that was just registered may still be starting.
-    raise RuntimeError(f'플러그인 등록 확인 실패: {problem}')
-
-
-def replace_registration(paseo, home, config, entry):
-    """Swap a foreign registration for this checkout; any failure restores the previous path."""
-    command = lambda *arguments: [paseo, *arguments, '--home', home/'.paseo']
-    file = home/'.paseo/config.json'
-    backup = backup_root(config)/('registration-'+datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')+'.json')
-    backup.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, 'wb') as output:
-        output.write(file.read_bytes())
-    backup.chmod(0o600)
-    try:
-        run(command('plugin', 'remove', 'role-workflow'), home)
-        if 'role-workflow' in read_paseo(home).get('plugins', {}):
-            raise RuntimeError('plugin remove 뒤에도 role-workflow 등록이 남아 있습니다.')
-        run(command('plugin', 'install', ROOT/'plugin/role-workflow'), home)
-        verify_registration(paseo, home, 'replacement')
-    except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
-        previous = entry.get('path')
-        if previous and Path(previous).expanduser().exists():
-            try:
-                run(command('plugin', 'remove', 'role-workflow'), home, check=False)
-                run(command('plugin', 'install', previous), home)
-                restored = f'이전 등록({previous})을 다시 설치했습니다.'
-            except (OSError, RuntimeError, subprocess.CalledProcessError) as restore_error:
-                restored = f'이전 등록({previous}) 복원도 실패했습니다: {restore_error}'
-        else:
-            restored = '이전 path가 없어 복원하지 못했습니다.'
-        raise RuntimeError(f'등록 전환 실패: {error}\n{restored}\n설정 백업: {backup}') from error
-    return backup
+def read_json(file, default=None):
+    return json.loads(file.read_text()) if file.exists() else copy.deepcopy(default if default is not None else {})
 
 
 def launch_plist(config, node, home):
-    """The daily auto-update LaunchAgent; the only launchd job this installer registers."""
-    values = {'__PYTHON__':config.get('python') or os.environ.get('PASEO_PUBLIC_PYTHON') or shutil.which('python3') or sys.executable,'__REPOSITORY__':str(ROOT),'__HOME__':str(home),
-              '__PATH__':str(Path(node).parent)+os.pathsep+os.environ.get('PATH','/usr/bin:/bin'),
-              '__APP__':str(app_path(config)),'__PASEO_HOME__':str(home/'.paseo'),
-              '__LOGS__':str(logs_root(config)), '__CONFIG__':str(config_path())}
-    text = (ROOT/'launchd/auto-update.plist.in').read_text()
-    for key,value in values.items():
-        text = text.replace(key,escape(value))
-    return plistlib.loads(text.encode())
-
-
-def remove_agent(label, script, home):
-    plist = home/'Library/LaunchAgents'/(label+'.plist')
-    if plist.exists():
-        current = plistlib.loads(plist.read_bytes())
-        if str(ROOT/'scripts'/script) in current.get('ProgramArguments', []):
-            run(['/bin/launchctl', 'bootout', f'gui/{os.getuid()}/{label}'], home, check=False)
-            plist.unlink()
+    python = config.get('python', sys.executable)
+    values = {'__PYTHON__': python, '__REPOSITORY__': str(ROOT), '__HOME__': str(home),
+              '__PATH__': stable_path(node, python), '__APP__': str(app_path(config)),
+              '__PASEO_HOME__': str(paseo_home(home)), '__LOGS__': str(paseo_home(home)/'airport/logs'),
+              '__CONFIG__': str(config_path())}
+    content = (ROOT/'launchd/auto-update.plist.in').read_text()
+    for key, value in values.items():
+        content = content.replace(key, escape(str(value)))
+    return plistlib.loads(content.encode())
 
 
 def install_agent(label, generated, home):
-    plist = home/'Library/LaunchAgents'/(label+'.plist')
-    if not plist.exists() or plist.read_bytes() != generated:
-        if plist.exists():
-            run(['/bin/launchctl', 'bootout', f'gui/{os.getuid()}/{label}'], home, check=False)
-        plist.parent.mkdir(parents=True, exist_ok=True)
-        plist.write_bytes(generated)
-        run(['/bin/launchctl', 'bootstrap', f'gui/{os.getuid()}', plist], home)
+    if not label.startswith(PREFIX):
+        raise RuntimeError('공항 소유가 아닌 LaunchAgent입니다.')
+    file = home/'Library/LaunchAgents'/(label+'.plist')
+    if file.exists() and file.read_bytes() == generated and file.stat().st_mode & 0o777 == 0o600:
+        run(['/bin/launchctl', 'print', f'gui/{os.getuid()}/{label}'], home)
+        return
+    if file.exists():
+        run(['/bin/launchctl', 'bootout', f'gui/{os.getuid()}/{label}'], home, check=False)
+    atomic_bytes(file, generated)
+    run(['/bin/launchctl', 'bootstrap', f'gui/{os.getuid()}', file], home)
+    run(['/bin/launchctl', 'print', f'gui/{os.getuid()}/{label}'], home)
+
+
+def daemon_running(home):
+    try:
+        pid = read_json(paseo_home(home)/'paseo.pid')['pid']
+        if type(pid) is not int or pid <= 0:
+            return False
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except (OSError, KeyError, ValueError, TypeError):
+        return False
+
+
+def backup(home):
+    folder = home/'Library/Application Support/paseo-public/backups'/('install-'+datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ'))
+    files = [(paseo_home(home)/'config.json', 'config.json'), (desktop_file(home), 'desktop-settings.json')]
+    owner = paseo_home(home)/'owner'
+    if owner.exists():
+        files += [(f, 'owner/'+str(f.relative_to(owner))) for f in owner.rglob('*') if f.is_file()]
+    folder.mkdir(parents=True, mode=0o700)
+    for file, name in files:
+        if file.exists():
+            atomic_bytes(folder/name, file.read_bytes())
+    return folder
+
+
+def module_files(ids, home, config=None):
+    """Resolve only declared files within repository and airport install root."""
+    rows = []
+    config = load_config() if config is None else config
+    install_root = paseo_home(home)/'airport'
+    for module_id in ids:
+        if not re.fullmatch(r'[a-z][a-z0-9-]*', module_id):
+            raise RuntimeError('설비 id 형식이 올바르지 않습니다.')
+        manifest = ROOT/'modules'/module_id/'module.json'
+        if not manifest.is_file():
+            raise RuntimeError(f'설비 명세가 없습니다: {module_id}. 설비 배포를 먼저 완료하세요.')
+        data = read_json(manifest)
+        validate_schema(data, read_json(SCHEMAS/'module.schema.json'))
+        if data['id'] != module_id:
+            raise RuntimeError('설비 id가 디렉터리와 다릅니다.')
+        for item in data['installs']:
+            source = (ROOT/item['source']).resolve()
+            target = Path(item['target'].replace('$INSTALL_ROOT', str(install_root)).replace('$LAUNCH_AGENTS', str(home/'Library/LaunchAgents'))).resolve()
+            owned_agent = target.parent == (home/'Library/LaunchAgents').resolve() and target.name.startswith(PREFIX) and target.suffix == '.plist'
+            if not source.is_relative_to(ROOT.resolve()) or not (target.is_relative_to(install_root.resolve()) or owned_agent):
+                raise RuntimeError('설비 설치 경로가 소유 범위를 벗어납니다.')
+            content = source.read_bytes()
+            if source.name.endswith('.in'):
+                node = node_executable(config)
+                python = config.get('python', sys.executable)
+                replacements = {'__HOME__': str(home), '__PASEO_HOME__': str(paseo_home(home)),
+                    '__INSTALL_ROOT__': str(install_root), '__REPOSITORY__': str(ROOT),
+                    '__NODE__': node, '__PYTHON__': python, '__PATH__': stable_path(node, python), '__APP__': str(app_path(config))}
+                text = content.decode()
+                for key, value in replacements.items():
+                    text = text.replace(key, escape(value) if target.suffix == '.plist' else value)
+                if re.search(r'__[A-Z_]+__', text):
+                    raise RuntimeError('설비 틀에 해석하지 못한 변수가 있습니다.')
+                content = text.encode()
+            if owned_agent:
+                generated = plistlib.loads(content)
+                if generated.get('Label') != target.stem:
+                    raise RuntimeError('설비 plist 라벨과 파일명이 다릅니다.')
+            rows.append({'source': source, 'target': target, 'content': content, 'mode': 0o700 if source.suffix == '.py' else 0o600})
+    return rows
+
+
+def generated_cleanup(home):
+    """Delete only proven-unreferenced generated rules/guides; uncertainty retains everything."""
+    directory = paseo_home(home)/'role-workflow'
+    state_file = directory/'state.json'
+    if not state_file.exists():
+        return []
+    try:
+        state = read_json(state_file)
+        workflows = state['workflows']
+        if not isinstance(workflows, list) or any(not isinstance(w, dict) for w in workflows):
+            return []
+        current = re.search(r'export const RULES_VERSION = "([a-f0-9]+)"', (ROOT/'plugin/role-workflow/server/rules-content.ts').read_text())
+        if not current:
+            return []
+        live = [w for w in workflows if w.get('status') != 'archived']
+        references = json.dumps(live, ensure_ascii=False)
+        # Prompts live in core agent records, not necessarily in workflow state.
+        # Read every non-archived agent record; malformed/unreadable evidence retains all.
+        for record in (paseo_home(home)/'agents').rglob('*.json'):
+            agent = read_json(record)
+            if not isinstance(agent, dict):
+                return []
+            if not agent.get('archived', False) or record.stem in references:
+                references += json.dumps(agent, ensure_ascii=False)
+        # With live workflows but no core records we cannot prove absence of references.
+        if live and not (paseo_home(home)/'agents').exists():
+            return []
+        rows = []
+        for folder in ('rules', 'guides'):
+            for file in (directory/folder).glob('*'):
+                if folder == 'rules' and file.name == current[1]:
+                    continue
+                if file.name in references or str(file) in references:
+                    continue
+                rows.append(file)
+        return rows
+    except (OSError, ValueError, KeyError):
+        return []
+
+
+class Airport:
+    def __init__(self, home=None):
+        self.home = Path(home or Path.home())
+        self.directory = paseo_home(self.home)
+        self.policy_file = self.directory/'owner/policy.json'
+        self.vault_file = self.directory/'owner/vault.json'
+        self.policy = read_owner(self.policy_file, 'policy')
+        self.vault = read_owner(self.vault_file, 'vault')
+        self.record_file = self.directory/'airport/install.json'
+        self.record = read_json(self.record_file)
+        self.config = load_config()
+        self.recommended = read_json(ROOT/'plugin/role-workflow/shared/presets/recommended.json')
+
+    def decision(self, key, default=None):
+        return self.policy['decisions'].get(key, {}).get('value', default)
+
+    def profile(self, option=None):
+        return self.decision('profile', option or 'desktop')
+
+    def expected(self, option=None):
+        profile = self.recommended['profiles'][self.profile(option)]
+        core = merge(self.recommended['core'], self.decision('core', {}))
+        desktop = merge(profile['desktopSettings'], self.decision('desktopSettings', {}))
+        keep = self.decision('keepRunningAfterQuit')
+        if keep is not None:
+            desktop = merge(desktop, {'daemon': {'keepRunningAfterQuit': keep}})
+        selected = {m: True for m in profile['modules']}
+        selected.update(self.decision('modules', {}))
+        return core, {'settings': desktop}, [m for m, enabled in selected.items() if enabled]
+
+    def tools(self):
+        node = node_executable(self.config)
+        python = self.config.get('python') or os.environ.get('PASEO_PUBLIC_PYTHON') or sys.executable
+        python = Path(python).expanduser()
+        if not python.is_absolute() or not python.is_file() or not os.access(python, os.X_OK):
+            raise RuntimeError('금고 paths.python은 실행 가능한 절대 경로여야 합니다.')
+        return node, str(python), cli_path(self.config)
+
+    def command(self, *args, check=True):
+        return run([cli_path(self.config), *args, '--home', self.directory], self.home, check=check)
+
+    def ensure_idle(self):
+        busy = busy_workflows(self.home)
+        if busy:
+            raise RuntimeError('진행 중인 작업이 있어 변경을 중단합니다: '+', '.join(map(str, busy)))
+
+    def dependencies(self):
+        lock = hashlib.sha256((ROOT/'package-lock.json').read_bytes()).hexdigest()
+        if lock != self.record.get('dependenciesLock') or not (ROOT/'node_modules/.bin/tsx').exists():
+            node = self.tools()[0]
+            npm = Path(node).parent/'npm'
+            if not npm.is_file():
+                npm = Path(shutil.which('npm') or '/missing/npm')
+            run([npm, 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], self.home)
+        self.record['dependenciesLock'] = lock
+
+    def install_modules(self, rows):
+        installed = self.record.setdefault('generatedFiles', [])
+        for row in rows:
+            target = row['target']
+            if not target.exists() or target.read_bytes() != row['content'] or target.stat().st_mode & 0o777 != row['mode']:
+                if target.parent == (self.home/'Library/LaunchAgents').resolve():
+                    install_agent(target.stem, row['content'], self.home)
+                else:
+                    atomic_bytes(target, row['content'], row['mode'])
+            if str(target) not in installed:
+                installed.append(str(target))
+
+    def agents(self, auto_update=False):
+        # Enabled jobs are recorded as installer output, not in the owner's decisions.
+        if auto_update or auto_update_agent_installed(self.home, ROOT):
+            self.record['autoUpdate'] = True
+        if self.record.get('autoUpdate'):
+            if auto_update_agent_state(self.home, ROOT) == 'foreign':
+                raise RuntimeError('다른 저장소의 자동 업데이트가 등록돼 있어 변경하지 않습니다.')
+            node, python, _ = self.tools()
+            (self.directory/'airport/logs/auto-update').mkdir(parents=True, exist_ok=True)
+            install_agent(AUTO_UPDATE_LABEL, plistlib.dumps(launch_plist({**self.config, 'python': python}, node, self.home), sort_keys=False), self.home)
+
+    def install(self, args):
+        account = read_paseo(self.home)
+        entry = account.get('plugins', {}).get('role-workflow')
+        if entry and not same_plugin(entry) and not args.replace_registration:
+            raise RuntimeError('다른 경로에 이미 등록돼 있습니다. --replace-registration으로 전환하세요.')
+        core, desktop, ids = self.expected(args.profile)
+        rows = module_files(ids, self.home, self.config)  # Validate all sources before the first write.
+        node, python, paseo = self.tools()
+        verify_cli(paseo, self.home)
+        if sys.version_info < (3, 12):
+            raise RuntimeError('Python 3.12 이상이 필요합니다.')
+        node_version = version([node, '--version'], self.home)
+        if not node_version or int(node_version.split('.')[0]) < 22:
+            raise RuntimeError('Node.js 22 이상이 필요합니다.')
+        if not daemon_running(self.home):
+            raise RuntimeError('이 계정에서 Paseo를 먼저 실행하세요.')
+        self.ensure_idle()
+        if args.with_auto_update and auto_update_agent_state(self.home, ROOT) == 'foreign':
+            raise RuntimeError('다른 저장소의 자동 업데이트가 이미 등록돼 있습니다.')
+        saved = backup(self.home)
+        policy = copy.deepcopy(self.policy)
+        policy['decisions'].setdefault('profile', {'value': self.profile(args.profile), 'date': today()})
+        for key in ('phoneNotifications', 'phoneNotificationEndpoint'):
+            if key in self.config:
+                policy['notifications'].setdefault(key, self.config[key])
+        self.policy = save_owner(self.policy_file, 'policy', policy, self.policy['revision'])
+        vault = copy.deepcopy(self.vault)
+        vault['paths'] = {**vault.get('paths', {}), 'node': node, 'python': python, 'app': str(app_path(self.config))}
+        self.vault = save_owner(self.vault_file, 'vault', vault, self.vault['revision'])
+        self.config.update(self.vault['paths'])
+        self.dependencies()
+        # CLI supports top-level objects; preserve unrelated nested fields in each object.
+        for key, value in core.items():
+            actual = read_paseo(self.home).get(key)
+            expected = merge(actual if isinstance(actual, dict) else {}, value) if isinstance(value, dict) else value
+            if actual != expected:
+                self.command('daemon', 'config', 'set', key, json.dumps(expected))
+        current_desktop = read_json(desktop_file(self.home), {'version': 1, 'settings': {}})
+        adjusted = merge(current_desktop, desktop)
+        if adjusted != current_desktop:
+            atomic_json(desktop_file(self.home), adjusted)
+        account = read_paseo(self.home)
+        plugins = copy.deepcopy(account.get('plugins', {}))
+        desired = {'source': 'directory', 'path': str(ROOT/'plugin/role-workflow'), 'enabled': True}
+        if plugins.get('role-workflow') != desired:
+            self.ensure_idle()
+            plugins['role-workflow'] = desired
+            self.command('daemon', 'config', 'set', 'plugins', json.dumps(plugins))
+            self.command('daemon', 'restart')
+            verify_registration(paseo, self.home)
+        self.install_modules(rows)
+        self.agents(args.with_auto_update)
+        atomic_json(self.record_file, self.record)
+        checked = self.check()
+        if checked['differences']:
+            raise RuntimeError('설치 후 check 차이가 남았습니다. check --json과 설치 백업을 확인하세요.')
+        return {'backup': str(saved), 'profile': self.profile(), 'notices': self.notices()}
+
+    def notices(self):
+        return ['권장 권한: Codex full-access, Claude bypassPermissions.',
+                '권장 relay는 켜짐입니다.', '권장 직원 profiles.json은 본체에서 직접 추가하세요. 자동 추가하지 않습니다.',
+                '사람이 1회 할 일은 doctor 출력을 확인하세요.']
+
+    def refresh(self):
+        entry = read_paseo(self.home).get('plugins', {}).get('role-workflow')
+        if not same_plugin(entry):
+            raise RuntimeError('등록 경로가 달라 refresh를 건너뜁니다.')
+        self.ensure_idle()
+        rows = module_files(self.expected()[2], self.home, self.config)
+        self.dependencies()
+        self.install_modules(rows)
+        self.agents()
+        for file in generated_cleanup(self.home):
+            if file.is_dir():
+                shutil.rmtree(file)
+            else:
+                file.unlink()
+        if entry.get('enabled') is not False and read_paseo(self.home).get('pluginsEnabled') is not False:
+            self.command('plugin', 'reload', 'role-workflow')
+            verify_registration(cli_path(self.config), self.home, 'refresh')
+        else:
+            self.refresh_event('skipped', '꺼 둔 플러그인의 reload를 건너뜁니다.')
+        atomic_json(self.record_file, self.record)
+        return {'refreshed': True}
+
+    def refresh_event(self, result, message):
+        file = self.directory/'airport/logs/refresh.jsonl'
+        file.parent.mkdir(parents=True, exist_ok=True)
+        with file.open('a') as out:
+            out.write(json.dumps({'at': datetime.datetime.now().isoformat(), 'result': result, 'message': message}, ensure_ascii=False)+'\n')
+        # Native local notification; policy controls whether phone delivery is requested.
+        try:
+            run(['/usr/bin/osascript', '-e', 'display notification '+json.dumps(message)+' with title "Paseo refresh"'], self.home, check=False)
+            if self.policy['notifications'].get('phoneNotifications'):
+                self.phone_notification(message)
+        except (OSError, ValueError):
+            with file.open('a') as out:
+                out.write(json.dumps({'result': 'notification-failed'})+'\n')
+
+    def phone_notification(self, message):
+        # Expo protocol is the same as the plugin notifier; credentials never enter logs.
+        from urllib.request import Request, urlopen
+        subscriptions = read_json(self.directory/'push-tokens.json', {}).get('subscriptions', [])
+        tokens = [s['token'] for s in subscriptions if isinstance(s, dict) and isinstance(s.get('token'), str) and isinstance(s.get('expiresAt'), str) and s['expiresAt'] > datetime.datetime.now(datetime.timezone.utc).isoformat()]
+        payload = [{'to': token if isinstance(token, str) else token.get('token'),
+                    'title': 'Paseo refresh', 'body': message} for token in tokens]
+        endpoint = self.policy['notifications'].get('phoneNotificationEndpoint')
+        if payload and endpoint and endpoint.startswith('https://'):
+            with urlopen(Request(endpoint, data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json'}), timeout=10) as response:
+                response.read()
+
+    def check(self):
+        core, desktop, ids = self.expected()
+        account = read_paseo(self.home)
+        rows = differences(core, account, '명세서 ⊕ 지시서', 'config')
+        rows += differences(desktop, read_json(desktop_file(self.home)), '프로필 ⊕ 지시서', 'desktopSettings')
+        entry = account.get('plugins', {}).get('role-workflow')
+        if not same_plugin(entry):
+            rows.append({'key': 'plugins.role-workflow', 'expected': str(ROOT/'plugin/role-workflow'), 'actual': entry.get('path') if isinstance(entry, dict) else None, 'source': '시설'})
+        if isinstance(entry, dict) and entry.get('enabled') is not True:
+            rows += differences(True, entry.get('enabled'), '시설', 'plugins.role-workflow.enabled')
+        for kind, file in [('policy', self.policy_file), ('vault', self.vault_file)]:
+            if not file.exists():
+                rows.append({'key': f'owner.{kind}', 'expected': '있음', 'actual': '없음', 'source': '사장 칸'})
+        try:
+            for row in module_files(ids, self.home, self.config):
+                actual = row['target'].read_bytes() if row['target'].exists() else None
+                if actual != row['content'] or row['target'].stat().st_mode & 0o777 != row['mode']:
+                    rows.append({'key': str(row['target']), 'expected': '명세서와 일치', 'actual': '없음 또는 다름', 'source': '설비'})
+        except RuntimeError as error:
+            rows.append({'key': 'modules', 'expected': ids, 'actual': str(error), 'source': '설비'})
+        if self.record.get('autoUpdate') or (self.home/'Library/LaunchAgents'/(AUTO_UPDATE_LABEL+'.plist')).exists():
+            node, python, _ = self.tools()
+            expected = launch_plist({**self.config, 'python': python}, node, self.home)
+            file = self.home/'Library/LaunchAgents'/(AUTO_UPDATE_LABEL+'.plist')
+            try:
+                actual = plistlib.loads(file.read_bytes())
+            except (OSError, ValueError):
+                actual = None
+            rows += differences(expected, actual, 'LaunchAgent 틀', 'launchd.auto-update', strict=True)
+        return {'airportCommit': version(['git', 'rev-parse', 'HEAD'], self.home, raw=True),
+                'versions': self.versions(), 'profile': self.profile(), 'differences': rows}
+
+    def versions(self):
+        try:
+            paseo = cli_path(self.config)
+            app_version = version([paseo, '--version'], self.home)
+        except RuntimeError:
+            app_version = None
+        result = {'app': app_version}
+        for product in ('claude', 'codex'):
+            cli = shutil.which(product)
+            result[product] = version([cli, '--version'], self.home) if cli else None
+        return result
+
+    def doctor(self):
+        checks = []
+        def add(key, ok, instruction, manual=False):
+            checks.append({'key': key, 'ok': bool(ok), 'manual': manual, 'instruction': instruction})
+        versions = self.versions()
+        add('app.cli', bool(versions['app'] and versions['app'].startswith('0.15.')), '앱 설치·업데이트: 지원 0.15.x', True)
+        app = app_path(self.config)
+        try:
+            info = plistlib.loads((app/'Contents/Info.plist').read_bytes())
+            add('app.bundle', bool(info.get('CFBundleShortVersionString')), 'Paseo 앱 번들을 확인하세요.')
+        except (OSError, ValueError):
+            add('app.bundle', False, 'Paseo 앱 번들을 확인하세요.')
+        path_cli = shutil.which('paseo')
+        add('path.oldCli', not path_cli or Path(path_cli).resolve() == (app/'Contents/Resources/bin/paseo').resolve(), 'PATH의 옛 CLI를 정리하세요. 앱 CLI만 사용합니다.')
+        add('shell.path', all(Path(p).is_absolute() for p in os.environ.get('PATH', '').split(os.pathsep)), '셸 PATH의 빈 항목·상대 경로를 확인하세요.')
+        add('products.cli', any(versions[k] for k in ('claude', 'codex')), 'Claude Code 또는 Codex CLI를 설치하세요.', True)
+        credential = self.vault.get('keychain', {}).get('claude')
+        if credential:
+            found = run(['/usr/bin/security', 'find-generic-password', '-s', credential['service'], '-a', credential['account']], self.home, check=False)
+            add('keychain.claude', found.returncode == 0, '선택한 키체인 항목을 등록하거나 분리 홈에서 로그인하세요.', True)
+        add('claude.login', (self.directory/'claude-home/.claude.json').is_file(), '분리 Claude 홈에서 로그인·온보딩을 1회 완료하세요.', True)
+        add('codex.login', (self.directory/'codex-home/auth.json').is_file(), 'Paseo Codex 홈에서 로그인하세요.', True)
+        account = read_paseo(self.home)
+        usable = []
+        if daemon_running(self.home):
+            try:
+                catalog = json.loads(self.command('provider', 'ls', '--json', check=False).stdout)
+                providers = catalog if isinstance(catalog, list) else catalog.get('providers', [])
+                for provider in providers:
+                    name = provider.get('provider', provider.get('id'))
+                    if name in ('claude', 'codex') and provider.get('enabled') is not False and (provider.get('available') or provider.get('status') == 'available'):
+                        result = json.loads(self.command('provider', 'models', name, '--json', check=False).stdout)
+                        models = result if isinstance(result, list) else result.get('models', [])
+                        if any(model.get('isSelectable') is not False for model in models):
+                            usable.append(name)
+            except (OSError, ValueError, RuntimeError):
+                pass  # Explicit failed check below; never claim an unobserved catalog is usable.
+        add('models.catalog', bool(usable), '본체 제공자 화면에서 모델 사용 가능 여부를 확인하세요.', True)
+        add('core.skills', account.get('agents', {}).get('skills', {}).get('selection', {}).get('mode') == 'all', '본체 스킬을 설치·선택하고 Claude 분리 홈 링크를 확인하세요.', True)
+        add('daemon.account', daemon_running(self.home), '이 계정의 Paseo 데몬을 실행하세요.', True)
+        # A TCP bind probe checks the configured local port, without starting a service.
+        import socket
+        listen = account.get('listen', account.get('daemon', {}).get('listen', '127.0.0.1:6767'))
+        match = re.search(r':(\d+)$', listen) if isinstance(listen, str) else None
+        if match:
+            with socket.socket() as probe:
+                probe.settimeout(0.2)
+                occupied = probe.connect_ex(('127.0.0.1', int(match[1]))) == 0
+            add('port.conflict', not occupied or daemon_running(self.home), '다른 계정 데몬의 포트 점유 여부를 확인하세요.')
+        # Running brew can populate HOME caches even for `list`; read its cask receipts instead.
+        receipts = []
+        for prefix in ('/opt/homebrew', '/usr/local'):
+            receipts.extend((Path(prefix)/'Caskroom/paseo/.metadata').glob('*/**/Casks/*.json'))
+        if receipts:
+            recorded = [read_json(file).get('version') for file in receipts]
+            add('brew.cask', versions['app'] in recorded, 'brew cask 기록과 앱 버전을 확인하세요.')
+        from public_runtime import auto_update_data
+        state = read_json(auto_update_data(self.config)/'state.json')
+        success = state.get('lastSuccessAt') or (state.get('finishedAt') if state.get('result') == 'updated' else None)
+        add('autoUpdate.lastSuccess', bool(success), '자동 업데이트 마지막 성공 시각을 확인하세요: '+str(success or '없음'))
+        return {'checks': checks, 'versions': versions, 'notices': self.notices()}
+
+    def remove_auto_update(self):
+        # Preserve the existing opt-out flag's narrow meaning.
+        file = self.home/'Library/LaunchAgents'/(AUTO_UPDATE_LABEL+'.plist')
+        if auto_update_agent_installed(self.home, ROOT):
+            run(['/bin/launchctl', 'bootout', f'gui/{os.getuid()}/{AUTO_UPDATE_LABEL}'], self.home, check=False)
+            file.unlink()
+        if self.record_file.exists():
+            self.record['autoUpdate'] = False
+            atomic_json(self.record_file, self.record)
+        return {'autoUpdateRemoved': True, 'pluginPreserved': True}
+
+    def uninstall(self, purge=False):
+        self.ensure_idle()
+        account = read_paseo(self.home)
+        plugins = copy.deepcopy(account.get('plugins', {}))
+        changed = False
+        if same_plugin(plugins.get('role-workflow')):
+            plugins.pop('role-workflow')
+            account['plugins'] = plugins
+            changed = True
+        # Restore provider commands before deleting the installed launchers.
+        originals = self.record.get('providerCommands', {})
+        for provider, command in originals.items():
+            entry = account.get('agents', {}).get('providers', {}).get(provider, {})
+            current = entry.get('command')
+            if current and str(self.directory/'airport') in json.dumps(current):
+                if command is None:
+                    entry.pop('command', None)
+                else:
+                    entry['command'] = command
+                changed = True
+        if changed:
+            if daemon_running(self.home):
+                for key in ('agents', 'plugins'):
+                    if key in account:
+                        self.command('daemon', 'config', 'set', key, json.dumps(account[key]))
+                self.command('daemon', 'restart')
+            else:
+                atomic_json(self.directory/'config.json', account)
+        for file in (self.home/'Library/LaunchAgents').glob(PREFIX+'*.plist'):
+            run(['/bin/launchctl', 'bootout', f'gui/{os.getuid()}/{file.stem}'], self.home, check=False)
+            file.unlink()
+        for name in self.record.get('generatedFiles', []):
+            file = Path(name).resolve()
+            if not file.is_relative_to((self.directory/'airport').resolve()) and not (file.parent == (self.home/'Library/LaunchAgents').resolve() and file.name.startswith(PREFIX)):
+                raise RuntimeError('설비 삭제 경로가 소유 범위를 벗어납니다.')
+            file.unlink(missing_ok=True)
+        if purge and (self.directory/'owner').exists():
+            backup(self.home)
+            shutil.rmtree(self.directory/'owner')
+        self.record_file.unlink(missing_ok=True)
+        return {'uninstalled': True, 'ownerPreserved': not purge}
+
+
+def version(command, home, raw=False):
+    try:
+        result = run(command, home, check=False)
+        if result.returncode:
+            return None
+        found = re.search(r'\b\d+\.\d+\.\d+\b', result.stdout or '')
+        return result.stdout.strip() if raw else found[0] if found else None
+    except OSError:
+        return None
+
+
+def verify_registration(paseo, home, after='install'):
+    for attempt in range(5):
+        result = run([paseo, 'plugin', 'ls', 'role-workflow', '--json', '--home', paseo_home(home)], home, check=False)
+        try:
+            if result.returncode:
+                raise ValueError()
+            verify_plugin_entries(json.loads(result.stdout), ROOT, after)
+            return
+        except (ValueError, RuntimeError):
+            if attempt == 4:
+                raise RuntimeError('플러그인 등록 확인 실패. 사장 칸은 보존되며 설치 백업으로 복구할 수 있습니다.')
+            time.sleep(1)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['install','uninstall'])
+    parser.add_argument('action', choices=['install', 'refresh', 'check', 'doctor', 'uninstall'])
     parser.add_argument('--dry-run', action='store_true')
-    parser.add_argument('--with-auto-update', action='store_true', help='daily 04:30 updater; with uninstall, remove only this agent')
-    parser.add_argument('--replace-registration', action='store_true', help='install only: replace a foreign role-workflow registration with this checkout')
+    parser.add_argument('--profile', choices=['server', 'desktop'])
+    parser.add_argument('--json', action='store_true')
+    parser.add_argument('--with-auto-update', action='store_true')
+    parser.add_argument('--replace-registration', action='store_true')
+    parser.add_argument('--purge-owner', action='store_true')
     args = parser.parse_args(argv)
     if args.replace_registration and args.action != 'install':
-        parser.error('--replace-registration은 일반 install에서만 쓸 수 있습니다.')
-    if sys.version_info < (3,12):
-        raise RuntimeError('Python 3.12 이상이 필요합니다.')
-    if os.geteuid() == 0 and not args.dry_run:
-        raise RuntimeError('설치는 sudo 없이 실행하세요.')
-    home = Path.home()
-    config = load_config()
-    node = node_executable(config)
-    version = subprocess.check_output([node,'--version'],text=True).strip()
-    if int(version.lstrip('v').split('.')[0]) < 22:
-        raise RuntimeError('Node.js 22 이상이 필요합니다.')
-    paseo = cli_path(config)
-    if not args.dry_run:
-        verify_cli(paseo, home)
-    account = read_paseo(home)
-    entry = account.get('plugins',{}).get('role-workflow')
-    plan = {'action':args.action,'home':str(home),'plugin':str(ROOT/'plugin/role-workflow'),
-            'node':node,'python':sys.executable,'paseo':str(paseo),'config':str(config_path()),
-            'data':str(data_root(config)),'logs':str(logs_root(config)),
-            'withAutoUpdate':args.with_auto_update,'dryRun':args.dry_run,
-            'pathCliWarning':path_cli_warning()}
-    conflict = registration_conflict(entry) if entry and not same_plugin(entry) and args.action == 'install' else None
-    plan.update(registrationConflict=conflict, replaceRegistration=args.replace_registration)
-    if conflict and not args.replace_registration:
-        if args.dry_run:
-            print(json.dumps(plan,ensure_ascii=False,indent=2))
-        options = ['--with-auto-update'] if args.with_auto_update else []
-        raise RuntimeError(conflict_message(conflict, options))
-    print(json.dumps(plan,ensure_ascii=False,indent=2))
-    if plan['pathCliWarning'] and not args.dry_run:
-        print(plan['pathCliWarning'],file=sys.stderr)
+        parser.error('--replace-registration은 install 전용입니다.')
+    if args.purge_owner and (args.action != 'uninstall' or args.with_auto_update):
+        parser.error('--purge-owner는 전체 uninstall 전용입니다.')
+    try:
+        airport = Airport()
+    except RuntimeError:
+        if args.action == 'refresh' and not args.dry_run:
+            # Even an unreadable policy must leave a failure log; never repair the owner file here.
+            file = paseo_home()/'airport/logs/refresh.jsonl'
+            file.parent.mkdir(parents=True, exist_ok=True)
+            with file.open('a') as out:
+                out.write(json.dumps({'result': 'failed', 'message': '사장 칸 형식 오류'})+'\n')
+            run(['/usr/bin/osascript', '-e', 'display notification "사장 칸 형식 오류로 refresh 실패" with title "Paseo refresh"'], Path.home(), check=False)
+        raise
     if args.dry_run:
-        print('DRY RUN: npm 의존성/플러그인 등록/launchd 변경 없음. 계정의 데이터는 보존합니다.')
-        return 0
-    command = lambda *arguments: [paseo,*arguments,'--home',home/'.paseo']
-    if args.action == 'uninstall':
-        if not args.with_auto_update and entry and same_plugin(entry):
-            run(command('plugin','remove','role-workflow'),home)
-        remove_agent(AUTO_UPDATE_LABEL, 'auto-update.py', home)
-        if not args.with_auto_update:
-            remove_agent(LEGACY_FOLD_LABEL, 'auto-reapply-fold.py', home)
-        print('등록 해제 완료. 설정·워크플로·빌드·백업·로그는 삭제하지 않았습니다.')
-        return 0
-    if not (home/'.paseo/paseo.pid').exists():
-        raise RuntimeError('이 계정에서 Paseo를 먼저 실행하세요. 설치기는 데몬을 시작하거나 재시작하지 않습니다.')
-    if conflict:
-        busy = busy_workflows(home)
-        if busy:
-            raise RuntimeError('진행 중인 작업이 있어 등록을 전환하지 않습니다: '+', '.join(f'#{number}' for number in busy))
-    if args.with_auto_update:
-        updater = home/'Library/LaunchAgents'/(AUTO_UPDATE_LABEL+'.plist')
-        if updater.exists() and str(ROOT/'scripts/auto-update.py') not in plistlib.loads(updater.read_bytes()).get('ProgramArguments', []):
-            raise RuntimeError('다른 저장소의 자동 업데이트가 이미 등록돼 있습니다.')
-    lock = hashlib.sha256((ROOT/'package-lock.json').read_bytes()).hexdigest()
-    if not (ROOT/'node_modules/.bin/tsx').exists() or config.get('dependenciesLock') != lock:
-        npm = Path(node).parent/'npm'
-        if not npm.exists():
-            npm = Path(shutil.which('npm') or '')
-        if not npm.is_file():
-            raise RuntimeError('npm을 찾지 못했습니다.')
-        run([npm,'ci','--ignore-scripts','--no-audit','--no-fund'],home)
-    # Native CLI persists the same directory-source shape used by Paseo itself.
-    # This applies configuration to a running daemon; it does not restart it.
-    if account.get('pluginsEnabled') is not True:
-        run(command('daemon','config','set','pluginsEnabled','true'),home)
-    replaced = None
-    if conflict:
-        replaced = replace_registration(paseo, home, config, entry)
-    elif not entry:
-        run(command('plugin','install',ROOT/'plugin/role-workflow'),home)
-    elif entry.get('enabled') is False:
-        run(command('plugin','enable','role-workflow'),home)
-    # An existing same-path registration is retained without interrupting active tasks.
-    config.update(node=node,python=os.environ.get('PASEO_PUBLIC_PYTHON') or shutil.which('python3') or sys.executable,dependenciesLock=lock)
-    config.setdefault('phoneNotifications',False)
-    config_path().parent.mkdir(parents=True,exist_ok=True)
-    config_path().write_text(json.dumps(config,ensure_ascii=False,indent=2)+'\n')
-    config_path().chmod(0o600)
-    # The sidebar fold feature was removed; retire its watcher if this checkout registered one.
-    remove_agent(LEGACY_FOLD_LABEL, 'auto-reapply-fold.py', home)
-    if args.with_auto_update:
-        auto_update_logs(config).mkdir(parents=True, exist_ok=True)
-        install_agent(AUTO_UPDATE_LABEL, plistlib.dumps(launch_plist(config,node,home),sort_keys=False), home)
-    verify_registration(paseo, home)
-    if args.with_auto_update:
-        agent = run(['/bin/launchctl','print',f'gui/{os.getuid()}/{AUTO_UPDATE_LABEL}'],home,check=False,capture=True)
-        if agent.returncode:
-            raise RuntimeError(f'자동 업데이트 LaunchAgent가 로드돼 있지 않습니다({agent.returncode}): {(agent.stderr or "").strip()}')
-    print('설치 완료. 폴더 열기는 사이드바/커맨드 센터에서 사용할 수 있습니다.')
-    if replaced:
-        print(f'이전 등록({entry.get("path")})은 삭제하지 않았습니다. 확인 후 직접 정리하세요. 설정 백업: {replaced}')
-    print(f'등록 경로: {ROOT/"plugin/role-workflow"} · 자동 업데이트: {AGENT_LABELS[auto_update_agent_state(home,ROOT)]}')
-    return 0
+        result = {'action': args.action, 'dryRun': True, 'profile': airport.profile(args.profile),
+                  'cleanup': [str(p) for p in generated_cleanup(airport.home)], 'notices': airport.notices(),
+                  'steps': {'install': ['백업', '금고·지시서 revision 비교', '본체 상위 객체 맞춤', '등록 변경 시 데몬 재시작', '설비 설치'],
+                            'refresh': ['lock 변경 시 npm ci', '설비 틀 재생성', '미참조 생성물 정리', '켜진 플러그인만 reload'],
+                            'uninstall': ['provider command 원복', '등록·공항 LaunchAgent·생성물 제거', '사장 칸 보존' if not args.purge_owner else '백업 뒤 사장 칸 삭제'],
+                            'check': ['기대값과 실제 파일 비교'], 'doctor': ['읽기 전용 점검']}[args.action]}
+        if args.action == 'uninstall' and args.with_auto_update:
+            result['steps'] = ['이 clone의 자동 업데이트 LaunchAgent만 해제', '플러그인·사장 칸 보존']
+        code = 0
+    elif args.action == 'check':
+        result = airport.check()
+        code = int(bool(result['differences']))
+    elif args.action == 'doctor':
+        result = airport.doctor()
+        code = int(any(not row['ok'] for row in result['checks']))
+    else:
+        if os.geteuid() == 0:
+            raise RuntimeError('sudo 없이 실행하세요.')
+        if args.action == 'refresh':
+            try:
+                result = airport.refresh()
+            except (OSError, ValueError, RuntimeError):
+                airport.refresh_event('failed', 'refresh 실패: 등록·지시서·설비와 로그를 확인하세요.')
+                raise
+        else:
+            result = airport.install(args) if args.action == 'install' else airport.remove_auto_update() if args.with_auto_update else airport.uninstall(args.purge_owner)
+        code = 0
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return code
 
 
 if __name__ == '__main__':
     try:
         sys.exit(main())
-    except (OSError,RuntimeError,ValueError,subprocess.CalledProcessError) as error:
-        print(str(error),file=sys.stderr)
+    except RuntimeError as error:
+        if '--json' in sys.argv:
+            print(json.dumps({'error': str(error)}, ensure_ascii=False))
+        else:
+            print(str(error), file=sys.stderr)
+        sys.exit(1)
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        print('공항 작업 실패: 설정 형식·등록 경로·revision·설비와 설치 백업을 확인하세요.', file=sys.stderr)
         sys.exit(1)

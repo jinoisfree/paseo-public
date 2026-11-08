@@ -214,6 +214,10 @@
         "skills": "owner-manuals"
       },
       "note": "후속 조립 파일과 세션을 파일별로 분리"
+    },
+    "airport": {
+      "slot": "installation",
+      "target": "공항 설치 기록·설비 생성물·로그"
     }
   },
   "config": {
@@ -370,7 +374,9 @@
     "~/.claude/skills/": "owner-manuals",
     "~/.agents/skills/": "owner-manuals",
     "~/.config/paseo-public/sync-deny.txt": "maintenance",
-    "docs/changes/": "maintenance"
+    "docs/changes/": "maintenance",
+    "$PASEO_HOME/airport/": "installation",
+    "$PASEO_HOME/airport/modules/": "equipment"
   },
   "externalDependencies": [
     "다른 macOS 계정의 앱 공유·데몬",

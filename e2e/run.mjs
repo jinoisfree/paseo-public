@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import "../plugin/role-workflow/tests/test-home.mjs";
 import { gitTestEnvironment } from "../plugin/role-workflow/tests/git-test-environment.mjs";
 // Manual end-to-end check: an isolated Paseo daemon (temporary PASEO_HOME, random port) loads this
 // checkout's role-workflow and talks to a fake Claude model, so no real account or quota is used.

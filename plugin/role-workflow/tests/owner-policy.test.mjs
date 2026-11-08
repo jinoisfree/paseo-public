@@ -147,3 +147,26 @@ test('C7 environment config falls back to the old account config only when unava
   assert.deepEqual(sent,['https://example.invalid/push','https://old.example.invalid/push']);
  }finally {for(const [key,value] of Object.entries(previous)) value===undefined?delete process.env[key]:process.env[key]=value;}
 });
+
+test('V6 catalog errors allow federation with a warning; confirmed zero alone blocks',async t=>{
+ const f=await fixture(t);
+ const providers={listAvailable:async()=>({error:'fixture',providers:[]}),listModels:async()=>({models:[]})};
+ for (const failure of ['catalog-error','catalog-throw','models-error','models-throw']) {
+  providers.listAvailable=async()=> failure==='catalog-throw' ? Promise.reject(new Error('fixture')) : {error:failure==='catalog-error'?'fixture':null,providers:[{provider:'codex',available:true}]};
+  providers.listModels=async()=> failure==='models-throw' ? Promise.reject(new Error('fixture')) : {error:'fixture',models:[]};
+  const result=await federationAvailability({providers},'',f.dir);
+  assert.equal(result.available,true);assert.match(result.reason,/경고/);
+ }
+});
+test('V8 policy cache reuses validation and invalidates on external atomic replacement',async t=>{
+ const f=await fixture(t);const store=new OwnerPolicyStore(f.file);
+ const initial=await store.load({settings:recommendedSettings,source:'fixture'});
+ const {mock}=await import('node:test');
+ const {ownerPolicySchema}=await import('../shared/owner-policy.ts');
+ const spy=mock.method(ownerPolicySchema,'parse');t.after(()=>spy.mock.restore());
+ await store.load();const count=spy.mock.callCount();await store.load();assert.equal(spy.mock.callCount(),count);
+ const {rename,utimes}=await import('node:fs/promises');
+ const before=await stat(f.file);const external={...initial.policy,revision:9};
+ const temporary=f.file+'.external';await writeFile(temporary,JSON.stringify(external,null,2)+'\n');await utimes(temporary,before.atime,before.mtime);await rename(temporary,f.file);
+ assert.equal((await store.load()).policy.revision,9);assert.ok(spy.mock.callCount()>count);
+});

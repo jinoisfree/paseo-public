@@ -21,7 +21,7 @@ class OwnerSchemaTests(unittest.TestCase):
                 validate_owner('policy', value)
         for invalid in [None, '2026-02-30', '20260101', 'secret']:
             value = copy.deepcopy(policy)
-            decision = value['decisions']['operatingProfile']
+            decision = value['decisions']['profile']
             if invalid is None:
                 del decision['date']
             else:

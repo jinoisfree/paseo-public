@@ -5,8 +5,6 @@ from pathlib import Path
 import shutil
 
 ROOT = Path(__file__).resolve().parents[1]
-# Watcher of the removed sidebar fold feature; kept only so install/uninstall can retire it.
-LEGACY_FOLD_LABEL = 'io.github.jinoisfree.paseo-public.fold-reapply'
 AUTO_UPDATE_LABEL = 'io.github.jinoisfree.paseo-public.auto-update'
 
 
@@ -14,27 +12,32 @@ def config_path():
     return Path(os.environ.get('PASEO_PUBLIC_CONFIG', Path.home()/'.config/paseo-public/config.json')).expanduser()
 
 
+def paseo_home(home=None):
+    return Path(os.environ.get('PASEO_HOME', Path(home or Path.home())/'.paseo')).expanduser()
+
+
 def load_config():
+    # Legacy file is a read-only migration source. Owner paths win once installed.
     file = config_path()
-    if not file.exists():
-        return {}
-    value = json.loads(file.read_text())
+    value = json.loads(file.read_text()) if file.exists() else {}
     if not isinstance(value, dict):
         raise ValueError('The paseo-public configuration must be a JSON object')
-    profile = value.get("profiles", {}).get(str(ROOT), {})
+    profile = value.get('profiles', {}).get(str(ROOT), {})
     if not isinstance(profile, dict):
-        raise ValueError("The repository runtime profile must be an object")
-    return {**value, **profile}
+        raise ValueError('The repository runtime profile must be an object')
+    from owner_store import read_owner
+    vault = read_owner(paseo_home()/'owner/vault.json', 'vault')
+    return {**value, **profile, **vault.get('paths', {})}
 
 
 def data_root(config=None):
     config = load_config() if config is None else config
-    return Path(config.get('dataDir', Path.home()/'Library/Application Support/paseo-public')).expanduser()
+    return Path(config.get('dataDir', paseo_home()/'airport')).expanduser()
 
 
 def logs_root(config=None):
     config = load_config() if config is None else config
-    return Path(config.get('logsDir', Path.home()/'Library/Logs/paseo-public')).expanduser()
+    return Path(config.get('logsDir', paseo_home()/'airport/logs')).expanduser()
 
 
 def auto_update_data(config=None):
@@ -71,7 +74,7 @@ def backup_root(config=None):
 
 def busy_workflows(home):
     """Numbers of active workflows that are sending an instruction or compacting."""
-    file = Path(home)/'.paseo/role-workflow/state.json'
+    file = paseo_home(home)/'role-workflow/state.json'
     if not file.exists():
         return []
     data = json.loads(file.read_text())

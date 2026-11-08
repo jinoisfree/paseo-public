@@ -10,7 +10,7 @@
   "scripts": {
     "test": "npm test --workspace paseo-role-workflow",
     "typecheck": "npm run typecheck --workspace paseo-role-workflow",
-    "e2e": "node e2e/run.mjs"
+    "e2e": "node --import ./plugin/role-workflow/tests/test-home.mjs e2e/run.mjs"
   },
   "devDependencies": {
     "@typescript/native-preview": "7.0.0-dev.20260423.1",

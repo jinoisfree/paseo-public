@@ -31,6 +31,8 @@ if command=='setup' and mode=='install-once' and count==1: sys.exit(1)
 if command=='reload' and (mode=='reload-always' or (mode in ('reload-once','rollback-keep') and count==1)):
  if mode=='rollback-keep': (root/'version.txt').write_text('user edit')
  sys.exit(1)
+if command=='setup':
+ sys.exit(subprocess.call([str(events.parent/'paseo'),'plugin','reload','role-workflow','--home',os.environ['PASEO_HOME']]))
 if command=='ls':
  if count==1 and mode=='invalid-shape-once':
   print('[null]'); sys.exit(0)
@@ -82,8 +84,9 @@ class AutoUpdateTests(unittest.TestCase):
         self.cli=self.base/'paseo'
         self.cli.write_text('#!'+sys.executable+'\n'+FAKE);self.cli.chmod(0o755)
         self.events=self.base/'events.jsonl'
-        self.config={'paseo':str(self.cli),'dataDir':str(self.base/'data'),'logsDir':str(self.base/'logs')}
-        env=mock.patch.dict(os.environ,{'HOME':str(self.home),'PASEO_PUBLIC_NODE':'/bin/sh',
+        app=self.base/'Paseo.app'; bundled=app/'Contents/Resources/bin/paseo';bundled.parent.mkdir(parents=True);bundled.symlink_to(self.cli)
+        self.config={'app':str(app),'dataDir':str(self.base/'data'),'logsDir':str(self.base/'logs')}
+        env=mock.patch.dict(os.environ,{'HOME':str(self.home),'PASEO_HOME':str(self.home/'.paseo'),'PASEO_PUBLIC_NODE':'/bin/sh',
                                       'AUTO_TEST_ROOT':str(self.root),'AUTO_TEST_EVENTS':str(self.events),'AUTO_TEST_MODE':''})
         env.start();self.addCleanup(env.stop)
         self.notifications=[]
@@ -122,6 +125,7 @@ class AutoUpdateTests(unittest.TestCase):
         self.assertEqual(self.git(self.root,'rev-parse','HEAD'),self.target)
         self.assertEqual([row['command'] for row in self.calls()],['setup','reload','ls'])
         self.assertTrue(all(row['version']=='new' for row in self.calls()))
+        self.assertEqual(self.calls()[0]['args'], ['refresh'])
         self.assertIn(str(self.home/'.paseo'),self.calls()[1]['args'])
         self.assertEqual(len(self.notifications),1)
         self.assertIn(self.previous[:7]+' → '+self.target[:7],self.notifications[0])

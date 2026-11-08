@@ -34,7 +34,7 @@ Paseo 본체 칸과 함께 대응시킨다. 기계용 원본은 [소유표](../p
 | 사장 셸 | PATH·함수 | 사장 홈의 셸 설정 |
 | 직원 사물함 | 작업·보관·프로젝트 기억·인계·증거·세션·auth | 사장 홈·제품 홈 |
 | 운항 시간표 | 설비 틀 + 사장이 정한 시각 | ~/Library/LaunchAgents |
-| 설치 상태 | 의존성 잠금·업데이트 상태·설비 로그 | Application Support·Logs의 paseo-public |
+| 설치 상태 | 의존성 잠금·업데이트 상태·설비 로그 | $PASEO_HOME/airport |
 | 정비 격납고 | 백업·개인 차단 목록·작업 설계·정비 증거 | 비공개 |
 
 프로필 JSON은 추가할 때 확인하는 틀이며 실제 명부를 덮지 않는다.
@@ -78,9 +78,12 @@ server는 외부 데몬·업데이트 감시·Paseo 전용 watchdog, desktop은 
 
 ## 단계 경계와 새 기능 점검표
 
-1차는 명세·기본값·스키마·설비 틀·소유표다. 설치기는 아직 이 구조를 조립하지 않는다.
-지시서 원자적 쓰기·revision 보호·state.settings 이관과 제품 0개 시 연합개발 거부는 구현됐다. check/doctor/refresh,
-분리 홈 조립·설비 설치·다른 Mac 수락·잔재 제거는 후속 단계다. 현재 설정은 owner/policy.json을 읽고, state.settings는 롤백용 동결 사본이다.
+설치기 install은 백업 → 사장 칸 → 본체 권장 상위 객체 → 등록 → 설비 → 고지를 수행한다.
+금고 paths는 도구 경로, 지시서 decisions.profile은 날짜 있는 운영 프로필 선택이다. desktop-settings는 본체의 version/settings 형식을 따른다.
+check·doctor는 파일을 쓰지 않는다. refresh는 본체·지시서와 꺼진 등록을 건드리지 않고 의존성·설비·켜진 플러그인·검증된 미참조 생성물만 갱신한다.
+uninstall은 command 원복 뒤 설비를 지우고 사장 칸·사물함을 보존한다. --purge-owner만 백업 뒤 사장 칸을 지운다.
+앱 설정·LaunchAgent·백업은 macOS 계정 Library, 공항 설치 상태·설비 생성물은 $PASEO_HOME/airport가 소유한다.
+설비 내용과 분리 홈 조립·다른 Mac 수락·잔재 제거는 후속 단계다. 현재 설정은 owner/policy.json을 읽고 state.settings는 롤백용 동결 사본이다.
 
 - 소유 칸·공식 원본·쓰기 주체·수명을 정했는가?
 - 본체 칸과 중복되거나 파일 하나가 두 칸에 걸치는가?

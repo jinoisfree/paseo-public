@@ -2552,7 +2552,10 @@ export class WorkflowEngine {
   private async allowMode(w: Workflow, mode: "general" | "federated") {
     if (mode === "general") return true;
     const availability = await this.federationStatus(w.cwd);
-    if (availability.available) return true;
+    if (availability.available) {
+      if (availability.reason) this.touch(w, availability.reason);
+      return true;
+    }
     this.touch(w, availability.reason ?? "실행 가능한 제품이 없어 연합개발을 선택할 수 없습니다.");
     return false;
   }
@@ -2600,7 +2603,7 @@ export class WorkflowEngine {
             `role-workflow-mode:${w.id}`,
           )
           .catch(() => {});
-      return { ok: true, detail: `${label}로 진행합니다.` };
+      return { ok: true, detail: `${label}로 진행합니다.${mode === "federated" && this.federation.reason ? " " + this.federation.reason : ""}` };
     });
   }
   /** A placement choice is valid only while this task is awaiting its first placement. */

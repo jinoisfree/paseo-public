@@ -16,7 +16,7 @@ from time import sleep
 # A read-only --check must not create repository __pycache__ files either.
 sys.dont_write_bytecode = True
 
-from public_runtime import ROOT, AUTO_UPDATE_LABEL, load_config, auto_update_data, auto_update_logs, node_executable, busy_workflows, verify_plugin_entries, auto_update_agent_installed
+from public_runtime import ROOT, AUTO_UPDATE_LABEL, load_config, auto_update_data, auto_update_logs, node_executable, busy_workflows, verify_plugin_entries, auto_update_agent_installed, paseo_home
 from setup import cli_path, read_paseo, same_plugin
 
 BUSY_INTERVAL = 600
@@ -57,7 +57,7 @@ class Updater:
     def command(self, command, *, check=True, timeout=120):
         command = list(map(str, command))
         env = os.environ.copy()
-        env.update(HOME=str(self.home), PASEO_HOME=str(self.home/'.paseo'),
+        env.update(HOME=str(self.home), PASEO_HOME=str(paseo_home(self.home)),
                    PATH=str(Path(node_executable(self.config)).parent)+os.pathsep+env.get('PATH', ''),
                    PYTHONDONTWRITEBYTECODE='1')
         env.pop('PASEO_HOST', None)
@@ -112,6 +112,8 @@ class Updater:
             self.state['notifiedSkip'] = None
         self.state['busyStreak'] = self.state['busyStreak'] + 1 if busy else 0
         self.state.update(result=result, reason=reason, finishedAt=stamp(), logDirectory=str(self.log), **values)
+        if result == 'updated':
+            self.state['lastSuccessAt'] = self.state['finishedAt']
         temporary = self.state_file.with_suffix('.tmp')
         temporary.write_text(json.dumps(self.state, ensure_ascii=False, indent=2)+'\n')
         temporary.replace(self.state_file)
@@ -127,7 +129,7 @@ class Updater:
 
     def daemon_running(self):
         try:
-            pid = json.loads((self.home/'.paseo/paseo.pid').read_text())['pid']
+            pid = json.loads((paseo_home(self.home)/'paseo.pid').read_text())['pid']
             if type(pid) is not int or pid <= 0:
                 return False
             os.kill(pid, 0)  # Existence probe only; never starts a daemon.
@@ -158,11 +160,12 @@ class Updater:
         return busy_workflows(self.home)
 
     def install_reload(self):
-        self.command([sys.executable, self.root/'scripts/setup.py', 'install'], timeout=3600)
+        self.command([sys.executable, self.root/'scripts/setup.py', 'refresh'], timeout=3600)
         paseo = cli_path(self.config)
-        self.command([paseo, 'plugin', 'reload', 'role-workflow', '--home', self.home/'.paseo'])
-        result = self.command([paseo, 'plugin', 'ls', 'role-workflow', '--json', '--home', self.home/'.paseo'])
-        verify_plugin_entries(json.loads(result.stdout), self.root)
+        result = self.command([paseo, 'plugin', 'ls', 'role-workflow', '--json', '--home', paseo_home(self.home)])
+        entry = read_paseo(self.home).get('plugins', {}).get('role-workflow', {})
+        if entry.get('enabled') is not False and read_paseo(self.home).get('pluginsEnabled') is not False:
+            verify_plugin_entries(json.loads(result.stdout), self.root)
 
     def rollback(self, previous, target):
         # Do not reset another branch or a commit created by a concurrent user.
@@ -223,6 +226,9 @@ class Updater:
                                                  (skip.get('path') is None or isinstance(skip['path'], str))):
                         raise ValueError('Invalid notified skip; update refused')
                     self.state['notifiedSkip'] = skip
+                    success = saved.get('lastSuccessAt') or (saved.get('finishedAt') if saved.get('result') == 'updated' else None)
+                    if success:
+                        self.state['lastSuccessAt'] = success
                 return self.update()
             except (OSError, ValueError, KeyError, TypeError, RuntimeError) as error:
                 return self.finish('failed', str(error), notify=True)
