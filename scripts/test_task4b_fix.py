@@ -33,6 +33,8 @@ class Task4bFixTests(unittest.TestCase):
                 service.daemon_service()
             self.assertEqual(execute.call_args.args[0], str(self.cli))
             self.assertEqual(execute.call_args.args[1][1:-2], expected)
+        # The legacy ordering assertion explicitly selects A after C33 defaults to B.
+        service.owner['decisions']['modules']['daemon-service']['variant'] = 'A'
         service.update_watch()
         stop = next(i for i,c in enumerate(commands) if c[1:3] == ['daemon', 'stop'])
         kick = next(i for i,c in enumerate(commands) if 'kickstart' in c)

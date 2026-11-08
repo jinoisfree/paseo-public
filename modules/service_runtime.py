@@ -79,9 +79,13 @@ class Service:
         result = self.runner(['/bin/launchctl', 'kickstart', '-k', f'gui/{os.getuid()}/{PREFIX}daemon-service'], capture_output=True, text=True, timeout=120)
         if result.returncode: raise RuntimeError('공항 데몬 설비 kickstart 실패')
 
+    def daemon_variant(self):
+        explicit = self.owner.get('decisions', {}).get('modules', {}).get('daemon-service', {}).get('variant')
+        return explicit or read(Path(__file__).parent/'daemon-service/module.json')['defaultVariant']
+
     def daemon_service(self):
         self.supported()
-        variant = self.owner.get("decisions", {}).get("modules", {}).get("daemon-service", {}).get("variant", "A")
+        variant = self.daemon_variant()
         args = ["start"] if variant == "A" else ["daemon", "run"]
         env = dict(os.environ);env.pop("PASEO_HOST", None);env["PASEO_HOME"] = str(self.home)
         os.execve(self.cli, [self.cli, *args, "--home", str(self.home)], env)
@@ -98,7 +102,9 @@ class Service:
             self.event('update-watch', 'current');return
         if self.busy():
             self.event('update-watch', 'busy');self.notify('작업 전송·압축 중이라 Paseo 버전 전환을 보류했습니다.');return
-        self.command('daemon', 'stop')
+        # B's KeepAlive would race a separate stop with kickstart and restart twice.
+        if self.daemon_variant() == 'A':
+            self.command('daemon', 'stop')
         self.kickstart()
         self.event('update-watch', 'restarted', appVersion=version, daemonVersion=actual)
         self.notify('업데이트된 Paseo 데몬 supervisor를 다시 시작했습니다.')

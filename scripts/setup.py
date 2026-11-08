@@ -176,7 +176,7 @@ def module_files(ids, home, config=None):
         if data['id'] != module_id:
             raise RuntimeError('설비 id가 디렉터리와 다릅니다.')
         for item in data['installs']:
-            if item.get('variant') and item['variant'] != config.get('moduleVariants', {}).get(module_id, 'A'):
+            if item.get('variant') and item['variant'] != config.get('moduleVariants', {}).get(module_id, data.get('defaultVariant', 'A')):
                 continue
             source = (ROOT/item['source']).resolve()
             target = Path(item['target'].replace('$INSTALL_ROOT', str(install_root)).replace('$LAUNCH_AGENTS', str(home/'Library/LaunchAgents'))).resolve()
@@ -577,9 +577,12 @@ class Airport:
         rows = module_files(self.expected()[2], self.home, self.module_config())
         verify_cli(cli_path(self.config), self.home)
         self.dependencies()
-        self.install_modules(rows)
+        # New runtimes may read their installed manifest as soon as a job starts.
+        agent_directory = (self.home/'Library/LaunchAgents').resolve()
+        self.install_modules([row for row in rows if row['target'].parent != agent_directory])
         if 'claude-home' in self.expected()[2]:
             self.assemble_claude()
+        self.install_modules([row for row in rows if row['target'].parent == agent_directory])
         self.record['equipment'] = self.module_plan()
         self.agents()
         for file in generated_cleanup(self.home):

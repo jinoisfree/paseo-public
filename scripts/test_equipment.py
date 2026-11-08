@@ -97,6 +97,8 @@ class EquipmentTests(unittest.TestCase):
 
     def test_C23_version_mismatch_replaces_supervisor_only_when_idle(self):
         service,commands=self.service()
+        # C33 preserves stop → kickstart only for an explicit A decision.
+        service.owner['decisions'].setdefault('modules', {})['daemon-service'] = {'enabled':True,'variant':'A'}
         service.update_watch()
         self.assertTrue(any(c[1:3]==['daemon','stop'] for c in commands));self.assertTrue(any('kickstart' in c for c in commands))
         self.assertLess(next(i for i,c in enumerate(commands) if c[1:3]==['daemon','stop']),next(i for i,c in enumerate(commands) if 'kickstart' in c))
@@ -108,7 +110,8 @@ class EquipmentTests(unittest.TestCase):
         (self.app/'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleShortVersionString':'0.16.0'}))
         # C30 replaces the old range rejection: clear busy state, then upgrade across ranges.
         (directory/'state.json').write_text(json.dumps({'workflows':[]}))
-        commands.clear();service.update_watch();self.assertTrue(any('stop' in c for c in commands));self.assertTrue(any('osascript' in c[0] for c in commands))
+        # C33 defaults to B: compatibility warnings must not reintroduce a separate stop.
+        commands.clear();service.update_watch();self.assertFalse(any('stop' in c for c in commands));self.assertTrue(any('osascript' in c[0] for c in commands))
 
     def test_C24_watchdog_restart_and_per_plugin_three_attempt_hour_limit(self):
         service,commands=self.service(plugins=[{'id':'fixture','enabled':True,'source':'directory','status':'failed'},{'id':'built-in','enabled':True,'source':'builtin','status':'failed'}])

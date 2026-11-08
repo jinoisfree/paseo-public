@@ -30,6 +30,10 @@
     {
       "source": "modules/launcher_runtime.py",
       "target": "$INSTALL_ROOT/modules/launcher_runtime.py"
+    },
+    {
+      "source": "modules/daemon-service/module.json",
+      "target": "$INSTALL_ROOT/modules/daemon-service/module.json"
     }
   ],
   "vaultKeys": [
@@ -58,5 +62,6 @@
         "\\bpaseo\\b.*\\bstart\\b"
       ]
     }
-  ]
+  ],
+  "defaultVariant": "B"
 }

@@ -53,7 +53,8 @@ python3 scripts/setup.py doctor
 권장 권한은 Codex `full-access`, Claude `bypassPermissions`이며 relay는 켜짐입니다.
 
 `--profile server|desktop`은 처음 설치할 때 선택합니다(기본 desktop). 이후에는 지시서 `decisions.profile`의 날짜 있는 선택이 우선합니다.
-server 설비는 daemon-service(A: start+감시, B: foreground+KeepAlive), update-watch, paseo-watchdog입니다.
+server 설비는 daemon-service(기본 B: foreground+KeepAlive, 선택 A: start+감시), update-watch, paseo-watchdog입니다.
+기본 variant는 module.json에서 읽으며 지시서의 명시된 variant가 우선합니다. update-watch는 B에서 kickstart -k 한 번, A에서는 stop → kickstart로 교체합니다.
 archive-rotate는 오래된 제품 세션을 `$PASEO_HOME/archive`에 보관한 뒤 원본을 옮깁니다(권장 30일).
 공통 설비는 Claude 분리 홈·실행기, Codex 실행기·계정 도구·사용량 플러그인입니다. 계정 이름은 금고의 codexAccounts에 직접 적습니다.
 
@@ -64,8 +65,8 @@ archive-rotate는 오래된 제품 세션을 `$PASEO_HOME/archive`에 보관한 
 4차 설비 교체는 `enable` → 충돌 확인 → 기존 설비 정리 → `install` 순서로 하나씩 진행합니다.
 
 ```sh
-python3 scripts/setup.py enable daemon-service --variant A --dry-run
-python3 scripts/setup.py enable daemon-service --variant A
+python3 scripts/setup.py enable daemon-service --variant B --dry-run
+python3 scripts/setup.py enable daemon-service --variant B
 ./install.sh --profile server --dry-run
 # 충돌로 표시된 기존 설비를 확인하고 해제한 뒤
 ./install.sh --profile server

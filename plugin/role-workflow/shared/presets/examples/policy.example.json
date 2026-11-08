@@ -24,7 +24,7 @@
       "daemon-service": {
         "enabled": false,
         "date": "2026-01-01",
-        "variant": "A"
+        "variant": "B"
       }
     }
   }

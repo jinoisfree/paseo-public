@@ -1,4 +1,4 @@
-# Mac 수락 시험(C32)
+# Mac 수락 시험(C32·C33)
 
 앱을 설치한 macOS 계정에서 저장소의 의존성을 `npm ci`로 준비한 뒤 실행합니다.
 앱 CLI는 별도로 설치하지 않습니다. Node.js 22 이상·Python 3.12 이상·Claude CLI가 필요합니다.
@@ -21,7 +21,9 @@ python3 -B scripts/acceptance/run.py --app /Applications/Paseo.app
   제품 CLI는 인증·네트워크 없는 가짜이며 실제 데몬 카탈로그와 플러그인의 C9 함수를 함께 검사합니다. 제품 0개 거부도 확인합니다.
 - ab: 실제 설비 A/B 템플릿의 홈·라벨만 격리해 launchd에 등록합니다. supervisor PID는 격리 홈의 상태·PID 파일·worker 부모 PID로 검증한 뒤 SIGKILL합니다.
   A는 실제 watchdog 1회, B는 기본 KeepAlive로 재기동을 측정합니다. 기본 launchd throttle도 그대로 둡니다.
-- update: 금고의 가짜 앱 0.15.4/실제 CLI 링크로 실제 update-watch를 호출합니다. 앱 업데이트 자체를 재현한 것은 아닙니다.
+- update: 금고의 가짜 앱 0.15.4/실제 CLI 링크로 실제 update-watch를 A/B 각각 6802/6803에서 호출합니다. A는 stop → kickstart, B는 kickstart -k 한 번만 허용합니다.
+  PID 파일과 B의 launchd 작업 PID를 약 20ms 대기 간격으로 관측하고 준비 완료 뒤 15초 더 관측해 PID 변경 정확히 1회를 판정합니다.
+  실제 표본 간격 최댓값·원시 표본도 기록하며, 간격이 250ms를 넘으면 판정을 실패로 처리합니다. 표본 간격보다 짧게 생존한 미관측 프로세스를 배제하는 증명은 아니며, 앱 업데이트 자체를 재현한 것은 아닙니다.
 - claude: 임시 HOME/CLAUDE_CONFIG_DIR, 토큰 변수 제거, macOS sandbox로 키체인 파일·Security 서비스 접근을 차단하고 `claude -p 'ok'`를 60초 관측합니다.
   타임아웃이면 해당 명령의 프로세스 그룹을 종료합니다. stdout/stderr·종료 코드·시간을 남기며 로그인하지 않습니다.
 

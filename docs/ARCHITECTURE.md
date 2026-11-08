@@ -44,6 +44,10 @@ Claude 직원은 `$PASEO_HOME/claude-home`, Codex는 `$PASEO_HOME/codex-home`에
 같은 Mac의 다른 macOS 계정도 별도 사장이다. 앱은 공유할 수 있어도 홈·포트·세션은 다르다.
 외부 자동화·사용량 앱·VPN은 경계 밖 의존이며 접점을 doctor로 점검한다.
 
+server 데몬 설비는 기본 B(foreground + launchd KeepAlive)다. 기본값의 원본은
+`modules/daemon-service/module.json`의 defaultVariant이며 사장 지시서에 명시한 A/B가 우선한다.
+앱 버전 전환은 B에서 kickstart -k 하나로, A에서 stop → kickstart로 supervisor를 한 번 교체한다.
+
 ## 원칙
 
 1. 먼저 칸을 정한다. 두 번째 원본을 만들지 않는다.

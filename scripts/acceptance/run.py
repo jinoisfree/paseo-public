@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import plistlib
 import pwd
+import re
+import threading
 import shutil
 import signal
 import socket
@@ -63,6 +65,54 @@ def snapshot():
     pid = REAL_HOME/'.paseo/paseo.pid'
     result['daemonPidValues'] = json.loads(pid.read_text()) if pid.exists() else None
     return result
+
+
+def restart_observation(samples, before, after, variant):
+    def changes(key):
+        values = []
+        for sample in samples:
+            value = sample[key]
+            if value is not None and (not values or value != values[-1]): values.append(value)
+        return values
+    pids, jobs = changes('pid'), changes('jobPid')
+    # The bundled CLI keeps a launchd parent separate from its supervisor child.
+    # Each identity must change once; their numeric PID values need not match.
+    if before == after or pids != [before, after] or (variant == 'B' and len(jobs) != 2):
+        raise RuntimeError('supervisor 재시작이 정확히 1회가 아닙니다. PID 표본을 확인하세요.')
+    max_gap = max((b['at']-a['at'] for a,b in zip(samples,samples[1:])), default=0)
+    if max_gap > .25: raise RuntimeError('PID 표본 간격이 250ms를 넘어 재시작 횟수를 판정할 수 없습니다.')
+    return {'pidChanges': len(pids)-1, 'pidSequence': pids, 'jobPidSequence': jobs,
+            'sampleCount': len(samples), 'maxSampleGapSeconds': max_gap}
+
+
+class SupervisorObserver:
+    """Sample the PID receipt and B's launchd job, independently of slow CLI calls."""
+    def __init__(self, directory, label):
+        if label not in LABELS: raise RuntimeError('시험 외 launchd 라벨 거부')
+        self.file = directory/'paseo.pid'; self.label = label
+        self.samples = []; self.errors = []; self.done = threading.Event()
+        self.started = time.monotonic()
+
+    def sample(self):
+        try: pid = json.loads(self.file.read_text()).get('pid')
+        except (FileNotFoundError, ValueError): pid = None
+        result = subprocess.run(['/bin/launchctl','print',f'gui/{os.getuid()}/{self.label}'],capture_output=True,text=True,timeout=2)
+        match = re.search(r'^\s+pid = (\d+)$', result.stdout, re.M)
+        self.samples.append({'at':time.monotonic()-self.started,'pid':pid,'jobPid':int(match[1]) if match else None})
+
+    def __enter__(self):
+        self.sample()
+        def watch():
+            while not self.done.wait(.02):
+                try:self.sample()
+                except Exception as error:
+                    self.errors.append(str(error));return
+        self.thread = threading.Thread(target=watch,daemon=True);self.thread.start();return self
+
+    def __exit__(self,*args):
+        self.done.set();self.thread.join(timeout=3)
+        if self.thread.is_alive():self.errors.append('PID observer 정리 실패')
+
 
 
 class Acceptance:
@@ -250,21 +300,41 @@ class Acceptance:
         return {'measurements':rows,'recommendation':'B','reason':'KeepAlive가 supervisor 종료를 자동 복구한다. A는 별도 watchdog 실행이 필요하다. 실제 측정값과 함께 검토한다.'}
 
     def update(self):
-        ctx=self.context('update',port=self.port+3)
-        try:
-            label,before=self.bootstrap(ctx,'A')
-            fake=ctx['home']/'Paseo.app';(fake/'Contents/Resources/bin').mkdir(parents=True)
-            (fake/'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleShortVersionString':'0.15.4'}))
-            (fake/'Contents/Resources/bin/paseo').symlink_to(self.cli)
-            vault_file=ctx['directory']/'owner/vault.json';vault=json.loads(vault_file.read_text());vault['paths']['app']=str(fake)
-            save_owner(vault_file,'vault',vault,vault['revision'])
-            trace=[];self.service(ctx,label,trace).update_watch()
-            stop=next(i for i,c in enumerate(trace) if isinstance(c,list) and c[1:3]==['daemon','stop'])
-            kick=next(i for i,c in enumerate(trace) if isinstance(c,list) and 'kickstart' in c)
-            if stop>=kick:raise RuntimeError('stop → kickstart 순서 위반')
-            after=self.wait(lambda:(value if (value:=self.status(ctx)) and value['pid'] != before['pid'] else None))
-            return {'fakeAppVersion':'0.15.4','daemonVersion':after['daemonVersion'],'before':before['pid'],'after':after['pid'],'trace':trace}
-        finally:self.stop(ctx)
+        results=[]
+        for index,variant in enumerate(('A','B')):
+            # Separate isolated homes and ports; only test-a/test-b may be targeted.
+            ctx=self.context('update-'+variant,port=self.port+3+index)
+            try:
+                label,before=self.bootstrap(ctx,variant)
+                fake=ctx['home']/'Paseo.app';(fake/'Contents/Resources/bin').mkdir(parents=True)
+                (fake/'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleShortVersionString':'0.15.4'}))
+                (fake/'Contents/Resources/bin/paseo').symlink_to(self.cli)
+                vault_file=ctx['directory']/'owner/vault.json';vault=json.loads(vault_file.read_text());vault['paths']['app']=str(fake)
+                save_owner(vault_file,'vault',vault,vault['revision'])
+                trace=[];observer=SupervisorObserver(ctx['directory'],label)
+                try:
+                    with observer:
+                        self.service(ctx,label,trace).update_watch()
+                        after=self.wait(lambda:(value if (value:=self.status(ctx)) and value['pid'] != before['pid'] else None))
+                        # Cover launchd's default ten-second throttle after the first ready PID.
+                        time.sleep(15)
+                        final=self.status(ctx)
+                        if not final or final['pid'] != after['pid']:raise RuntimeError('안정 관측 중 supervisor 변경/정지')
+                finally:
+                    for row in observer.samples:
+                        if row['pid']:ctx['pids'].add(row['pid'])
+                        if variant=='B' and row['jobPid']:ctx['pids'].add(row['jobPid'])
+                    atomic_json(self.out/('update-'+variant+'-pid-samples.json'),{'samples':observer.samples,'errors':observer.errors})
+                if observer.errors:raise RuntimeError('PID 표본 추출 실패')
+                observed=restart_observation(observer.samples,before['pid'],after['pid'],variant)
+                stops=[i for i,c in enumerate(trace) if isinstance(c,list) and c[1:3]==['daemon','stop']]
+                kicks=[i for i,c in enumerate(trace) if isinstance(c,list) and 'kickstart' in c]
+                if len(kicks)!=1 or (variant=='B' and stops) or (variant=='A' and (len(stops)!=1 or stops[0]>=kicks[0])):
+                    raise RuntimeError('variant별 재시작 명령 계약 위반')
+                results.append({'variant':variant,'fakeAppVersion':'0.15.4','daemonVersion':after['daemonVersion'],
+                    'before':before['pid'],'after':after['pid'],'trace':trace,**observed,'stableObservationSeconds':15})
+            finally:self.stop(ctx)
+        return results
 
     def claude(self):
         cli=shutil.which('claude')

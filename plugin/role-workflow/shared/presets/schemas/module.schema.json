@@ -107,6 +107,13 @@
         ],
         "additionalProperties": false
       }
+    },
+    "defaultVariant": {
+      "type": "string",
+      "enum": [
+        "A",
+        "B"
+      ]
     }
   },
   "required": [
