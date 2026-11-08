@@ -60,7 +60,11 @@ class LauncherTests(unittest.TestCase):
             self.assertEqual(sent['CLAUDE_CODE_OAUTH_TOKEN'], 'fixture-token')
             self.assertEqual(sent['CLAUDE_CONFIG_DIR'], '/fixture/claude-home')
             self.assertNotIn('ANTHROPIC_API_KEY', sent)
-        with patch.dict(os.environ, {}, clear=True), patch.object(runtime, 'find_cli', return_value='/fixture/claude'), patch.object(runtime.os, 'execve') as execute:
+        # Never fall back to the real owner vault or Keychain: an empty environment once read the live token.
+        with patch.dict(os.environ, {}, clear=True), patch.object(runtime, 'find_cli', return_value='/fixture/claude'), \
+             patch.object(runtime, 'owner_vault', return_value={}), \
+             patch.object(runtime.subprocess, 'run', side_effect=AssertionError('keychain must not be read')), \
+             patch.object(runtime.os, 'execve') as execute:
             runtime.launch('claude', [])
             self.assertNotIn('CLAUDE_CODE_OAUTH_TOKEN', execute.call_args.args[2])
 

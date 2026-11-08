@@ -1,5 +1,6 @@
 """C36: explicit task dispatch, conservative daemon death, and rate-limited failure notices."""
 import json
+import os
 from pathlib import Path
 import plistlib
 import re
@@ -142,6 +143,36 @@ class C36Tests(unittest.TestCase):
         with mock.patch.object(setup, 'run', side_effect=run), mock.patch.object(setup.time, 'sleep'):
             setup.install_agent(label, content, self.home)
         self.assertTrue(state['loaded']); self.assertIn('bootstrap', state['calls']); self.assertNotIn('bootout', state['calls'])
+
+
+    def test_archive_root_follows_owner_decision(self):
+        service, _ = self.service()
+        service.now = lambda: 10**10
+        old = self.paseo_home/'codex-home/sessions/2026/01/01/a.jsonl'; old.parent.mkdir(parents=True); old.write_text('x')
+        root = self.home/'ssd-archive'
+        service.owner['decisions']['archiveRotate'] = {'root': str(root), 'days': 7, 'date': '2026-11-08'}
+        service.archive_rotate()
+        self.assertTrue((root/'codex-home/sessions/2026/01/01/a.jsonl').is_file())
+        self.assertFalse(old.exists())
+
+    def test_archive_skips_unmounted_external_volume_without_touching_records(self):
+        service, commands = self.service()
+        service.now = lambda: 10**10
+        old = self.paseo_home/'codex-home/sessions/2026/01/01/a.jsonl'; old.parent.mkdir(parents=True); old.write_text('x')
+        service.owner['decisions']['archiveRotate'] = {'root': os.path.join(os.sep, 'Volumes', 'paseo-fixture-absent', 'Archive'), 'days': 7, 'date': '2026-11-08'}
+        service.archive_rotate()
+        self.assertTrue(old.exists())
+        self.assertFalse(Path(os.sep, 'Volumes', 'paseo-fixture-absent').exists())
+        self.assertIn('destination-unavailable', (self.paseo_home/'airport/logs/archive-rotate.jsonl').read_text())
+
+    def test_setup_archive_records_owner_decision(self):
+        self.execute('install')
+        airport = fixtures.setup.Airport()
+        result = airport.set_archive(str(self.home/'ssd'), 14)
+        policy = json.loads((self.paseo_home/'owner/policy.json').read_text())
+        self.assertEqual(policy['decisions']['archiveRotate']['root'], str(self.home/'ssd'))
+        self.assertEqual(policy['decisions']['archiveRotate']['days'], 14)
+        with self.assertRaises(RuntimeError): airport.set_archive('relative/path')
 
 
 if __name__ == '__main__':

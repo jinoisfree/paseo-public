@@ -200,10 +200,23 @@ class Service:
                 present=False
             self.event('paseo-watchdog', 'binary', product=product, present=present)
 
+    def archive_root(self):
+        decision = self.owner.get('decisions', {}).get('archiveRotate', {})
+        return Path(decision['root']).expanduser() if decision.get('root') else self.home/'archive'
+
     def archive_rotate(self):
-        defaults = read(Path(__file__).parent.parent/'presets/recommended.json')
-        days = self.owner.get('decisions', {}).get('archiveRotate', {}).get('days', defaults['equipment']['archiveRotate']['afterDays'])
+        days = self.owner.get('decisions', {}).get('archiveRotate', {}).get('days')
+        if days is None:
+            # The installed preset copy is read only when the owner left the retention unset.
+            days = read(Path(__file__).parent.parent/'presets/recommended.json')['equipment']['archiveRotate']['afterDays']
         cutoff = self.now() - days*86400
+        root = self.archive_root()
+        parts = root.parts
+        # An owner-chosen external volume may be unmounted; never create the missing mount point on the boot disk.
+        if len(parts) > 2 and parts[1] == 'Volumes' and not os.path.ismount(os.path.join('/', parts[1], parts[2])):
+            self.event('archive-rotate', 'destination-unavailable', root=str(root))
+            self.notify('기록 보관 위치(외장 볼륨)가 연결돼 있지 않아 보관을 건너뜁니다.', key='archive-rotate:destination')
+            return
         for product in ('claude-home', 'codex-home'):
             base = self.home/product
             directory = base/('projects' if product == 'claude-home' else 'sessions')
@@ -211,7 +224,7 @@ class Service:
             for pattern in suffixes:
                 for source in directory.rglob(pattern):
                     if source.is_symlink() or not source.is_file() or source.stat().st_mtime >= cutoff: continue
-                    target = self.home/'archive'/product/source.relative_to(base)
+                    target = root/product/source.relative_to(base)
                     if target.exists():
                         if target.read_bytes() != source.read_bytes():
                             self.event('archive-rotate', 'collision');continue

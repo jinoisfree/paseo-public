@@ -186,13 +186,16 @@
               "type": "integer",
               "minimum": 1
             },
+            "root": {
+              "type": "string",
+              "pattern": "^/"
+            },
             "date": {
               "type": "string",
               "format": "date"
             }
           },
           "required": [
-            "days",
             "date"
           ],
           "additionalProperties": false

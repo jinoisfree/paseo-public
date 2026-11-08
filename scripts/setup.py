@@ -335,6 +335,21 @@ class Airport:
     def module_config(self):
         return {**self.config, 'moduleVariants': {m['id']: m['variant'] for m in self.module_plan()}}
 
+    def set_archive(self, root=None, days=None, dry_run=False):
+        """Owner decision for archive-rotate: where (e.g. an external SSD) and after how many days."""
+        if root is not None and not Path(root).expanduser().is_absolute():
+            raise RuntimeError('보관 위치는 절대경로여야 합니다.')
+        if days is not None and days < 1:
+            raise RuntimeError('보관 기준 일수는 1 이상이어야 합니다.')
+        policy = copy.deepcopy(self.policy)
+        decision = {**policy['decisions'].get('archiveRotate', {}), 'date': today()}
+        if root is not None: decision['root'] = str(Path(root).expanduser())
+        if days is not None: decision['days'] = days
+        policy['decisions']['archiveRotate'] = decision
+        if not dry_run:
+            self.policy = save_owner(self.policy_file, 'policy', policy, self.policy['revision'])
+        return {'archiveRotate': decision, 'dryRun': dry_run}
+
     def set_module(self, module_id, enabled, variant=None, dry_run=False):
         if not module_id or not re.fullmatch(r'[a-z][a-z0-9-]*', module_id):
             raise RuntimeError('알 수 없는 설비입니다.')
@@ -889,7 +904,7 @@ def verify_registration(paseo, home, after='install', plugin_id='role-workflow')
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['install', 'refresh', 'check', 'doctor', 'uninstall', 'enable', 'disable'])
+    parser.add_argument('action', choices=['install', 'refresh', 'check', 'doctor', 'uninstall', 'enable', 'disable', 'archive'])
     parser.add_argument('module', nargs='?')
     parser.add_argument('--variant', choices=['A', 'B'])
     parser.add_argument('--dry-run', action='store_true')
@@ -898,7 +913,11 @@ def main(argv=None):
     parser.add_argument('--with-auto-update', action='store_true')
     parser.add_argument('--replace-registration', action='store_true')
     parser.add_argument('--purge-owner', action='store_true')
+    parser.add_argument('--root', help='archive 전용: 기록 보관 절대경로(예: 외장 SSD)')
+    parser.add_argument('--days', type=int, help='archive 전용: 보관 기준 일수')
     args = parser.parse_args(argv)
+    if (args.root or args.days) and args.action != 'archive':
+        parser.error('--root·--days는 archive 전용입니다.')
     if (args.action in ('enable', 'disable')) != bool(args.module):
         parser.error('enable·disable에는 설비 id가 필요하며 다른 동작에는 쓰지 않습니다.')
     if args.variant and args.action != 'enable':
@@ -924,6 +943,10 @@ def main(argv=None):
         except ProfileRequired as error:
             print(json.dumps({'error': str(error), 'exitCode': 2}, ensure_ascii=False))
             return 2
+    if args.action == 'archive':
+        result = airport.set_archive(args.root, args.days, args.dry_run)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
     if args.action in ('enable', 'disable'):
         if not args.dry_run and os.geteuid() == 0:
             raise RuntimeError('sudo 없이 실행하세요.')
