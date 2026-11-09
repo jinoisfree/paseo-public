@@ -238,7 +238,7 @@ export const reviewOptions = defineRpc({
 });
 export const selectPlanReview = defineRpc({
   name: "workflow.select-plan-review",
-  input: z.object({ id: z.string(), holdId: z.number().int().positive(), enabled: z.boolean(),
+  input: z.object({ id: z.string(), holdId: z.number().int().positive().optional(), enabled: z.boolean(),
     provider: z.enum(["codex", "claude"]).optional(), model: z.string().optional(), thinking: z.string().optional(), extra: z.boolean().optional() }),
   output: z.object({ ok: z.boolean(), detail: z.string() }),
 });

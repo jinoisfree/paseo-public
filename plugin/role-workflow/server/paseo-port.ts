@@ -1,3 +1,4 @@
+import { resolveModelFromCatalog } from "./model-resolution";
 import { federationAvailability } from "./federation";
 import { contextUsage, contextRatio } from "../shared/compression";
 import { timelineSelections, timelineMode, timelineBrainstorm } from "./executor-selection";
@@ -538,6 +539,10 @@ export function createPort(
       const model = await resolveModel(api, w.cwd, member.config);
       await validateMode(api, base, w.cwd, member.config);
       member.config = { ...member.config, provider: `${base}/${model}` };
+      if (role === "reviewer" && base === "codex") {
+        // Provider-native, per-conversation options: never edit the owner's CLI config.
+        member.config.options = { ...member.config.options, sandbox_mode: "read-only", approval_policy: "never" };
+      }
       // Count code points, so an emoji at the limit is not split into a lone surrogate.
       const title = Array.from(
         decorateTitle(base, role, w.title, marker, {
@@ -841,34 +846,10 @@ async function archiveConversation(
 
 /** The model the conversation will run: the one asked for, or the provider's default. */
 async function resolveModel(api: OperationalApi, cwd: string, config: PaseoAgentConfig): Promise<string> {
-  const slash = config.provider.indexOf("/");
-  const base = slash === -1 ? config.provider : config.provider.slice(0, slash);
-  const requested = slash === -1 ? null : config.provider.slice(slash + 1);
+  const base = config.provider.split("/")[0];
   const catalog = await api.providers.listModels(base, { cwd });
   if (catalog.error) throw new Error(catalog.error);
-  const available = catalog.models?.filter((entry) => entry.isSelectable !== false);
-  const model =
-    requested === null
-      ? (available?.find((entry) => entry.isDefault) ?? available?.[0])
-      : available?.find((entry) => entry.id === requested);
-  if (!model)
-    throw new Error(
-      requested === null
-        ? `${base}의 실행 모델을 찾을 수 없습니다.`
-        : `${base}에 ${requested} 모델이 없습니다. 사용 가능: ${
-            catalog.models
-              ?.slice(0, 4)
-              .map((entry) => entry.id)
-              .join(", ") ?? "없음"
-          }`,
-    );
-  const thinking = config.thinkingOptionId;
-  const thinkingOptions = model.thinkingOptions ?? [];
-  if (thinking && !thinkingOptions.some((option) => option.id === thinking))
-    throw new Error(
-      `${model.id}에 ${thinking} 추론 정도가 없습니다. 사용 가능: ${thinkingOptions.map((option) => option.id).join(", ") || "없음"}`,
-    );
-  return model.id;
+  return resolveModelFromCatalog(config, catalog.models);
 }
 
 async function validateMode(

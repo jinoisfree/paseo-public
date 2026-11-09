@@ -32,7 +32,8 @@ const textOf = (content) =>
 // OpenAI Responses API, as Codex calls it through a custom model provider.
 function responses(parsed, res) {
   const settings = control();
-  const { mode = "text", command = "" } = settings;
+  const { mode = "text" } = settings;
+  let command = settings.command ?? "";
   let { text = "Done." } = settings;
   const input = Array.isArray(parsed.input) ? parsed.input : [];
   const toolOutput = input.findLast?.((item) => item.type === "function_call_output" || item.type === "custom_tool_call_output");
@@ -44,10 +45,11 @@ function responses(parsed, res) {
   const offered = JSON.stringify([parsed.tools ?? [], input.filter((item) => item.type === "additional_tools")]);
   const tools = [...offered.matchAll(/"name":"([a-z_]+)"/g)].map((match) => match[1]);
   const shell = ["exec", "shell", "exec_command", "shell_command"].find((name) => tools.includes(name));
-  const callsTool = mode === "tool" && !toolOutput && !!shell;
-  if (mode === "role" && !toolOutput) {
+  const callsTool = !toolOutput && !!shell && (mode === "tool" || (mode === "role" && role === "reviewer" && !!settings.reviewerCommand));
+  if (mode === "role" && role === "reviewer") command = settings.reviewerCommand ?? "";
+  if (mode === "role") {
     const list = settings[role] ?? [text];
-    text = list[Math.min(turns[role]++, list.length - 1)];
+    text = list[Math.min(toolOutput ? Math.max(0, turns[role]-1) : turns[role]++, list.length - 1)];
   }
   text = text.replaceAll("__PLAN_HASH__", /planHash: ([a-f0-9]{64})/.exec(textOf(lastUser?.content?.map?.(part => ({text:part.text ?? part.input_text})) ?? lastUser?.content))?.[1] ?? "");
   appendFileSync(
@@ -133,7 +135,8 @@ createServer((req, res) => {
     const toolResult = Array.isArray(lastUser?.content)
       ? lastUser.content.find((block) => block.type === "tool_result")
       : undefined;
-    const callsTool = mode === "tool" && !toolResult && (parsed.tools ?? []).some((tool) => tool.name === "Bash");
+    const questionCall = mode === "question" && !toolResult && (parsed.tools ?? []).some(tool => tool.name === "AskUserQuestion");
+    const callsTool = questionCall || (mode === "tool" && !toolResult && (parsed.tools ?? []).some((tool) => tool.name === "Bash"));
     appendFileSync(
       logFile,
       JSON.stringify({
@@ -163,11 +166,11 @@ createServer((req, res) => {
     const model = parsed.model ?? "claude-fixture";
     const usage = { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
     if (callsTool) {
-      const input = { command, description: "fixture command" };
+      const input = questionCall ? { questions: settings.questions } : { command, description: "fixture command" };
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
       for (const [event, data] of [
         ["message_start", { type: "message_start", message: { id, type: "message", role: "assistant", model, content: [], stop_reason: null, stop_sequence: null, usage } }],
-        ["content_block_start", { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: `toolu_${Date.now()}`, name: "Bash", input: {} } }],
+        ["content_block_start", { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: `toolu_${Date.now()}`, name: questionCall ? "AskUserQuestion" : "Bash", input: {} } }],
         ["content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: JSON.stringify(input) } }],
         ["content_block_stop", { type: "content_block_stop", index: 0 }],
         ["message_delta", { type: "message_delta", delta: { stop_reason: "tool_use", stop_sequence: null }, usage: { output_tokens: 5 } }],

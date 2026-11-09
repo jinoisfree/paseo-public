@@ -14,7 +14,7 @@ import { ownerPolicySchema } from '../shared/owner-policy.ts';
 
 async function setup(t) {
   const f = await fixture(t, { contract: 7 });
-  f.port.reviewerModes = async provider => ({ enabled: true, modes: provider === 'codex' ? ['read-only','full-access'] : ['plan','bypassPermissions'] });
+  f.port.reviewerModes = async provider => ({ enabled: true, modes: provider === 'codex' ? ['auto','full-access'] : ['plan','bypassPermissions'] });
   await f.say('', 'plan', { next: '작업 ID: test\ndocs/changes/test/handoff.md 구현' });
   return f;
 }
@@ -58,7 +58,7 @@ test('AC-4/5: read-only review precedes approval and executor delivery', async t
   let w = await f.live();
   assert.equal(w.planReview.round, 1); assert.equal(w.cycles, 0);
   assert.deepEqual(f.created.map(c=>c.role), ['reviewer']);
-  assert.equal(f.created[0].m.config.modeId, 'read-only');
+  assert.equal(f.created[0].m.config.modeId, 'auto');
   assert.match(f.sent[0].prompt, new RegExp(w.heldApproval.decisionHash));
   assert.match(f.sent[0].prompt, /handoff.md 구현/);
   assert.equal((await f.engine.selectExecutor(f.id,{...choice,holdId:1})).ok,false);
@@ -129,7 +129,7 @@ test('reviewer thinking re-selection applies the exact choice in a separate read
   f.port.models=async()=>[{id:'builder',label:'Builder',thinkingOptions:[{id:'high',label:'High'},{id:'low',label:'Low'}]}];
   await f.engine.selectPlanReview(f.id,{...choice,thinking:'low',enabled:true,holdId:1});
   const w=await f.live();assert.notEqual(w.reviewer.id,first);assert.equal(w.reviewer.config.thinkingOptionId,'low');
-  assert.equal(w.reviewer.config.modeId,'read-only');assert.equal(w.reviewer.generation,2);assert.ok(w.history.includes(first));
+  assert.equal(w.reviewer.config.modeId,'auto');assert.equal(w.reviewer.generation,2);assert.ok(w.history.includes(first));
 });
 for(const status of ['plan','complete','continue','note'])test(`AC-10: reviewer ${status} is assignment error`,async t=>{
   const f=await setup(t);await enable(f);await reply(f,'reviewer',status);
@@ -154,7 +154,7 @@ test('AC-10: public planner/executor events reject foreign verdicts without chan
 test('AC-11: same model, disabled product, and missing mode are rejected by live server eligibility',async t=>{
   const f=await setup(t);f.port.models=async()=>[{id:'planner',label:'Planner',thinkingOptions:[{id:'high',label:'High'}]}];
   await assert.rejects(f.engine.selectPlanReview(f.id,{enabled:true,provider:'claude',model:'planner',thinking:'high',holdId:1}),/다른/);
-  f.port.reviewerModes=async()=>({enabled:false,modes:['plan','read-only']});
+  f.port.reviewerModes=async()=>({enabled:false,modes:['plan','auto']});
   const disabled=await f.engine.reviewOptions(f.id);assert.ok(disabled.providers.every(p=>p.reason));
   await assert.rejects(f.engine.selectPlanReview(f.id,{...choice,model:'planner',enabled:true,holdId:1}),/꺼진/);
   f.port.reviewerModes=async()=>({enabled:true,modes:['full-access']});
@@ -265,7 +265,7 @@ test('AC-18: reviewer instructions are read-only, bounded, idempotent and includ
   }
 });
 test('AC-19: reviewer modes are recommended, policy-valid, and classified in ownership',async()=>{
-  assert.equal(recommendedSettings.reviewerMode,'read-only');assert.equal(recommendedSettings.claudeReviewerMode,'plan');
+  assert.equal(recommendedSettings.reviewerMode,'auto');assert.equal(recommendedSettings.claudeReviewerMode,'plan');
   const schema=JSON.parse(await readFile(new URL('../shared/presets/schemas/policy.schema.json',import.meta.url),'utf8'));
   const ownership=JSON.parse(await readFile(new URL('../shared/presets/ownership.json',import.meta.url),'utf8'));
   for(const key of ['reviewerMode','claudeReviewerMode']){assert.ok(schema.properties.roleWorkflow.properties[key]);assert.equal(ownership.roleWorkflowSettings[key].slot,'policy');}

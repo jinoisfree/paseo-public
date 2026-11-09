@@ -12,6 +12,7 @@ import React,{useState} from 'react';import {createRoot} from 'react-dom/client'
 window.calls=[];window.w={id:'task',contract:7,mode:'federated',status:'needs_input',executeAgentId:null,firstPlan:true,heldPlan:true,heldApproval:{id:1,summary:'계획',handoff:'handoff.md',decisionHash:'a'.repeat(64)},selection:{provider:'codex',model:'builder',thinking:'high'},reviewSelection:{enabled:null},planReview:{stage:'waiting_choice',round:0,maxRounds:2,path:'docs/changes/test/plan-review.md',verdict:null,outcome:null}};
 window.options=async()=>({providers:[{provider:'codex',mode:'read-only',reason:'읽기 전용 모드 없음',models:[]},{provider:'claude',mode:'plan',reason:null,models:[{id:'same',label:'Same planner',reason:'계획담당과 같은 모델',thinkingOptions:[]},{id:'other',label:'Other reviewer',reason:null,thinkingOptions:[{id:'high',label:'Review high'}]}]}]});
 if(location.search.includes('none'))window.options=async()=>({providers:[{provider:'codex',mode:'read-only',reason:'읽기 전용 모드 없음',models:[]},{provider:'claude',mode:'plan',reason:'꺼진 제품',models:[]}]});
+if(location.search.includes('early'))Object.assign(window.w,{brainstorm:true,heldApproval:null,heldPlan:false,reviewSelection:{enabled:true}});
 window.models=async()=>({models:[{id:'builder',label:'Builder',thinkingOptions:[{id:'high',label:'High'}]}],error:null});
 window.choose=async input=>{window.calls.push(input);return {ok:true,detail:'구현 승인'};};
 window.review=async input=>{window.calls.push(input);window.w={...window.w,reviewSelection:{...input},planReview:{...window.w.planReview,stage:input.enabled?'reviewing':'off',round:input.enabled?1:0}};return {ok:true,detail:'확인'};};
@@ -44,6 +45,15 @@ createRoot(document.getElementById('root')).render(<App/>);
   await page.goto(`http://127.0.0.1:${server.address().port}?none=1`);
   await page.getByText('적격 검증 후보가 없습니다. 켜진 제품·다른 모델·읽기 전용 모드를 확인하세요.',{exact:true}).waitFor();
   assert.equal(await page.getByRole('button',{name:'켜기',exact:true}).isDisabled(),true);assert.deepEqual(await page.evaluate(()=>window.calls),[]);
+  await page.goto(`http://127.0.0.1:${server.address().port}?early=1`);
+  await page.getByRole('button',{name:'claude',exact:true}).click();
+  await page.getByRole('button',{name:'Other reviewer',exact:true}).click();
+  await page.getByRole('button',{name:'Review high',exact:true}).click();
+  await page.getByRole('button',{name:'검증 담당 초안 저장',exact:true}).click();
+  assert.deepEqual(await page.evaluate(()=>window.calls),[{id:'task',enabled:true,provider:'claude',model:'other',thinking:'high'}]);
+  await page.getByRole('button',{name:'구현 담당 초안 저장',exact:true}).click();
+  assert.deepEqual(await page.evaluate(()=>window.calls.at(-1)),{id:'task',provider:'codex',model:'builder',thinking:'high'});
+  assert.deepEqual(errors,[]);
   await page.close();
  }
 });

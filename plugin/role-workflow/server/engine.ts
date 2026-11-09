@@ -585,7 +585,7 @@ export class WorkflowEngine {
   private readonly permissions = new Set<string>();
   // Flows showing a permission wait this tick; a second status line must not fight it.
   private readonly asking = new Set<string>();
-  private readonly modeQuestions = new Map<string, { question: string; header?: string }>();
+  private readonly modeQuestions = new Map<string, { question: string; header?: string; review?: { question: string; header: string } }>();
   private readonly pickerInFlight = new Map<string, Promise<void>>();
   private savedDatabase: string | undefined;
   private readonly savedHandoffs = new Map<string, string>();
@@ -833,10 +833,16 @@ export class WorkflowEngine {
     // A failed post leaves the plan card and dashboard pickers as the fallback.
     for (const w of pickers) void this.port.executorPicker?.(w.plan!.id, w.id).catch(() => {});
     for (const w of db.workflows) {
-      if (this.firstPlan(w) && w.heldApproval && w.pickerPostedFor !== w.heldApproval.id)
+      const earlyCard = capabilities(w).planReview && w.brainstorm && w.pickerPosted && w.pickerPostedFor === 0;
+      if (this.firstPlan(w) && (this.earlyReviewPicker(w) || earlyCard)) {
+        if (!w.pickerPosted) void this.ensurePickerCard(w.id, 0);
+      } else if (this.firstPlan(w) && w.heldApproval && w.pickerPostedFor !== w.heldApproval.id)
         void this.ensurePickerCard(w.id, w.heldApproval.id);
       await this.saveHandoff(w);
     }
+  }
+  private earlyReviewPicker(w: Workflow) {
+    return capabilities(w).planReview && w.brainstorm && w.reviewSelection.enabled === true;
   }
   private firstPlan(w: Workflow) {
     return capabilities(w).firstPlanGate && !w.execute && !w.lastInstruction;
@@ -854,11 +860,18 @@ export class WorkflowEngine {
     if (running) return running;
     const request = (async () => {
       const w = (await this.db()).workflows.find(w => w.id === workflowId);
-      if (!w?.plan || w.heldApproval?.id !== holdId || !this.port.ensurePickerCard) return;
-      const posted = await this.port.ensurePickerCard(w.plan.id, w.id, { ...w.heldApproval });
+      if (!w?.plan || !this.port.ensurePickerCard) return;
+      const early = holdId === 0 && this.earlyReviewPicker(w);
+      if (!early && w.heldApproval?.id !== holdId) return;
+      const posted = await this.port.ensurePickerCard(w.plan.id, w.id, early ? { id: 0, decisionHash: "" } : { ...w.heldApproval! });
       if (posted) await this.serial(async () => {
-        if (w.heldApproval?.id !== holdId) return;
-        w.pickerPostedFor = holdId;
+        if (early) {
+          w.pickerPosted = true;
+          w.pickerPostedFor = 0;
+        } else {
+          if (w.heldApproval?.id !== holdId) return;
+          w.pickerPostedFor = holdId;
+        }
         await this.save();
       });
     })().catch(() => {}).finally(() => { this.pickerInFlight.delete(key); });
@@ -1036,15 +1049,16 @@ export class WorkflowEngine {
       return { providers: await this.planReviewGate.options(w) };
     });
   }
-  selectPlanReview(id: string, choice: { holdId: number; enabled: boolean; provider?: "codex" | "claude"; model?: string; thinking?: string; extra?: boolean }) {
+  selectPlanReview(id: string, choice: { holdId?: number; enabled: boolean; provider?: "codex" | "claude"; model?: string; thinking?: string; extra?: boolean }) {
     return this.serial(async () => {
       const w = (await this.db()).workflows.find(w => w.id === id);
       if (!w || !capabilities(w).planReview || !this.firstPlan(w)) throw new Error("첫 계획에서만 검증을 선택할 수 있습니다.");
-      if (w.heldApproval?.id !== choice.holdId) return { ok: false, detail: "계획이 바뀌었습니다. 현재 계획을 다시 확인하세요." };
+      const draft = this.earlyReviewPicker(w) && !w.heldApproval && choice.holdId === undefined && !choice.extra;
+      if (!draft && (!choice.holdId || w.heldApproval?.id !== choice.holdId)) return { ok: false, detail: "계획이 바뀌었습니다. 현재 계획을 다시 확인하세요." };
       await this.planReviewGate.choose(w, choice);
       await this.save();
-      if (w.status === "active") await this.advance(w);
-      return { ok: true, detail: w.detail };
+      if (!draft && w.status === "active") await this.advance(w);
+      return { ok: true, detail: draft ? "검증 담당 초안을 저장했습니다. 첫 계획이 나오면 검증합니다." : w.detail };
     });
   }
   /** The executor chosen on the plugin screen; a held plan goes out once it is valid. */
@@ -1063,6 +1077,10 @@ export class WorkflowEngine {
         } catch (error) { draft.error = error instanceof Error ? error.message : String(error); }
         w.selectionDraft = draft;
         const hold = w.heldApproval;
+        if (this.earlyReviewPicker(w) && !hold && choice.holdId === undefined) {
+          await this.save();
+          return { ok: draft.stage === "ready", detail: draft.error || "구현 담당 초안을 저장했습니다. 구현 승인은 검증 뒤 가능합니다." };
+        }
         if (!choice.holdId || hold?.id !== choice.holdId || !w.selectionPlan ||
             w.inbox?.key !== w.selectionPlan || w.selectionPlan !== hold.inboxKey) {
           await this.save();
@@ -2703,7 +2721,11 @@ export class WorkflowEngine {
             )
           : undefined;
         if (question) {
-          this.modeQuestions.set(key, { question: question.question, header: question.header });
+          const review = w.contract >= 7 && w.brainstorm && w.mode === "undecided" && parsed.success
+            ? parsed.data.questions.find(item => item.question === "계획 검증을 켤까요?" && item.header === "계획검증" &&
+              item.options.length === 2 && item.options.some(o => o.label === "켜기") && item.options.some(o => o.label === "끄기")) : undefined;
+          this.modeQuestions.set(key, { question: question.question, header: question.header,
+            ...(review ? { review: { question: review.question, header: review.header! } } : {}) });
           if (this.modeQuestions.size > 200)
             this.modeQuestions.delete(this.modeQuestions.keys().next().value!);
         }
@@ -2759,8 +2781,15 @@ export class WorkflowEngine {
         return;
       }
       const mode = label === "일반개발" ? "general" : "federated";
-      if (!w || !w.plan || w.mode === mode) return;
-      await this.applyModeChoice(w, agentId, mode);
+      if (!w || !w.plan) return;
+      if (w.mode !== mode) await this.applyModeChoice(w, agentId, mode);
+      if (w.contract >= 7 && question.review && label === "연합개발" && w.mode === "federated" && this.firstPlan(w)) {
+        const values = [question.review.question, question.review.header].filter(key => Object.hasOwn(answers, key)).map(key => answers[key]);
+        if (values.length && values.every(value => value === values[0]) && (values[0] === "켜기" || values[0] === "끄기")) {
+          w.reviewSelection.enabled = values[0] === "켜기";
+          await this.save();
+        }
+      }
     });
   }
   async federationStatus(cwd?: string) {

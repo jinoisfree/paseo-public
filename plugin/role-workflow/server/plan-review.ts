@@ -1,3 +1,4 @@
+import { resolveModelFromCatalog } from "./model-resolution";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { capabilities } from "../shared/capabilities";
@@ -22,7 +23,13 @@ export class PlanReviewGate {
   async options(w: Workflow) {
     const settings = await this.host.settings();
     const planner = w.plan ? await this.host.port().inspect(w.plan.id) : null;
-    const plannerModel = planner?.config?.provider ?? w.plan?.config.provider ?? "";
+    const plannerConfig = planner?.config ?? w.plan?.config;
+    let plannerModel = plannerConfig?.provider ?? "";
+    if (plannerConfig && !plannerModel.includes("/") && this.host.port().models && (plannerModel === "codex" || plannerModel === "claude")) {
+      try {
+        plannerModel += "/" + resolveModelFromCatalog(plannerConfig, await this.host.port().models!(plannerModel, w.cwd));
+      } catch { /* An unknown default keeps the existing same-provider rejection. */ }
+    }
     return Promise.all((["codex", "claude"] as const).map(async provider => {
       const mode = provider === "codex" ? settings.reviewerMode : settings.claudeReviewerMode;
       try {
@@ -121,7 +128,7 @@ export class PlanReviewGate {
     // The document folder is carried by the planner's handoff; never invent a second writer.
     const document = /(?:^|[\s"'`(])((?:\/|docs\/)[^\s"'`<>)]*\/)(?:handoff|design)\.md/.exec(`${d.next}\n${d.handoff}`);
     review.path = document ? `${document[1]}plan-review.md` : "docs/changes/" + w.id + "/plan-review.md";
-    if (w.reviewSelection.enabled === null) {
+    if (w.reviewSelection.enabled === null || w.reviewSelection.stage !== "ready") {
       review.stage = "waiting_choice"; this.restore(w);
       this.host.touch(w, "계획 검증 켜기/끄기를 선택하세요. 구현 승인은 검증 선택 뒤 가능합니다.");
       return true;

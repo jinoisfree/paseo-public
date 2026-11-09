@@ -757,6 +757,59 @@ try {
     } finally {writeFileSync(control,JSON.stringify({mode:"text",text:"2"}));}
   });
 
+  await step("AC-22/26: brainstorming enables an early picker and a real Codex reviewer cannot write", async () => {
+    const ownerFiles=[join(home,"config.json"),join(root,"codex-home","config.toml"),policyFile];
+    const ownerBefore=ownerFiles.map(file=>createHash("sha256").update(readFileSync(file)).digest("hex"));
+    writeFileSync(control,JSON.stringify({mode:"role",scenario:"early-review-brainstorm",plan:[workflowBlock("note","")]}));
+    try {
+      const planner=await runAgent("브레인스토밍");
+      let flow=await waitFor("early brainstorm enrollment",async()=>state().workflows.find(w=>w.plan?.id===planner&&w.brainstorm));
+      const questions=[
+        {question:"진행 방식을 선택하세요",header:"방식",multiSelect:false,options:["일반개발","연합개발","개발 안 함"].map(label=>({label,description:label}))},
+        {question:"계획 검증을 켤까요?",header:"계획검증",multiSelect:false,options:["켜기","끄기"].map(label=>({label,description:label}))},
+      ];
+      writeFileSync(control,JSON.stringify({mode:"question",questions,text:workflowBlock("note","")}));
+      const api=createPaseoApi(client),agent=api.agents.ref(planner);
+      await agent.send("브레인스토밍을 끝내고 질문해줘.");
+      const permission=await waitFor("two question permission",async()=>{
+        const a=(await agent.refresh())?.agent;return a?.pendingPermissions.find(p=>p.kind==="question");
+      },60000);
+      await agent.respondToPermission({requestId:permission.id,response:{behavior:"allow",updatedInput:{questions,answers:{"진행 방식을 선택하세요":"연합개발","계획 검증을 켤까요?":"켜기"}}}});
+      flow=await waitFor("early picker without plan",async()=>state().workflows.find(w=>w.id===flow.id&&w.reviewSelection.enabled===true&&w.pickerPosted));
+      assert(!flow.heldApproval&&!flow.execute,"early choice approved or held a plan");
+      const earlyId=`role-workflow-executor-picker:${flow.id}:0`;
+      const cards=async()=>(await agent.timeline.refetch({direction:"tail",limit:200})).entries.filter(e=>e.item.type==="plugin"&&e.item.kind==="executor-picker");
+      assert((await cards()).length===1&&(await cards())[0].item.id===earlyId,"early card missing or duplicated");
+      const row=(await rpc("workflow.review-options",{id:flow.id})).providers.find(p=>p.provider==="codex");
+      const model=row?.models.find(m=>!m.reason);assert(model,"Codex read-only reviewer is ineligible");
+      const thinking=model.thinkingOptions?.find(o=>o.isDefault)?.id??model.thinkingOptions?.[0]?.id??"";
+      const choice={id:flow.id,provider:"codex",model:model.id,thinking};
+      assert((await rpc("workflow.select-plan-review",{...choice,enabled:true})).ok,"early reviewer draft failed");
+      assert((await rpc("workflow.select-executor",choice)).ok,"early executor draft failed");
+      const target=join(work,"codex-reviewer-must-not-exist.txt");
+      const before=(await run("git",["status","--porcelain=v1"],{cwd:work})).stdout;
+      const verdict={status:"result",summary:"읽기 전용 검증",next:"",handoff:"쓰기 거부 후 판정",checks:[],planReview:{planHash:"__PLAN_HASH__",verdict:"APPROVED",findings:[]}};
+      writeFileSync(control,JSON.stringify({mode:"role",scenario:"codex-readonly",plan:[workflowBlock("plan","docs/changes/review/handoff.md 구현"),workflowBlock("note",""),workflowBlock("input","검토 끝")],reviewer:[`<paseo-workflow>${JSON.stringify(verdict)}</paseo-workflow>`],reviewerCommand:"printf forbidden > codex-reviewer-must-not-exist.txt"}));
+      await agent.send("첫 계획을 확정해줘.");
+      flow=await waitFor("Codex verdict parsed and recorded",async()=>state().workflows.find(w=>w.id===flow.id&&w.planReview.stage==="passed"),120000);
+      const calls=readFileSync(modelLog,"utf8").trim().split("\n").map(line=>JSON.parse(line)).filter(c=>c.role==="reviewer"&&c.mode==="role"&&c.api==="responses");
+      const outputs=calls.filter(c=>c.toolResult).map(c=>c.toolResult).join("\n");
+      assert(calls.some(c=>c.callsTool),"Codex did not attempt its real shell tool");
+      assert(/Operation not permitted|Read-only file system|Permission denied|sandbox.*denied/i.test(outputs),`write was not denied: ${outputs}`);
+      assert(!existsSync(target),"read-only reviewer wrote a file");
+      assert(before===(await run("git",["status","--porcelain=v1"],{cwd:work})).stdout,"reviewer changed the worktree");
+      assert(flow.planReview.verdict.verdict==="APPROVED"&&flow.planReview.verdict.planHash===flow.heldApproval.decisionHash,"verdict did not parse with the held hash");
+      assert(!flow.execute&&flow.approvedHold===0,"early draft approved implementation");
+      assert((await cards()).length===1,"held plan duplicated the early picker");
+      const reviewer=JSON.parse(readFileSync(agentFile(flow.reviewer.id),"utf8"));
+      assert(reviewer.config.providerOptions.sandbox_mode==="read-only"&&reviewer.config.providerOptions.approval_policy==="never","per-conversation sandbox options missing");
+      const ownerAfter=ownerFiles.map(file=>createHash("sha256").update(readFileSync(file)).digest("hex"));
+      assert(JSON.stringify(ownerBefore)===JSON.stringify(ownerAfter),"owner config changed");
+      writeFileSync(join(root,"codex-readonly-observation.json"),JSON.stringify({workflowId:flow.id,model:model.id,mode:row.mode,providerOptions:reviewer.config.providerOptions,toolOutput:outputs,writeDenied:true,worktreeUnchanged:true,ownerBefore,ownerAfter,verdict:flow.planReview.verdict,earlyCards:1},null,2));
+      await rpc("workflow.control",{id:flow.id,action:"pause"});
+    } finally {writeFileSync(control,JSON.stringify({mode:"text",text:"2"}));}
+  });
+
   await step("the plugin logged no errors", async () => {
     const logs = (await cli("plugin", "logs", "role-workflow")).stdout + (await cli("plugin", "logs", "codex-usage")).stdout;
     const errors = logs.split("\n").filter((line) => /\bstderr\b|role-workflow:/.test(line));
