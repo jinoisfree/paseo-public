@@ -9,6 +9,8 @@ import type { PlanReview, ReviewSelection } from "../shared/plan-review";
 import { type executorPickerCardSchema, picksExecutor, pickerDefaultThinking, pickerThinking } from "../shared/executor-picker";
 import type { WorkflowProvider } from "../shared/assignment";
 
+type ReviewChoice = { enabled: boolean | null; provider: WorkflowProvider | null; model: string; thinking: string | null };
+
 type Workflow = Parameters<typeof picksExecutor>[0] & {
   id: string;
   planAgentId?: string | null;
@@ -16,6 +18,7 @@ type Workflow = Parameters<typeof picksExecutor>[0] & {
   firstPlan?: boolean;
   brainstorm?: boolean;
   implementationReserved?: boolean;
+  reservedPlacement?: "worktree" | "wait" | null;
   heldApproval?: { id: number; decisionHash: string; summary: string; handoff: string } | null;
   selection?: { provider?: WorkflowProvider | null; model?: string; thinking?: string | null; error?: string } | null;
   reviewSelection?: Pick<Partial<ReviewSelection>, "enabled" | "provider" | "model" | "thinking">;
@@ -52,7 +55,8 @@ export function ExecutorPicker({
   workflow,
   theme,
   onChanged,
-}: { workflow: Workflow; theme: PluginHostProps["theme"]; onChanged?: () => void }) {
+  placementDefault = "ask",
+}: { workflow: Workflow; theme: PluginHostProps["theme"]; onChanged?: () => void; placementDefault?: "ask" | "worktree" | "wait" }) {
   const readModels = useRpc(models),
     choose = useRpc(selectExecutor);
   const cancelReservation = useRpc(cancelImplementationReservation);
@@ -60,13 +64,17 @@ export function ExecutorPicker({
   // Capture what is displayed. Polling must not silently approve a newer hold.
   const [approval] = useState(workflow.heldApproval);
   const gated = workflow.firstPlan ?? (workflow.contract ?? 1) >= 6;
-  const earlyDraft = (workflow.contract ?? 1) >= 7 && workflow.brainstorm && workflow.reviewSelection?.enabled === true && !approval;
+  const earlyDraft = (workflow.contract ?? 1) >= 7 && workflow.mode === "federated" && !approval;
   const canSubmit = !gated || !!approval || earlyDraft;
   const review = workflow.planReview;
   const reviewRequired = (workflow.contract ?? 1) >= 7;
   const reviewReady = earlyDraft || !reviewRequired || (workflow.reviewSelection?.enabled === false && !["reviewing", "revising"].includes(review?.stage ?? "")) ||
     (!!approval && review?.stage === "passed" && review.hash === approval.decisionHash);
   const canReserve = reviewRequired && workflow.reviewSelection?.enabled === true && !!approval && ["reviewing", "revising"].includes(review?.stage ?? "");
+  const [reviewChoice, setReviewChoice] = useState<ReviewChoice>({ enabled: workflow.reviewSelection?.enabled ?? null,
+    provider: workflow.reviewSelection?.provider ?? null, model: workflow.reviewSelection?.model ?? "", thinking: workflow.reviewSelection?.thinking ?? null });
+  const [reviewValid, setReviewValid] = useState(false);
+  const [placement, setPlacement] = useState<"worktree" | "wait" | null>(workflow.reservedPlacement ?? (placementDefault === "ask" ? null : placementDefault));
   const [provider, setProvider] = useState<WorkflowProvider>(s?.provider ?? "codex");
   const [catalog, setCatalog] = useState<{ models: ExecutorModel[]; error: string | null } | null>(null);
   const [model, setModel] = useState(s?.provider === provider ? (s.model ?? "") : "");
@@ -86,10 +94,11 @@ export function ExecutorPicker({
   }, [provider, readModels]);
   const selected = catalog?.models.find((row) => row.id === model);
   const submit = useCallback(async (unverified = false, reserve = false) => {
-    if (!canSubmit || !model || thinking === null) return;
+    if (!canSubmit || !model || thinking === null || (earlyDraft && (!reviewValid || !placement))) return;
     setBusy(true);
     try {
-      const result = await choose({ id: workflow.id, provider, model, thinking, ...(gated && approval ? {holdId: approval.id} : {}), ...(unverified ? {unverified:true} : {}), ...(reserve ? {reserve:true} : {}) });
+      const result = await choose({ id: workflow.id, provider, model, thinking, ...(gated && approval ? {holdId: approval.id} : {}), ...(unverified ? {unverified:true} : {}), ...(reserve ? {reserve:true} : {}),
+        ...(earlyDraft ? { review: { enabled: reviewChoice.enabled!, ...(reviewChoice.enabled ? {provider: reviewChoice.provider!, model: reviewChoice.model, thinking: reviewChoice.thinking!} : {}) }, placement } : {}) });
       setMessage(result.detail);
       onChanged?.();
     } catch (error) {
@@ -97,16 +106,16 @@ export function ExecutorPicker({
     } finally {
       setBusy(false);
     }
-  }, [choose, model, onChanged, provider, thinking, workflow.id, gated, approval, canSubmit]);
+  }, [choose, model, onChanged, provider, thinking, workflow.id, gated, approval, canSubmit, earlyDraft, reviewValid, reviewChoice, placement]);
   return (
     <View testID="executor-picker" style={styles.box}>
       <Text style={styles.text}>
         {workflow.heldPlan ? "구현 담당을 선택하면 보관한 계획을 바로 전달합니다." : "구현 담당 선택"}
       </Text>
-      {gated && !approval && <Text style={styles.muted}>{earlyDraft ? "검증을 통과하면 이 담당으로 바로 구현을 시작합니다." : "계획이 나오면 그 계획을 확인하고 구현 담당을 고르면 전달합니다."}</Text>}
+      {gated && !approval && <Text style={styles.muted}>{earlyDraft ? (reviewChoice.enabled === false ? "계획이 나오면 바로 구현을 시작합니다. 계획 확인 없이 구현이 시작됩니다." : "검증을 통과하면 이 담당으로 바로 구현을 시작합니다.") : "계획이 나오면 그 계획을 확인하고 구현 담당을 고르면 전달합니다."}</Text>}
       {gated && approval && <Text selectable style={styles.text}>{`보관 계획 #${approval.id}\n${approval.summary}\n${approval.handoff}`}</Text>}
       {!!s?.error && <Text style={styles.muted}>{s.error}</Text>}
-      {reviewRequired && <PlanReviewPicker workflow={workflow} approval={approval} theme={theme} onChanged={onChanged} />}
+      {reviewRequired && <PlanReviewPicker workflow={workflow} approval={approval} theme={theme} onChanged={onChanged} choice={reviewChoice} onChoice={setReviewChoice} onValid={setReviewValid} />}
       <View style={styles.row}>
         {PROVIDERS.map(([id, label]) => option(label, provider === id, () => {
           setProvider(id); setModel(""); setThinking(null);
@@ -124,16 +133,24 @@ export function ExecutorPicker({
           {pickerThinking(selected).map((row) => option(row.label, thinking === row.id, () => setThinking(row.id), row.id || "none"))}
         </View>
       )}
+      {earlyDraft && <>
+        <Text style={styles.text}>겹칠 때 배치</Text>
+        <Text style={styles.muted}>같은 저장소의 작업과 겹칠 때만 적용합니다.</Text>
+        <View style={styles.row}>
+          {option("워크트리", placement === "worktree", () => setPlacement("worktree"))}
+          {option("앞 작업 대기", placement === "wait", () => setPlacement("wait"))}
+        </View>
+      </>}
       {!reviewReady && <Text style={styles.muted}>계획 검증 선택·판정·기록이 끝날 때까지 구현 승인은 비활성입니다.</Text>}
-      <Pressable accessibilityRole="button" disabled={busy || !canSubmit || !reviewReady || !model || thinking === null} onPress={() => void submit()}
+      <Pressable accessibilityRole="button" disabled={busy || !canSubmit || !reviewReady || !model || thinking === null || (earlyDraft && (!reviewValid || !placement))} onPress={() => void submit()}
         style={styles.choice}>
         <Text style={model && thinking !== null ? styles.text : styles.muted}>
-          {busy ? "확인 중…" : earlyDraft ? "구현 담당 초안 저장" : "이 담당으로 확정"}
+          {busy ? "확인 중…" : earlyDraft ? "이 설정으로 자동 진행" : "이 담당으로 확정"}
         </Text>
       </Pressable>
       {canReserve && option("검증 통과 시 구현 시작", false, () => void submit(false, true), "reserve", !model || thinking === null)}
       {workflow.implementationReserved && <>
-        <Text style={styles.text}>구현 시작 예약됨 — 검증 통과 후 자동으로 시작합니다.</Text>
+        <Text style={styles.text}>구현 시작 예약됨 — {workflow.reviewSelection?.enabled === false ? "계획이 나오면 바로 구현을 시작합니다." : "검증 통과 후 자동으로 시작합니다."}</Text>
         {option("예약 취소", false, () => { void (async () => {
           setBusy(true);
           try { const result = await cancelReservation({id:workflow.id}); setMessage(result.detail); onChanged?.(); }
@@ -149,15 +166,14 @@ export function ExecutorPicker({
   );
 }
 
-function PlanReviewPicker({ workflow, approval, theme, onChanged }: {
+function PlanReviewPicker({ workflow, approval, theme, onChanged, choice, onChoice, onValid }: {
   workflow: Workflow; approval: Workflow["heldApproval"]; theme: PluginHostProps["theme"]; onChanged?: () => void;
+  choice: ReviewChoice; onChoice: (choice: ReviewChoice) => void; onValid: (valid: boolean) => void;
 }) {
   const read = useRpc(reviewOptions), choose = useRpc(selectPlanReview);
   const [catalog, setCatalog] = useState<Awaited<ReturnType<typeof read>> | null>(null);
-  const [enabled, setEnabled] = useState<boolean | null>(workflow.reviewSelection?.enabled ?? null);
-  const [provider, setProvider] = useState<WorkflowProvider | null>(workflow.reviewSelection?.provider ?? null);
-  const [model, setModel] = useState(workflow.reviewSelection?.model ?? "");
-  const [thinking, setThinking] = useState<string | null>(workflow.reviewSelection?.thinking ?? null);
+  const { enabled, provider, model, thinking } = choice;
+  const update = (patch: Partial<ReviewChoice>) => onChoice({ ...choice, ...patch });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const c = theme.colors, review = workflow.planReview;
@@ -169,8 +185,10 @@ function PlanReviewPicker({ workflow, approval, theme, onChanged }: {
   const available = catalog?.providers.some(p => p.models.some(m => !m.reason)) ?? false;
   const models = catalog?.providers.find(p => p.provider === provider)?.models ?? [];
   const selected = models.find(m => m.id === model);
-  const earlyDraft = (workflow.contract ?? 1) >= 7 && workflow.brainstorm && workflow.reviewSelection?.enabled === true && !approval;
+  const earlyDraft = (workflow.contract ?? 1) >= 7 && workflow.mode === "federated" && !approval;
   const pending = ["reviewing", "revising"].includes(review?.stage ?? "");
+  const valid = enabled === false || !!(enabled && !pending && provider && selected && !selected.reason && thinking !== null);
+  useEffect(() => onValid(valid), [valid, onValid]);
   const { styles, option } = usePickerOptions(theme, busy);
   const submit = async (extra = false) => {
     if ((!approval && !earlyDraft) || enabled === null) return;
@@ -184,16 +202,16 @@ function PlanReviewPicker({ workflow, approval, theme, onChanged }: {
   return <View testID="plan-review-picker" style={styles.box}>
     <Text style={{color:c.foreground}}>계획 검증</Text>
     <View style={styles.row}>
-      {option("끄기", enabled === false, () => setEnabled(false))}
-      {option("켜기", enabled === true, () => setEnabled(true), "on", !available || pending)}
+      {option("끄기", enabled === false, () => update({enabled:false}))}
+      {option("켜기", enabled === true, () => update({enabled:true}), "on", !available || pending)}
     </View>
     {!available && <Text style={{color:c.foregroundMuted}}>적격 검증 후보가 없습니다. 켜진 제품·다른 모델·읽기 전용 모드를 확인하세요.</Text>}
     {enabled && <>
-      <View style={styles.row}>{catalog?.providers.map(p => option(`${PROVIDERS.find(([id]) => id === p.provider)?.[1] ?? p.provider}${p.reason ? ` · ${p.reason}` : ""}`, provider === p.provider, () => {setProvider(p.provider);setModel("");setThinking(null);}, p.provider, !!p.reason || pending))}</View>
-      <View style={styles.row}>{models.map(m => option(`${m.label}${m.reason ? ` · ${m.reason}` : ""}`, model === m.id, () => {setModel(m.id);setThinking(pickerDefaultThinking(m));}, m.id, !!m.reason || pending))}</View>
-      <View style={styles.row}>{selected && pickerThinking(selected).map(o => option(o.label, thinking === o.id, () => setThinking(o.id), o.id || "none", pending))}</View>
+      <View style={styles.row}>{catalog?.providers.map(p => option(`${PROVIDERS.find(([id]) => id === p.provider)?.[1] ?? p.provider}${p.reason ? ` · ${p.reason}` : ""}`, provider === p.provider, () => {update({provider:p.provider,model:"",thinking:null});}, p.provider, !!p.reason || pending))}</View>
+      <View style={styles.row}>{models.map(m => option(`${m.label}${m.reason ? ` · ${m.reason}` : ""}`, model === m.id, () => {update({model:m.id,thinking:pickerDefaultThinking(m)});}, m.id, !!m.reason || pending))}</View>
+      <View style={styles.row}>{selected && pickerThinking(selected).map(o => option(o.label, thinking === o.id, () => update({thinking:o.id}), o.id || "none", pending))}</View>
     </>}
-    {option(enabled === true ? (earlyDraft ? "검증 담당 초안 저장" : "검증 선택·시작") : "검증 끄기 확정", false, () => void submit(), "confirm", (!approval && !earlyDraft) || enabled === null || (enabled && (pending || !provider || !selected || !!selected.reason || thinking === null)))}
+    {!earlyDraft && option(enabled === true ? "검증 선택·시작" : "검증 끄기 확정", false, () => void submit(), "confirm", (!approval && !earlyDraft) || enabled === null || (enabled && (pending || !provider || !selected || !!selected.reason || thinking === null)))}
     {review?.stage === "limit" && option("검토 1회 더", false, () => void submit(true), "extra", !approval)}
     {review && <Text selectable style={{color:c.foregroundMuted}}>{`계획 검증 ${review.round}/${review.maxRounds} · ${review.stage} · 판정 ${review.verdict?.verdict ?? "대기"} · 차단 ${review.verdict?.findings.filter(f=>f.severity === "차단").length ?? 0}\n${review.path}\n최종 기록: ${review.outcome ?? "대기"}`}</Text>}
     {!!review?.error && <Text style={{color:c.foregroundMuted}}>{review.error}</Text>}
@@ -205,16 +223,17 @@ function PlanReviewPicker({ workflow, approval, theme, onChanged }: {
 function LivePicker({ find, theme, decision }: { find: (rows: Workflow[]) => Workflow | undefined; theme: PluginHostProps["theme"]; decision?: Decision }) {
   const read = useRpc(status);
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
+  const [placementDefault, setPlacementDefault] = useState<"ask" | "worktree" | "wait">("ask");
   const load = useCallback(() => {
     read({})
-      .then(({ workflows }) => setWorkflow(find(workflows.filter(picksExecutor)) ?? null))
+      .then(({ workflows, settings }) => { setPlacementDefault(settings?.executorPlacement ?? "ask"); setWorkflow(find(workflows.filter(picksExecutor)) ?? null); })
       .catch(() => setWorkflow(null));
   }, [find, read]);
   useEffect(() => { load(); const timer = setInterval(load, 3000); return () => clearInterval(timer); }, [load]);
   if (!workflow) return null;
   if (decision && (workflow.firstPlan ?? (workflow.contract ?? 1) >= 6) && (!workflow.heldApproval || decisionHash(decision) !== workflow.heldApproval.decisionHash))
     return <Text style={{color: theme.colors.foregroundMuted}}>이전 계획입니다. 현재 계획을 확인하세요.</Text>;
-  return <ExecutorPicker key={`${workflow.id}:${workflow.heldApproval?.id ?? 0}`} workflow={workflow} theme={theme} onChanged={load} />;
+  return <ExecutorPicker key={`${workflow.id}:${workflow.heldApproval?.id ?? 0}`} workflow={workflow} theme={theme} onChanged={load} placementDefault={placementDefault} />;
 }
 
 /** Shown under a plan card: finds the planner's open workflow and offers the picker. */

@@ -163,7 +163,9 @@ const runAgent = async (prompt, provider = "claude") => {
   return id;
 };
 let client = null;
+let rpcCount = 0;
 const rpc = async (method, input = {}) => {
+  rpcCount++;
   client ??= await waitFor("plugin RPC connection", async () => {
     const candidate = new DaemonClient({ url: `ws://${target}/ws`, clientId: "rw-e2e", clientType: "cli", reconnect: { enabled: false } });
     try {
@@ -668,17 +670,17 @@ try {
       await cli("send", planner, "연합개발");
       flow = await waitFor("brainstorm to federation", async () => state().workflows.find(w => w.id === flow.id && w.mode === "federated"));
       assert(flow.plan.id === planner && !flow.execute && !flow.heldApproval, "federation started an executor before a plan");
-      assert(!(await timeline()).some(i => i.type === "plugin" && i.kind === "executor-picker"), "federation posted a premature executor picker");
+      await waitFor("one early federation card", async () => (await timeline()).filter(i => i.type === "plugin" && i.kind === "executor-picker").length === 1);
       writeFileSync(control, JSON.stringify({ mode: "role", scenario: "brainstorm-plan", plan: [workflowBlock("plan", "확인한 보관 계획을 구현한다")] }));
       await cli("send", planner, "계획을 확정해줘.");
-      flow = await waitFor("held plan and posted marker", async () => state().workflows.find(w => w.id === flow.id && w.heldApproval && w.pickerPostedFor === w.heldApproval.id));
-      const expectedId = `role-workflow-executor-picker:${flow.id}:${flow.heldApproval.id}`;
+      flow = await waitFor("held plan and posted marker", async () => state().workflows.find(w => w.id === flow.id && w.heldApproval && w.pickerPostedFor === 0));
+      const expectedId = `role-workflow-executor-picker:${flow.id}:0`;
       let items = await timeline();
       const cards = items.filter(i => i.type === "plugin" && i.kind === "executor-picker");
       assert(cards.length === 1 && cards[0].id === expectedId, "daemon timeline did not return the posted PluginTimelineItem.id");
       const message = items.findLast(i => { if (i.type !== "assistant_message") return false; try { return decisionHash(parseDecision(i.text)) === flow.heldApproval.decisionHash; } catch { return false; } });
       assert(message, "client message hash differs from server inbox hash");
-      assert(await pickerCardPresence(api, planner, expectedId, flow.heldApproval.decisionHash) === "present", "read-before-post did not find the real card");
+      assert(await pickerCardPresence(api, planner, expectedId, "") === "present", "read-before-post did not find the real card");
       const reload = await cli("plugin", "reload", "role-workflow");
       assert(reload.code === 0, reload.stderr);
       await waitFor("plugin reloaded", async () => { const r = await rpc("workflow.status", {}); return r.workflows.some(w => w.id === flow.id && w.heldApproval?.id === flow.heldApproval.id); });
@@ -818,6 +820,48 @@ try {
       writeFileSync(join(root,"codex-readonly-observation.json"),JSON.stringify({workflowId:flow.id,model:model.id,mode:row.mode,providerOptions:reviewer.config.providerOptions,toolOutput:outputs,writeDenied:true,worktreeUnchanged:true,ownerBefore,ownerAfter,verdict:flow.planReview.verdict,earlyCards:1},null,2));
       await rpc("workflow.control",{id:flow.id,action:"pause"});
     } finally {writeFileSync(control,JSON.stringify({mode:"text",text:"2"}));}
+  });
+
+  for (const enabled of [true, false]) await step(`AC-8': direct early setup ${enabled ? "review on" : "review off"} starts a worktree without further RPC`, async () => {
+    writeFileSync(control, JSON.stringify({mode:"text",text:"fixture blocker"}));
+    const blocker=await runAgent("일반개발로 해줘. 사전 설정 겹침 시험용 작업");
+    const gate=join(root,`release-auto-${enabled}`);
+    const decision={status:"result",summary:"사전 검증",next:"",handoff:"읽기 전용",checks:[],planReview:{planHash:"__PLAN_HASH__",verdict:"APPROVED",findings:[]}};
+    writeFileSync(control,JSON.stringify({mode:"role",scenario:`auto-setup-${enabled}`,planGate:gate,
+      plan:[workflowBlock("plan","docs/changes/auto/handoff.md 구현"),workflowBlock("note","")],
+      reviewer:[`<paseo-workflow>${JSON.stringify(decision)}</paseo-workflow>`],execute:[workflowBlock("input","자동 시작 확인")]}));
+    const started=runAgent(`연합개발로 진행해줘.\nauto-setup-${enabled}`);
+    try {
+      let flow=await waitFor("direct federation before first plan",async()=>state().workflows.find(w=>w.goal.includes(`auto-setup-${enabled}`)&&w.mode==="federated"&&w.pickerPostedFor===0&&w.pickerPosted));
+      assert(!flow.brainstorm&&!flow.heldApproval&&!flow.execute,"direct early setup was not before the first plan");
+      assert(state().workflows.some(w=>w.plan?.id===blocker&&w.cwd===flow.cwd),"same-folder blocker missing");
+      const executor=(await rpc("workflow.models",{provider:"claude"})).models[0];
+      assert(executor,"executor catalog unavailable");
+      const thinking=executor.thinkingOptions.find(o=>o.isDefault)?.id??executor.thinkingOptions[0]?.id??"";
+      let review={enabled:false};
+      if(enabled){
+        const candidate=(await rpc("workflow.review-options",{id:flow.id})).providers.find(p=>p.provider==="codex");
+        const model=candidate?.models.find(m=>!m.reason);assert(model,"reviewer catalog unavailable");
+        review={enabled:true,provider:"codex",model:model.id,thinking:model.thinkingOptions?.find(o=>o.isDefault)?.id??model.thinkingOptions?.[0]?.id??""};
+      }
+      const reserved=await rpc("workflow.select-executor",{id:flow.id,provider:"claude",model:executor.id,thinking,review,placement:"worktree"});
+      assert(reserved.ok,reserved.detail);const callsAfterSetup=rpcCount;
+      writeFileSync(gate,"release first plan");
+      const planner=await started;
+      flow=await waitFor("automatically approved worktree executor",async()=>state().workflows.find(w=>w.id===flow.id&&w.execute?.workspaceId&&w.isolation==="worktree"),120000);
+      assert(rpcCount===callsAfterSetup,"another RPC was needed after setup");
+      assert(flow.approvedHold===1&&flow.planReview.stage==="done"&&!flow.implementationReserved,"reserved plan was not consumed once");
+      assert(flow.planReview.outcome===(enabled?"passed":"off"),"wrong review outcome");
+      assert(enabled?!!flow.reviewer:!flow.reviewer,"wrong reviewer creation");
+      assert(!flow.placement&&flow.reservedPlacement==="worktree","placement did not use the reservation");
+      const common=async cwd=>(await run("git",["rev-parse","--path-format=absolute","--git-common-dir"],{cwd})).stdout.trim();
+      assert(await common(flow.worktree.path)===await common(work),"executor worktree belongs to another repository");
+      const api=createPaseoApi(client),entries=(await api.agents.ref(planner).timeline.refetch({direction:"tail",limit:200})).entries;
+      assert(entries.filter(e=>e.item.type==="plugin"&&e.item.kind==="executor-picker").length===1,"early setup card duplicated");
+      assert(!entries.some(e=>e.item.type==="plugin"&&e.item.kind==="placement-picker"),"reserved placement posted a choice card");
+      writeFileSync(join(root,`auto-setup-${enabled}.json`),JSON.stringify({flow,blocker,workflowRpcsAfterSetup:rpcCount-callsAfterSetup},null,2));
+      await rpc("workflow.control",{id:flow.id,action:"pause"});
+    } finally {writeFileSync(gate,"release");await started.catch(()=>{});writeFileSync(control,JSON.stringify({mode:"text",text:"2"}));}
   });
 
   await step("the plugin logged no errors", async () => {

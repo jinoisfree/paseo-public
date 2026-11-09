@@ -7,7 +7,7 @@
 // A new `scenario` resets role reply counters so independent cases do not consume each other.
 // usage: node fake-models.mjs <port> <controlFile> <logFile>
 import { createServer } from "node:http";
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, readFileSync, existsSync } from "node:fs";
 
 const [port, controlFile, logFile] = process.argv.slice(2);
 const turns = { plan: 0, execute: 0, reviewer: 0 };
@@ -108,7 +108,7 @@ function responses(parsed, res) {
 createServer((req, res) => {
   let body = "";
   req.on("data", (chunk) => (body += chunk));
-  req.on("end", () => {
+  req.on("end", async () => {
     let parsed = {};
     try {
       parsed = JSON.parse(body);
@@ -125,6 +125,13 @@ createServer((req, res) => {
     let { text = "Done." } = settings;
     const system = JSON.stringify(parsed.system ?? "");
     const role = system.includes("당신은 계약7 첫 계획의") ? "reviewer" : system.includes("당신은 이 사용자의 구현 역할이다") ? "execute" : "plan";
+    // Hold the real first model response while the early setup is saved, without another agent RPC.
+    if (role === "plan" && settings.planGate && (parsed.tools ?? []).length) {
+      const deadline=Date.now()+90000;
+      while(!existsSync(settings.planGate)&&Date.now()<deadline&&!res.destroyed)
+        await new Promise(resolve=>setTimeout(resolve,25));
+      if(!existsSync(settings.planGate))return json(503,{error:"first plan gate was not released"});
+    }
     if (mode === "role" && (parsed.tools ?? []).length) {
       const list = settings[role] ?? [text];
       text = list[Math.min(turns[role]++, list.length - 1)];

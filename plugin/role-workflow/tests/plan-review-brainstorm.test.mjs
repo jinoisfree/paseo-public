@@ -46,15 +46,15 @@ test('AC-22: turning review off after the early card reuses that card at the hel
  const w=await f.live();assert.equal(w.planReview.stage,'off');assert.equal(f.pickers.length,1);
  assert.equal(w.pickerPostedFor,0);assert.equal(f.created.length,0);
 });
-test('AC-23: off waits for a held plan; other modes, absent or unknown answers and contract6 ignore the second answer',async t=>{
+test('AC-23 / AC-7′: off and unknown answers post an early card; other modes and contract6 ignore the second answer',async t=>{
  const off=await brainstorm(t);let w=await finish(off,'연합개발','끄기');
- assert.equal(w.reviewSelection.enabled,false);assert.equal(off.pickers.length,0);
+ assert.equal(w.reviewSelection.enabled,false);assert.equal(off.pickers.length,1);
  await off.say('','plan');assert.equal(off.pickers.length,1);
  for(const first of ['일반개발','개발 안 함']){
   const f=await brainstorm(t);w=await finish(f,first,'켜기');assert.equal(w.reviewSelection.enabled,null);assert.equal(f.pickers.length,0);
  }
  for(const [answer,include] of [[undefined,true],['추천 켜기',true],['켜기',false]]){
-  const f=await brainstorm(t);w=await finish(f,'연합개발',answer,{include});assert.equal(w.reviewSelection.enabled,null);assert.equal(f.pickers.length,0);
+  const f=await brainstorm(t);w=await finish(f,'연합개발',answer,{include});assert.equal(w.reviewSelection.enabled,null);assert.equal(f.pickers.length,1);
  }
  const legacy=await brainstorm(t,6);w=await finish(legacy,'연합개발','켜기');assert.equal(w.reviewSelection.enabled,null);assert.equal(legacy.pickers.length,0);
  const initial=await fixture(t,{mode:'undecided',contract:7});w=await finish(initial,'연합개발','켜기');assert.equal(w.reviewSelection.enabled,null);

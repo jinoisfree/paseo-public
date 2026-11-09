@@ -97,6 +97,7 @@ export const workflowViewSchema = z.object({
   reviewSelection: reviewSelectionSchema.optional(),
   planReview: planReviewSchema.optional(),
   implementationReserved: z.boolean().default(false),
+  reservedPlacement: z.enum(["worktree", "wait"]).nullable().default(null),
   reviewerAgentId: z.string().nullable().default(null),
   brainstorm: z.boolean().default(false),
   firstPlan: z.boolean().default(false),
@@ -180,6 +181,10 @@ export const selectPlacement = defineRpc({
   input: z.object({ id: z.string(), placement: z.enum(["worktree", "wait"]) }),
   output: z.object({ ok: z.boolean(), detail: z.string() }),
 });
+const reviewChoiceSchema = z.object({
+  enabled: z.boolean(), provider: z.enum(["codex", "claude"]).optional(),
+  model: z.string().optional(), thinking: z.string().optional(),
+});
 export const selectExecutor = defineRpc({
   name: "workflow.select-executor",
   input: z.object({
@@ -187,6 +192,8 @@ export const selectExecutor = defineRpc({
     holdId: z.number().int().positive().optional(),
     unverified: z.boolean().optional(),
     reserve: z.boolean().optional(),
+    review: reviewChoiceSchema.optional(),
+    placement: z.enum(["worktree", "wait"]).nullable().optional(),
     provider: z.enum(["codex", "claude"]),
     model: z.string().trim().min(1).max(120),
     // An empty value is only valid for a model without thinking options.
@@ -240,8 +247,7 @@ export const reviewOptions = defineRpc({
 });
 export const selectPlanReview = defineRpc({
   name: "workflow.select-plan-review",
-  input: z.object({ id: z.string(), holdId: z.number().int().positive().optional(), enabled: z.boolean(),
-    provider: z.enum(["codex", "claude"]).optional(), model: z.string().optional(), thinking: z.string().optional(), extra: z.boolean().optional() }),
+  input: z.object({ id: z.string(), holdId: z.number().int().positive().optional(), ...reviewChoiceSchema.shape, extra: z.boolean().optional() }),
   output: z.object({ ok: z.boolean(), detail: z.string() }),
 });
 export const cancelImplementationReservation = defineRpc({

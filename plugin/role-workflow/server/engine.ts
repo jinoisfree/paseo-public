@@ -162,6 +162,7 @@ const workflowSchema = z.object({
   reviewSelection: reviewSelectionSchema.default(() => reviewSelectionSchema.parse({})),
   planReview: planReviewSchema.default(() => planReviewSchema.parse({})),
   implementationReserved: z.boolean().default(false),
+  reservedPlacement: z.enum(["worktree", "wait"]).nullable().default(null),
   cycles: z.number(),
   turns: z.number(),
   detail: z.string(),
@@ -835,7 +836,7 @@ export class WorkflowEngine {
     // A failed post leaves the plan card and dashboard pickers as the fallback.
     for (const w of pickers) void this.port.executorPicker?.(w.plan!.id, w.id).catch(() => {});
     for (const w of db.workflows) {
-      const earlyCard = capabilities(w).planReview && w.brainstorm && w.pickerPosted && w.pickerPostedFor === 0;
+      const earlyCard = capabilities(w).planReview && w.pickerPosted && w.pickerPostedFor === 0;
       if (this.firstPlan(w) && (this.earlyReviewPicker(w) || earlyCard)) {
         if (!w.pickerPosted) void this.ensurePickerCard(w.id, 0);
       } else if (this.firstPlan(w) && w.heldApproval && w.pickerPostedFor !== w.heldApproval.id)
@@ -844,7 +845,7 @@ export class WorkflowEngine {
     }
   }
   private earlyReviewPicker(w: Workflow) {
-    return capabilities(w).planReview && w.brainstorm && w.reviewSelection.enabled === true;
+    return capabilities(w).planReview && w.mode === "federated";
   }
   private firstPlan(w: Workflow) {
     return capabilities(w).firstPlanGate && !w.execute && !w.lastInstruction;
@@ -1064,7 +1065,8 @@ export class WorkflowEngine {
     });
   }
   /** The executor chosen on the plugin screen; a held plan goes out once it is valid. */
-  selectExecutor(id: string, choice: { provider: "codex" | "claude"; model: string; thinking: string; holdId?: number; unverified?: boolean; reserve?: boolean }) {
+  selectExecutor(id: string, choice: { provider: "codex" | "claude"; model: string; thinking: string; holdId?: number; unverified?: boolean; reserve?: boolean;
+    review?: { enabled: boolean; provider?: "codex" | "claude"; model?: string; thinking?: string }; placement?: "worktree" | "wait" | null }) {
     return this.serial(async () => {
       const w = (await this.db()).workflows.find((entry) => entry.id === id);
       if (!w) throw new Error("작업을 찾을 수 없습니다.");
@@ -1077,14 +1079,22 @@ export class WorkflowEngine {
           await applySelectionBatch(draft, { provider: choice.provider, model: choice.model,
             thinking: choice.thinking || "추론 없음" }, provider => this.executorChoice.catalog(w, provider));
         } catch (error) { draft.error = error instanceof Error ? error.message : String(error); }
+        const hold = w.heldApproval;
+        const early = this.earlyReviewPicker(w) && !hold && choice.holdId === undefined;
+        // Validate the combined review choice before replacing an existing reserved executor.
+        if (early && draft.stage === "ready" && choice.review) await this.planReviewGate.choose(w, choice.review);
         w.selectionDraft = draft;
         if (capabilities(w).planReview && draft.stage !== "ready") w.implementationReserved = false;
-        const hold = w.heldApproval;
-        if (this.earlyReviewPicker(w) && !hold && choice.holdId === undefined) {
-          w.implementationReserved = draft.stage === "ready";
+        if (early) {
+          if (draft.stage !== "ready") { await this.save(); return { ok: false, detail: draft.error }; }
+          if (w.reviewSelection.enabled === null || (w.reviewSelection.enabled && w.reviewSelection.stage !== "ready"))
+            return { ok: false, detail: "계획 검증 켜기/끄기와 검증 담당을 선택하세요." };
+          if (choice.placement !== undefined) w.reservedPlacement = choice.placement;
+          w.implementationReserved = true;
           await this.save();
-          return { ok: draft.stage === "ready", detail: draft.error || "검증을 통과하면 이 담당으로 바로 구현을 시작합니다." };
+          return { ok: true, detail: w.reviewSelection.enabled ? "검증을 통과하면 이 담당으로 바로 구현을 시작합니다." : "계획이 나오면 바로 구현을 시작합니다." };
         }
+        if (capabilities(w).planReview && choice.placement !== undefined) w.reservedPlacement = choice.placement;
         if (capabilities(w).planReview && choice.reserve && w.reviewSelection.enabled === true &&
             ["reviewing", "revising"].includes(w.planReview.stage) && hold && choice.holdId === hold.id) {
           w.implementationReserved = draft.stage === "ready";
@@ -1152,15 +1162,15 @@ export class WorkflowEngine {
     await this.save();
     await this.advance(w);
     if (automatic && w.status === "active" && w.execute?.workspaceId && !w.placement) {
-      this.touch(w, "계획 검증 통과 — 예약한 구현 담당으로 구현을 시작합니다.");
+      this.touch(w, w.reviewSelection.enabled ? "계획 검증 통과 — 예약한 구현 담당으로 구현을 시작합니다." : "계획 검증 끔 — 예약한 구현 담당으로 구현을 시작합니다.");
       await this.save();
     }
     return { ok: true, detail: "승인한 계획을 구현 담당에게 전달합니다." };
   }
   private async startReservedImplementation(w: Workflow): Promise<boolean> {
-    if (!capabilities(w).planReview || !this.firstPlan(w) || !w.implementationReserved ||
-        w.reviewSelection.enabled !== true || w.planReview.stage !== "passed" ||
-        !w.heldApproval || w.planReview.hash !== w.heldApproval.decisionHash ||
+    if (!capabilities(w).planReview || !this.firstPlan(w) || !w.implementationReserved || !w.heldApproval ||
+        !(w.reviewSelection.enabled === false && w.planReview.stage === "off" ||
+          w.reviewSelection.enabled === true && w.planReview.stage === "passed" && w.planReview.hash === w.heldApproval.decisionHash) ||
         w.selectionDraft?.stage !== "ready" || w.pending) return false;
     return (await this.approveExecutor(w, w.heldApproval.id, false, true)).ok;
   }
@@ -1169,6 +1179,7 @@ export class WorkflowEngine {
       const w = (await this.db()).workflows.find(w => w.id === id);
       if (!w || !capabilities(w).planReview || !this.firstPlan(w)) return { ok: false, detail: "구현 시작 예약을 취소할 수 없습니다." };
       w.implementationReserved = false;
+      w.reservedPlacement = null;
       this.touch(w, "구현 시작 예약을 취소했습니다. 검증 뒤 직접 구현 담당을 확정하세요.");
       await this.save();
       return { ok: true, detail: w.detail };
@@ -1419,6 +1430,7 @@ export class WorkflowEngine {
         firstPlan: this.firstPlan(w),
         heldApproval: w.heldApproval,
         implementationReserved: w.implementationReserved,
+        reservedPlacement: w.reservedPlacement,
         reviewSelection: w.reviewSelection, planReview: w.planReview, reviewerAgentId: w.reviewer?.id ?? null,
         heldPlan: !!w.selectionPlan && w.inbox?.key === w.selectionPlan,
         planConflict: w.planConflict,
@@ -1513,6 +1525,7 @@ export class WorkflowEngine {
         reviewSelection: reviewSelectionSchema.parse({}),
         planReview: planReviewSchema.parse({}),
         implementationReserved: false,
+        reservedPlacement: null,
         planIssue: null,
         planConflict: null,
         contract: mode === "general" && contract < 3 ? 1 : contract,
@@ -2909,22 +2922,29 @@ export class WorkflowEngine {
       if (w.isolation !== "undecided") return { ok: false, detail: "구현 시작 방법이 이미 정해졌습니다." };
       if (w.placement?.stage !== "choice" || w.status !== "active" || !w.execute || w.execute.workspaceId)
         return { ok: false, detail: "구현 시작 방법 선택을 기다리는 상태가 아닙니다." };
-      try {
-        await placeExecutor(w, this.probe, this.port, await this.settings(), await this.placementBlocker(w), placement);
-      } catch (error) {
-        w.status = "error";
-        this.touch(w, String(error));
-        await this.save();
-        return { ok: false, detail: w.detail };
+      const result = await this.applyPlacement(w, placement);
+      if (result.ok) {
+        const snapshot = await this.port.inspect(w.plan.id).catch(() => null);
+        if (snapshot && this.quiet(snapshot))
+          await this.port.send(w.plan.id, `작업 ID: ${w.id}\n${result.detail}`, `role-workflow-placement:${w.id}`).catch(() => {});
+        await this.advance(w);
       }
-      await this.save();
-      const detail = (w.isolation as Workflow["isolation"]) === "worktree" ? "따로 작업 공간에서 시작합니다." : "앞 작업이 끝나면 자동으로 시작합니다.";
-      const snapshot = await this.port.inspect(w.plan.id).catch(() => null);
-      if (snapshot && this.quiet(snapshot))
-        await this.port.send(w.plan.id, `작업 ID: ${w.id}\n${detail}`, `role-workflow-placement:${w.id}`).catch(() => {});
-      await this.advance(w);
-      return { ok: true, detail };
+      return result;
     });
+  }
+  /** User and reserved placement share worktree creation and failure handling. */
+  private async applyPlacement(w: Workflow, placement: "worktree" | "wait") {
+    try {
+      await placeExecutor(w, this.probe, this.port, await this.settings(), await this.placementBlocker(w), placement);
+    } catch (error) {
+      w.status = "error";
+      this.touch(w, String(error));
+      await this.save();
+      return { ok: false, detail: w.detail };
+    }
+    await this.save();
+    const detail = (w.isolation as Workflow["isolation"]) === "worktree" ? "따로 작업 공간에서 시작합니다." : "앞 작업이 끝나면 자동으로 시작합니다.";
+    return { ok: true, detail };
   }
   generalTimeline(...args: Parameters<GeneralMode["generalTimeline"]>) {
     return this.generalMode.generalTimeline(...args);
@@ -3406,7 +3426,9 @@ export class WorkflowEngine {
       if (role === "execute") {
         const blocker = w.placement || (w.isolation === "undecided" && capabilities(w).executorSelection && (current.generation === 1 || w.worktreeHistory.length > 0))
           ? await this.placementBlocker(w) : null;
-        if (await placeExecutor(w, this.probe, this.port, await this.settings(), blocker)) await this.save();
+        if (capabilities(w).planReview && w.reservedPlacement && blocker && w.isolation === "undecided") {
+          if (!(await this.applyPlacement(w, w.reservedPlacement)).ok) return;
+        } else if (await placeExecutor(w, this.probe, this.port, await this.settings(), blocker)) await this.save();
         if (w.placement) {
           if (blocker) {
             w.placement.number = blocker.number;
@@ -3634,6 +3656,14 @@ export class WorkflowEngine {
         (entry) => memberRole(entry, agentId) !== null,
       );
       if (!w) return;
+      if (w.contract >= 7 && w.mode === "undecided" && w.plan?.id === agentId && !w.execute && !w.lastInstruction) {
+        const history = await this.port.history(agentId).catch(() => null);
+        const request = userText(history?.request || history?.goal || "");
+        if (workflowRequestedMode(w, request) === "federated") {
+          if (!w.goal) w.goal = history?.goal || request;
+          await this.applyModeChoice(w, agentId, "federated");
+        }
+      }
       this.pushAudit.invalidatePushAudit(w);
       // A later user turn supersedes the deferred colour change, even before it replies.
       w.pushRetry = null;
@@ -4154,6 +4184,7 @@ export class WorkflowEngine {
         w.inbox = inbox;
         w.selectionPlan = inbox.key;
         await this.save();
+        await this.startReservedImplementation(w);
       }
       return;
     }
