@@ -97,7 +97,7 @@ async function freshUser(
     home,
     calls,
     errors,
-    async enroll(provider, choice = "연합개발") {
+    async enroll(provider, choice = "연합개발", initialPrompt) {
       const source = {
         id: "fresh-source",
         provider,
@@ -114,7 +114,7 @@ async function freshUser(
         ref: () => ({ refresh: async () => ({ projectId: "project", name: "Task" }) }),
       };
       const response = await hooks.get("agent.create.before")(
-        { request: { config: { provider, cwd: home } } },
+        { request: { config: { provider, cwd: home }, ...(initialPrompt ? { initialPrompt } : {}) } },
         context,
       );
       await hooks.get("agent.open.before")(
@@ -123,7 +123,7 @@ async function freshUser(
       );
       await events.get("agent.create.after")({ agent: source }, context);
       // A default fresh conversation begins undecided; choosing federation retains its new contract.
-      if (!general) {
+      if (!general && choice !== null) {
         await events.get("agent.permission.before")(
           {
             agent: source,
@@ -307,4 +307,11 @@ test("N-1: new federation and general registrations receive contract7 with uncha
   assert.equal(capabilities(result.state).standalone,general);
   if(general)assert.doesNotMatch(result.prompt,/<paseo-automation-v1>/);
  }
+});
+
+// A runtime may supply the optional prompt even though SDK 0.15 lifecycle types omit it.
+test("AC-P1 creation seed carries an available first prompt through enrollment without a mode RPC",async t=>{
+ const f=await freshUser(t);const result=await f.enroll("claude",null,"연합개발로 진행해줘. 첫 요청");
+ assert.equal(result.state.mode,"federated");assert.equal(result.state.goal,"연합개발로 진행해줘. 첫 요청");
+ assert.equal(result.state.turns,0);assert.equal(result.state.heldApproval,null);assert.equal(result.state.execute,null);
 });

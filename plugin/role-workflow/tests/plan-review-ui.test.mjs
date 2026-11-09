@@ -81,6 +81,17 @@ createRoot(document.getElementById('root')).render(<App/>);
   await page.getByRole('button',{name:'끄기',exact:true}).click();
   await page.getByRole('button',{name:'이 설정으로 자동 진행',exact:true}).click();
   assert.equal(await page.evaluate(()=>window.calls.at(-1).review.enabled),false);
+  // AC-P3: a held plan submits the same combined configuration in one RPC.
+  for(const enabled of [false,true]){
+   await page.goto(`http://127.0.0.1:${server.address().port}?held=${enabled?'on':'off'}`);
+   await page.getByRole('button',{name:'✓ High',exact:true}).waitFor();
+   if(enabled){await page.getByRole('button',{name:'켜기',exact:true}).click();await page.getByTestId('plan-review-picker').getByRole('button',{name:'Claude Code',exact:true}).click();await page.getByRole('button',{name:'Other reviewer',exact:true}).click();}
+   await page.getByRole('button',{name:'워크트리',exact:true}).click();
+   assert.equal(await page.getByRole('button',{name:'이 담당으로 확정',exact:true}).count(),1);
+   assert.equal(await page.getByRole('button',{name:enabled?'검증 선택·시작':'검증 끄기 확정',exact:true}).count(),1);
+   await page.getByRole('button',{name:'이 설정으로 자동 진행',exact:true}).click();
+   assert.deepEqual(await page.evaluate(()=>window.calls),[{id:'task',provider:'codex',model:'builder',thinking:'high',holdId:1,review:enabled?{enabled:true,provider:'claude',model:'other',thinking:'high'}:{enabled:false},placement:'worktree'}]);
+  }
   await page.goto(`http://127.0.0.1:${server.address().port}?reserve=1`);
   await page.getByRole('button',{name:'✓ High',exact:true}).waitFor();
   assert.equal(await page.getByRole('button',{name:'이 담당으로 확정',exact:true}).isDisabled(),true);

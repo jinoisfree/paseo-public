@@ -70,6 +70,7 @@ export function ExecutorPicker({
   const reviewRequired = (workflow.contract ?? 1) >= 7;
   const reviewReady = earlyDraft || !reviewRequired || (workflow.reviewSelection?.enabled === false && !["reviewing", "revising"].includes(review?.stage ?? "")) ||
     (!!approval && review?.stage === "passed" && review.hash === approval.decisionHash);
+  const combinedSetup = reviewRequired && gated;
   const canReserve = reviewRequired && workflow.reviewSelection?.enabled === true && !!approval && ["reviewing", "revising"].includes(review?.stage ?? "");
   const [reviewChoice, setReviewChoice] = useState<ReviewChoice>({ enabled: workflow.reviewSelection?.enabled ?? null,
     provider: workflow.reviewSelection?.provider ?? null, model: workflow.reviewSelection?.model ?? "", thinking: workflow.reviewSelection?.thinking ?? null });
@@ -93,12 +94,13 @@ export function ExecutorPicker({
     };
   }, [provider, readModels]);
   const selected = catalog?.models.find((row) => row.id === model);
-  const submit = useCallback(async (unverified = false, reserve = false) => {
-    if (!canSubmit || !model || thinking === null || (earlyDraft && (!reviewValid || !placement))) return;
+  const automaticReady = reviewValid && !!placement && !["reviewing", "revising", "limit", "done"].includes(review?.stage ?? "");
+  const submit = useCallback(async (unverified = false, reserve = false, automatic = earlyDraft) => {
+    if (!canSubmit || !model || thinking === null || (automatic && !automaticReady)) return;
     setBusy(true);
     try {
       const result = await choose({ id: workflow.id, provider, model, thinking, ...(gated && approval ? {holdId: approval.id} : {}), ...(unverified ? {unverified:true} : {}), ...(reserve ? {reserve:true} : {}),
-        ...(earlyDraft ? { review: { enabled: reviewChoice.enabled!, ...(reviewChoice.enabled ? {provider: reviewChoice.provider!, model: reviewChoice.model, thinking: reviewChoice.thinking!} : {}) }, placement } : {}) });
+        ...(automatic ? { review: { enabled: reviewChoice.enabled!, ...(reviewChoice.enabled ? {provider: reviewChoice.provider!, model: reviewChoice.model, thinking: reviewChoice.thinking!} : {}) }, placement } : {}) });
       setMessage(result.detail);
       onChanged?.();
     } catch (error) {
@@ -106,7 +108,7 @@ export function ExecutorPicker({
     } finally {
       setBusy(false);
     }
-  }, [choose, model, onChanged, provider, thinking, workflow.id, gated, approval, canSubmit, earlyDraft, reviewValid, reviewChoice, placement]);
+  }, [choose, model, onChanged, provider, thinking, workflow.id, gated, approval, canSubmit, earlyDraft, automaticReady, reviewChoice, placement]);
   return (
     <View testID="executor-picker" style={styles.box}>
       <Text style={styles.text}>
@@ -133,7 +135,7 @@ export function ExecutorPicker({
           {pickerThinking(selected).map((row) => option(row.label, thinking === row.id, () => setThinking(row.id), row.id || "none"))}
         </View>
       )}
-      {earlyDraft && <>
+      {combinedSetup && <>
         <Text style={styles.text}>겹칠 때 배치</Text>
         <Text style={styles.muted}>같은 저장소의 작업과 겹칠 때만 적용합니다.</Text>
         <View style={styles.row}>
@@ -142,12 +144,17 @@ export function ExecutorPicker({
         </View>
       </>}
       {!reviewReady && <Text style={styles.muted}>계획 검증 선택·판정·기록이 끝날 때까지 구현 승인은 비활성입니다.</Text>}
-      <Pressable accessibilityRole="button" disabled={busy || !canSubmit || !reviewReady || !model || thinking === null || (earlyDraft && (!reviewValid || !placement))} onPress={() => void submit()}
+      <Pressable accessibilityRole="button" disabled={busy || !canSubmit || !reviewReady || !model || thinking === null || (earlyDraft && !automaticReady)} onPress={() => void submit()}
         style={styles.choice}>
         <Text style={model && thinking !== null ? styles.text : styles.muted}>
           {busy ? "확인 중…" : earlyDraft ? "이 설정으로 자동 진행" : "이 담당으로 확정"}
         </Text>
       </Pressable>
+      {combinedSetup && approval && <Pressable accessibilityRole="button"
+        disabled={busy || !canSubmit || !model || thinking === null || !automaticReady}
+        onPress={() => void submit(false, false, true)} style={styles.choice}>
+        <Text style={styles.text}>이 설정으로 자동 진행</Text>
+      </Pressable>}
       {canReserve && option("검증 통과 시 구현 시작", false, () => void submit(false, true), "reserve", !model || thinking === null)}
       {workflow.implementationReserved && <>
         <Text style={styles.text}>구현 시작 예약됨 — {workflow.reviewSelection?.enabled === false ? "계획이 나오면 바로 구현을 시작합니다." : "검증 통과 후 자동으로 시작합니다."}</Text>

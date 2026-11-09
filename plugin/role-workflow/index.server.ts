@@ -71,6 +71,7 @@ export default function contribute(server: PluginServerContext) {
     new OwnerPolicyStore(ownerPolicyPath(), legacyPublicConfigs()),
   );
   interface Seed {
+    firstPrompt?: string;
     titled: boolean;
     mode: StartMode;
     config: PaseoAgentConfig;
@@ -156,6 +157,9 @@ export default function contribute(server: PluginServerContext) {
       if (!mode || ready) return { config, env };
       const token = randomUUID();
       seeds.set(token, {
+        // Older lifecycle APIs omit the initial prompt; history remains the primary source.
+        firstPrompt: "initialPrompt" in request && typeof request.initialPrompt === "string"
+          ? request.initialPrompt : undefined,
         titled: !(addsTitle || settings.titleMarker),
         mode,
         // The planner's workspace is never recreated; the engine keeps only what it reads.
@@ -205,7 +209,7 @@ export default function contribute(server: PluginServerContext) {
         const snapshot = await port.inspect(agent.id).catch(() => null);
         if (!snapshot) continue;
         await engine
-          .enroll(snapshot, seed.config, seed.env, seed.mode, seed.titled, CURRENT_CONTRACT)
+          .enroll(snapshot, seed.config, seed.env, seed.mode, seed.titled, CURRENT_CONTRACT, seed.firstPrompt)
           .catch(report);
         return;
       }

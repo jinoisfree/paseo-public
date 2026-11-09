@@ -822,18 +822,19 @@ try {
     } finally {writeFileSync(control,JSON.stringify({mode:"text",text:"2"}));}
   });
 
-  for (const enabled of [true, false]) await step(`AC-8': direct early setup ${enabled ? "review on" : "review off"} starts a worktree without further RPC`, async () => {
+  for (const enabled of [true, false]) await step(`AC-8': direct early setup ${enabled ? "review on" : "review off"} uses one combined setup and starts a worktree without further RPC`, async () => {
     writeFileSync(control, JSON.stringify({mode:"text",text:"fixture blocker"}));
     const blocker=await runAgent("일반개발로 해줘. 사전 설정 겹침 시험용 작업");
-    const gate=join(root,`release-auto-${enabled}`);
     const decision={status:"result",summary:"사전 검증",next:"",handoff:"읽기 전용",checks:[],planReview:{planHash:"__PLAN_HASH__",verdict:"APPROVED",findings:[]}};
-    writeFileSync(control,JSON.stringify({mode:"role",scenario:`auto-setup-${enabled}`,planGate:gate,
+    writeFileSync(control,JSON.stringify({mode:"role",scenario:`auto-setup-${enabled}`,
       plan:[workflowBlock("plan","docs/changes/auto/handoff.md 구현"),workflowBlock("note","")],
       reviewer:[`<paseo-workflow>${JSON.stringify(decision)}</paseo-workflow>`],execute:[workflowBlock("input","자동 시작 확인")]}));
-    const started=runAgent(`연합개발로 진행해줘.\nauto-setup-${enabled}`);
+    const planner=await runAgent(`연합개발로 진행해줘.\nauto-setup-${enabled}`);
     try {
-      let flow=await waitFor("direct federation before first plan",async()=>state().workflows.find(w=>w.goal.includes(`auto-setup-${enabled}`)&&w.mode==="federated"&&w.pickerPostedFor===0&&w.pickerPosted));
-      assert(!flow.brainstorm&&!flow.heldApproval&&!flow.execute,"direct early setup was not before the first plan");
+      // The SDK may expose the request only after this reply. The same card must work then.
+      let flow=await waitFor("direct federation setup with the first held plan",async()=>state().workflows.find(w=>w.goal.includes(`auto-setup-${enabled}`)&&w.mode==="federated"&&w.pickerPosted&&w.heldApproval));
+      assert(!flow.brainstorm&&!flow.execute&&!flow.approvedHold,"direct setup approved work before configuration");
+      const setupHoldId=flow.heldApproval.id;
       assert(state().workflows.some(w=>w.plan?.id===blocker&&w.cwd===flow.cwd),"same-folder blocker missing");
       const executor=(await rpc("workflow.models",{provider:"claude"})).models[0];
       assert(executor,"executor catalog unavailable");
@@ -844,10 +845,10 @@ try {
         const model=candidate?.models.find(m=>!m.reason);assert(model,"reviewer catalog unavailable");
         review={enabled:true,provider:"codex",model:model.id,thinking:model.thinkingOptions?.find(o=>o.isDefault)?.id??model.thinkingOptions?.[0]?.id??""};
       }
-      const reserved=await rpc("workflow.select-executor",{id:flow.id,provider:"claude",model:executor.id,thinking,review,placement:"worktree"});
+      const callsBeforeSetup=rpcCount;
+      const reserved=await rpc("workflow.select-executor",{id:flow.id,holdId:setupHoldId,provider:"claude",model:executor.id,thinking,review,placement:"worktree"});
       assert(reserved.ok,reserved.detail);const callsAfterSetup=rpcCount;
-      writeFileSync(gate,"release first plan");
-      const planner=await started;
+      assert(callsAfterSetup-callsBeforeSetup===1,"configuration required more than one RPC");
       flow=await waitFor("automatically approved worktree executor",async()=>state().workflows.find(w=>w.id===flow.id&&w.execute?.workspaceId&&w.isolation==="worktree"),120000);
       assert(rpcCount===callsAfterSetup,"another RPC was needed after setup");
       assert(flow.approvedHold===1&&flow.planReview.stage==="done"&&!flow.implementationReserved,"reserved plan was not consumed once");
@@ -859,9 +860,9 @@ try {
       const api=createPaseoApi(client),entries=(await api.agents.ref(planner).timeline.refetch({direction:"tail",limit:200})).entries;
       assert(entries.filter(e=>e.item.type==="plugin"&&e.item.kind==="executor-picker").length===1,"early setup card duplicated");
       assert(!entries.some(e=>e.item.type==="plugin"&&e.item.kind==="placement-picker"),"reserved placement posted a choice card");
-      writeFileSync(join(root,`auto-setup-${enabled}.json`),JSON.stringify({flow,blocker,workflowRpcsAfterSetup:rpcCount-callsAfterSetup},null,2));
+      writeFileSync(join(root,`auto-setup-${enabled}.json`),JSON.stringify({flow,blocker,setupHoldId,configurationRpcs:callsAfterSetup-callsBeforeSetup,workflowRpcsAfterSetup:rpcCount-callsAfterSetup},null,2));
       await rpc("workflow.control",{id:flow.id,action:"pause"});
-    } finally {writeFileSync(gate,"release");await started.catch(()=>{});writeFileSync(control,JSON.stringify({mode:"text",text:"2"}));}
+    } finally {writeFileSync(control,JSON.stringify({mode:"text",text:"2"}));}
   });
 
   await step("the plugin logged no errors", async () => {

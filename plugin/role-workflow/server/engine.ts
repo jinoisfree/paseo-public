@@ -457,6 +457,8 @@ export interface NotificationEvent {
 const REVIEW =
   "구현 결과를 검토하세요. 규칙 30-verification 3.2–7절에 따라 handoff·impl-report와 실제 변경 파일·시험을 직접 확인하고, 설계 적합성(4.2)을 따로 판정한 뒤 작업 문서 폴더에 verdict.md를 쓰세요. 완료 조건 충족 시 complete, 부분 완료·미완료면 원인을 분류해 구체적 수정 계획과 함께 plan을 반환하세요.";
 const REPAIR = "작업을 다시 하지 말고, 직전 응답의 결과를 그대로 반영한 상태 블록만 출력하세요.";
+const INITIAL_REQUEST_READ = { attempts: 5, intervalMs: 300 } as const;
+
 const CONTINUE = "중단된 지점부터 이어서 진행하세요. 이미 끝낸 작업은 반복하지 마세요.";
 const HELD = " (전달 전인 실행 지시는 보류했습니다. 답변에 따라 계획 담당이 진행하거나 바꿉니다.)";
 
@@ -1081,17 +1083,30 @@ export class WorkflowEngine {
         } catch (error) { draft.error = error instanceof Error ? error.message : String(error); }
         const hold = w.heldApproval;
         const early = this.earlyReviewPicker(w) && !hold && choice.holdId === undefined;
+        const combined = capabilities(w).planReview && !!choice.review;
+        // Bind a combined setup to the displayed plan before review can queue any work.
+        if (combined && !early && (!hold || choice.holdId !== hold.id ||
+            !w.selectionPlan || w.inbox?.key !== hold.inboxKey || w.selectionPlan !== hold.inboxKey))
+          return { ok: false, detail: "계획이 바뀌었습니다. 현재 계획을 다시 확인하세요." };
+        if (combined && (w.pending || ["reviewing", "revising", "limit", "done"].includes(w.planReview.stage)))
+          return { ok: false, detail: "진행 중인 검증·기록 또는 검토 한도를 확인하세요." };
         // Validate the combined review choice before replacing an existing reserved executor.
-        if (early && draft.stage === "ready" && choice.review) await this.planReviewGate.choose(w, choice.review);
+        if ((early || combined) && draft.stage === "ready" && choice.review)
+          await this.planReviewGate.choose(w, choice.review);
         w.selectionDraft = draft;
         if (capabilities(w).planReview && draft.stage !== "ready") w.implementationReserved = false;
-        if (early) {
+        if (early || combined) {
           if (draft.stage !== "ready") { await this.save(); return { ok: false, detail: draft.error }; }
           if (w.reviewSelection.enabled === null || (w.reviewSelection.enabled && w.reviewSelection.stage !== "ready"))
             return { ok: false, detail: "계획 검증 켜기/끄기와 검증 담당을 선택하세요." };
           if (choice.placement !== undefined) w.reservedPlacement = choice.placement;
           w.implementationReserved = true;
           await this.save();
+          if (!early) {
+            if (w.reviewSelection.enabled) await this.advance(w);
+            else await this.startReservedImplementation(w);
+            return { ok: true, detail: w.detail };
+          }
           return { ok: true, detail: w.reviewSelection.enabled ? "검증을 통과하면 이 담당으로 바로 구현을 시작합니다." : "계획이 나오면 바로 구현을 시작합니다." };
         }
         if (capabilities(w).planReview && choice.placement !== undefined) w.reservedPlacement = choice.placement;
@@ -1481,6 +1496,7 @@ export class WorkflowEngine {
     mode: Workflow["mode"] = "federated",
     titled = true,
     contract = 1,
+    firstPrompt = "",
   ) {
     return this.serial(async () => {
       const db = await this.db();
@@ -1621,6 +1637,7 @@ export class WorkflowEngine {
         pending: null,
       };
       db.workflows.push(w);
+      await this.detectInitialFederation(w, snapshot.id, firstPrompt);
       await this.save();
       return w.id;
     });
@@ -3657,20 +3674,22 @@ export class WorkflowEngine {
       }),
     );
   }
-  started(agentId: string) {
-    return this.serial(async () => {
+  private async detectInitialFederation(w: Workflow, agentId: string, firstPrompt = "", observed?: History | null): Promise<"empty" | undefined> {
+    if (w.contract < 7 || w.mode !== "undecided" || w.plan?.id !== agentId || w.execute || w.lastInstruction) return;
+    const history = observed === undefined ? await this.port.history(agentId).catch(() => null) : observed;
+    const request = userText(history?.request || history?.goal || firstPrompt);
+    if (!request.trim()) return "empty";
+    if (workflowRequestedMode(w, request) !== "federated") return;
+    if (!w.goal) w.goal = history?.goal || request;
+    await this.applyModeChoice(w, agentId, "federated");
+  }
+  async started(agentId: string) {
+    const initial = await this.serial(async () => {
       const w = (await this.db()).workflows.find(
         (entry) => memberRole(entry, agentId) !== null,
       );
       if (!w) return;
-      if (w.contract >= 7 && w.mode === "undecided" && w.plan?.id === agentId && !w.execute && !w.lastInstruction) {
-        const history = await this.port.history(agentId).catch(() => null);
-        const request = userText(history?.request || history?.goal || "");
-        if (workflowRequestedMode(w, request) === "federated") {
-          if (!w.goal) w.goal = history?.goal || request;
-          await this.applyModeChoice(w, agentId, "federated");
-        }
-      }
+      const initial = await this.detectInitialFederation(w, agentId);
       this.pushAudit.invalidatePushAudit(w);
       // A later user turn supersedes the deferred colour change, even before it replies.
       w.pushRetry = null;
@@ -3688,7 +3707,21 @@ export class WorkflowEngine {
       this.scopeCache.clear();
       await this.refreshConflicts(agentId);
       await this.save();
+      return initial;
     });
+    if (initial !== "empty") return;
+    // Timeline visibility can lag turn.before. Neither delay nor re-read holds the queue.
+    for (let attempt = 1; attempt < INITIAL_REQUEST_READ.attempts; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, INITIAL_REQUEST_READ.intervalMs));
+      if (this.stopped) return;
+      const history = await this.port.history(agentId).catch(() => null);
+      const retry = await this.serial(async () => {
+        if (this.stopped) return;
+        const w = (await this.db()).workflows.find(entry => entry.plan?.id === agentId);
+        if (w) return this.detectInitialFederation(w, agentId, "", history);
+      });
+      if (retry !== "empty") return;
+    }
   }
   /** Ordinary turns cannot be blocked by this API; show their overlap and delay automated writes. */
   private async refreshConflicts(starting = "") {
