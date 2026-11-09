@@ -10,6 +10,11 @@ import { applySelectionBatch, validateSelection } from "./executor-selection";
 
 type Role = "plan" | "execute" | "reviewer";
 type Inbox = NonNullable<Workflow["inbox"]>;
+/** Both verdicts belong beside the planner's handoff/design, or in this task's folder. */
+export function planDocumentFolder(id: string, plan: Pick<Decision, "next" | "handoff">): string {
+  const document = /(?:^|[\s"'`(])((?:\/|docs\/)[^\s"'`<>)]*\/)(?:handoff|design)\.md/.exec(`${plan.next}\n${plan.handoff}`);
+  return document ? document[1] : `docs/changes/${id}/`;
+}
 export interface PlanReviewHost {
   port(): WorkflowPort;
   settings(): Promise<Settings>;
@@ -74,6 +79,7 @@ export class PlanReviewGate {
       if (w.pending && w.pending.stage !== "queued") return;
       w.pending = null; review.stage = "off";
       this.restore(w);
+      this.host.touch(w, "계획 검증 끔 — 구현 담당을 확정하면 구현을 시작합니다.");
       return;
     }
     if (["reviewing", "revising"].includes(review.stage)) throw new Error("검증 응답 중에는 담당을 변경할 수 없습니다.");
@@ -123,11 +129,10 @@ export class PlanReviewGate {
   async hold(w: Workflow, inbox: Inbox, d: Decision): Promise<boolean> {
     if (!capabilities(w).planReview || w.execute || w.lastInstruction || w.approvedHold === w.heldApproval?.id) return false;
     const review = w.planReview;
+    // Keep the folder even when plan review is off: final implementation review needs it.
+    review.path = path.join(planDocumentFolder(w.id, d), "plan-review.md");
     if (w.reviewSelection.enabled === false) { review.stage = "off"; review.outcome = "off"; return false; }
     w.reviewPlan = inbox;
-    // The document folder is carried by the planner's handoff; never invent a second writer.
-    const document = /(?:^|[\s"'`(])((?:\/|docs\/)[^\s"'`<>)]*\/)(?:handoff|design)\.md/.exec(`${d.next}\n${d.handoff}`);
-    review.path = document ? `${document[1]}plan-review.md` : "docs/changes/" + w.id + "/plan-review.md";
     if (w.reviewSelection.enabled === null || w.reviewSelection.stage !== "ready") {
       review.stage = "waiting_choice"; this.restore(w);
       this.host.touch(w, "계획 검증 켜기/끄기를 선택하세요. 구현 승인은 검증 선택 뒤 가능합니다.");

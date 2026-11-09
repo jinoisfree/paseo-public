@@ -1,5 +1,5 @@
 import { planReviewSchema, reviewSelectionSchema } from "../shared/plan-review";
-import { PlanReviewGate } from "./plan-review";
+import { PlanReviewGate, planDocumentFolder } from "./plan-review";
 import { decisionHash } from "../shared/plan-approval";
 import { OwnerPolicyStore } from "./owner-policy";
 import { recommendedSettings } from "../shared/recommended";
@@ -1058,7 +1058,7 @@ export class WorkflowEngine {
       await this.planReviewGate.choose(w, choice);
       await this.save();
       if (!draft && w.status === "active") await this.advance(w);
-      return { ok: true, detail: draft ? "검증 담당 초안을 저장했습니다. 첫 계획이 나오면 검증합니다." : w.detail };
+      return { ok: true, detail: draft && choice.enabled ? "검증 담당 초안을 저장했습니다. 첫 계획이 나오면 검증합니다." : w.detail };
     });
   }
   /** The executor chosen on the plugin screen; a held plan goes out once it is valid. */
@@ -4010,7 +4010,10 @@ export class WorkflowEngine {
       w.planConflict.stage = "review";
       conflict = `\n\n적용하지 않은 새 계획(응답 ${w.planConflict.key}):\n${w.planConflict.next}\n${w.planConflict.reason}\n기존 결과와 함께 검토하고 실행할 지시를 plan으로 재확정하세요.`;
     }
-    this.queue(w, "plan", REVIEW + (await this.evidence(w)) + conflict, "review");
+    const folder = w.planReview.path ? path.dirname(w.planReview.path)
+      : planDocumentFolder(w.id, { next: w.lastInstruction, handoff: w.plan?.handoff ?? "" });
+    const instruction = w.contract >= 7 ? REVIEW.replace("작업 문서 폴더에 verdict.md", path.join(folder, "verdict.md")) : REVIEW;
+    this.queue(w, "plan", instruction + (await this.evidence(w)) + conflict, "review");
   }
   private async complete(w: Workflow, d: Decision, role: Role) {
     if (automates(w) && w.contract >= 2 && role === "plan") {

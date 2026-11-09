@@ -764,6 +764,8 @@ try {
     try {
       const planner=await runAgent("브레인스토밍");
       let flow=await waitFor("early brainstorm enrollment",async()=>state().workflows.find(w=>w.plan?.id===planner&&w.brainstorm));
+      const plannerConfig=JSON.parse(readFileSync(agentFile(planner),"utf8")).config;
+      assert(plannerConfig.systemPrompt.includes("계획 검증을 켤까요?"),"contract7 review question missing from the actual planner system prompt");
       const questions=[
         {question:"진행 방식을 선택하세요",header:"방식",multiSelect:false,options:["일반개발","연합개발","개발 안 함"].map(label=>({label,description:label}))},
         {question:"계획 검증을 켤까요?",header:"계획검증",multiSelect:false,options:["켜기","끄기"].map(label=>({label,description:label}))},

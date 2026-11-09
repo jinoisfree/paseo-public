@@ -7,6 +7,7 @@ import { paseoHome, ownerPolicyPath, legacyPublicConfigs } from "./server/paths"
 import { OwnerPolicyStore } from "./server/owner-policy";
 import path from "node:path";
 import { creationRole } from "./shared/assignment";
+import { CURRENT_CONTRACT } from "./shared/capabilities";
 import { materializeRules } from "./server/rules";
 import { composePrompt, composeCurrentPrompt } from "./server/roles";
 import { generalPrompt } from "./server/start-guide";
@@ -122,7 +123,7 @@ export default function contribute(server: PluginServerContext) {
         titlePrompts(addsTitle, automated && settings.titleMarker) + pushApprovalPrompt();
       const currentSelection = current && mode !== "general" ? SCREEN_SELECTION_PROMPT : "";
       const systemPrompt = current && mode
-        ? composeCurrentPrompt(provider, request.config.systemPrompt, mode, rulesReadme, currentSelection, titles, 6)
+        ? composeCurrentPrompt(provider, request.config.systemPrompt, mode, rulesReadme, currentSelection, titles, CURRENT_CONTRACT)
         : ready
           ? await generalPrompt(
               directory,
@@ -203,7 +204,7 @@ export default function contribute(server: PluginServerContext) {
         const snapshot = await port.inspect(agent.id).catch(() => null);
         if (!snapshot) continue;
         await engine
-          .enroll(snapshot, seed.config, seed.env, seed.mode, seed.titled, 7)
+          .enroll(snapshot, seed.config, seed.env, seed.mode, seed.titled, CURRENT_CONTRACT)
           .catch(report);
         return;
       }

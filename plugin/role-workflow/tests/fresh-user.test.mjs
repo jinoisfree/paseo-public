@@ -290,6 +290,13 @@ test("fresh ask-mode general choice retains contract7 without role separation",a
  assert.equal(result.state.mode,"general");assert.equal(result.state.contract,7);assert.equal(result.state.execute,null);
 });
 
+for (const provider of ["claude", "codex"]) test(`C7-LIVE AC-1: fresh ${provider} creation injects the plan review question`, async t => {
+ const f=await freshUser(t), result=await f.enroll(provider);
+ assert.match(result.prompt,/계획 검증을 켤까요\?/);
+ assert.match(result.prompt,/header: 계획검증/);
+ assert.equal(result.state.contract,7);
+});
+
 // N-1: verify the real creation hook, separately from explicit-version engine fixtures.
 test("N-1: new federation and general registrations receive contract7 with unchanged standalone behavior",async t=>{
  const {capabilities}=await import('../shared/capabilities.ts');
