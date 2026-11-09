@@ -28,6 +28,7 @@ import {
   forgetProject,
   control,
   selectExecutor,
+  cancelImplementationReservation,
   selectPlanReview,
   reviewOptions,
   selectMode,
@@ -404,6 +405,10 @@ export default function contribute(server: PluginServerContext) {
   server.handle(selectExecutor, async (input, context) => {
     attach(context.paseo);
     return engine.selectExecutor(input.id, input);
+  });
+  server.handle(cancelImplementationReservation, async (input, context) => {
+    attach(context.paseo);
+    return engine.cancelImplementationReservation(input.id);
   });
   server.handle(control, async (input, context) => {
     attach(context.paseo);

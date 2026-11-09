@@ -1,11 +1,11 @@
 import { z } from "zod";
-import type { ExecutorModel } from "./contracts";
+type ThinkingModel = { thinkingOptions?: readonly { id: string; label: string; isDefault?: boolean }[] };
 import { capabilities } from "./capabilities";
 
 /** Every thinking option of the model; an empty id is offered only when the model has none. */
-export function pickerThinking(model: ExecutorModel | undefined) {
+export function pickerThinking(model: ThinkingModel | undefined) {
   if (!model) return [];
-  if (!model.thinkingOptions.length) return [{ id: "", label: "추론 없음", isDefault: true }];
+  if (!model.thinkingOptions?.length) return [{ id: "", label: "추론 없음", isDefault: true }];
   return model.thinkingOptions.map((option) => ({
     ...option,
     label: `${option.label}${option.isDefault ? " (기본)" : ""}`,
@@ -13,7 +13,7 @@ export function pickerThinking(model: ExecutorModel | undefined) {
 }
 
 /** The default to preselect: the catalog default, or none when the catalog states none. */
-export function pickerDefaultThinking(model: ExecutorModel | undefined) {
+export function pickerDefaultThinking(model: ThinkingModel | undefined) {
   const options = pickerThinking(model);
   return (options.find((option) => option.isDefault) ?? options[0])?.id ?? null;
 }

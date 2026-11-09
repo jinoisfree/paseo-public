@@ -96,6 +96,7 @@ export const workflowViewSchema = z.object({
   heldPlan: z.boolean().default(false),
   reviewSelection: reviewSelectionSchema.optional(),
   planReview: planReviewSchema.optional(),
+  implementationReserved: z.boolean().default(false),
   reviewerAgentId: z.string().nullable().default(null),
   brainstorm: z.boolean().default(false),
   firstPlan: z.boolean().default(false),
@@ -185,6 +186,7 @@ export const selectExecutor = defineRpc({
     id: z.string(),
     holdId: z.number().int().positive().optional(),
     unverified: z.boolean().optional(),
+    reserve: z.boolean().optional(),
     provider: z.enum(["codex", "claude"]),
     model: z.string().trim().min(1).max(120),
     // An empty value is only valid for a model without thinking options.
@@ -240,6 +242,11 @@ export const selectPlanReview = defineRpc({
   name: "workflow.select-plan-review",
   input: z.object({ id: z.string(), holdId: z.number().int().positive().optional(), enabled: z.boolean(),
     provider: z.enum(["codex", "claude"]).optional(), model: z.string().optional(), thinking: z.string().optional(), extra: z.boolean().optional() }),
+  output: z.object({ ok: z.boolean(), detail: z.string() }),
+});
+export const cancelImplementationReservation = defineRpc({
+  name: "workflow.cancel-implementation-reservation",
+  input: z.object({ id: z.string() }),
   output: z.object({ ok: z.boolean(), detail: z.string() }),
 });
 export const setProgress = defineRpc({

@@ -161,6 +161,7 @@ const workflowSchema = z.object({
   reviewPlan: inboxSchema.nullable().default(null),
   reviewSelection: reviewSelectionSchema.default(() => reviewSelectionSchema.parse({})),
   planReview: planReviewSchema.default(() => planReviewSchema.parse({})),
+  implementationReserved: z.boolean().default(false),
   cycles: z.number(),
   turns: z.number(),
   detail: z.string(),
@@ -596,6 +597,7 @@ export class WorkflowEngine {
     port: () => this.port, settings: () => this.settings(),
     queue: (w, role, prompt, phase) => this.queue(w, role, prompt, phase),
     touch: (w, detail) => this.touch(w, detail),
+    startReserved: w => this.startReservedImplementation(w),
   });
   private readonly archives = new Archives({
     lifecycle: () => this.lifecycle,
@@ -1062,7 +1064,7 @@ export class WorkflowEngine {
     });
   }
   /** The executor chosen on the plugin screen; a held plan goes out once it is valid. */
-  selectExecutor(id: string, choice: { provider: "codex" | "claude"; model: string; thinking: string; holdId?: number; unverified?: boolean }) {
+  selectExecutor(id: string, choice: { provider: "codex" | "claude"; model: string; thinking: string; holdId?: number; unverified?: boolean; reserve?: boolean }) {
     return this.serial(async () => {
       const w = (await this.db()).workflows.find((entry) => entry.id === id);
       if (!w) throw new Error("작업을 찾을 수 없습니다.");
@@ -1076,39 +1078,20 @@ export class WorkflowEngine {
             thinking: choice.thinking || "추론 없음" }, provider => this.executorChoice.catalog(w, provider));
         } catch (error) { draft.error = error instanceof Error ? error.message : String(error); }
         w.selectionDraft = draft;
+        if (capabilities(w).planReview && draft.stage !== "ready") w.implementationReserved = false;
         const hold = w.heldApproval;
         if (this.earlyReviewPicker(w) && !hold && choice.holdId === undefined) {
+          w.implementationReserved = draft.stage === "ready";
           await this.save();
-          return { ok: draft.stage === "ready", detail: draft.error || "구현 담당 초안을 저장했습니다. 구현 승인은 검증 뒤 가능합니다." };
+          return { ok: draft.stage === "ready", detail: draft.error || "검증을 통과하면 이 담당으로 바로 구현을 시작합니다." };
         }
-        if (!choice.holdId || hold?.id !== choice.holdId || !w.selectionPlan ||
-            w.inbox?.key !== w.selectionPlan || w.selectionPlan !== hold.inboxKey) {
+        if (capabilities(w).planReview && choice.reserve && w.reviewSelection.enabled === true &&
+            ["reviewing", "revising"].includes(w.planReview.stage) && hold && choice.holdId === hold.id) {
+          w.implementationReserved = draft.stage === "ready";
           await this.save();
-          return { ok: false, detail: "계획이 바뀌었습니다. 현재 계획을 확인하고 다시 고르세요." };
+          return { ok: w.implementationReserved, detail: draft.error || "검증 통과 시 구현 시작을 예약했습니다." };
         }
-        if (draft.stage !== "ready" || draft.pending || !draft.provider || draft.thinking === null) {
-          await this.save();
-          return { ok: false, detail: draft.error || "구현 담당 선택을 확인하세요." };
-        }
-        if (capabilities(w).planReview) {
-          const review = w.planReview;
-          if (w.reviewSelection.enabled === null) return { ok: false, detail: "계획 검증 켜기/끄기를 먼저 선택하세요." };
-          if (w.pending) return { ok: false, detail: "진행 중인 검증·기록 응답을 기다리세요." };
-          if (w.reviewSelection.enabled) {
-            if (review.stage === "limit" && choice.unverified) {
-              review.stage = "unverified_approved"; review.hash = hold.decisionHash;
-            }
-            if (!["passed", "unverified_approved"].includes(review.stage) || review.hash !== hold.decisionHash)
-              return { ok: false, detail: "현재 계획의 검증이 끝나지 않았습니다." };
-          }
-        }
-        w.selection = structuredClone(draft);
-        w.approvedHold = choice.holdId;
-        w.asker = null;
-        if (w.status === "needs_input") w.status = "active";
-        await this.save();
-        await this.advance(w);
-        return { ok: true, detail: "승인한 계획을 구현 담당에게 전달합니다." };
+        return this.approveExecutor(w, choice.holdId, !!choice.unverified);
       }
       // An executor whose selection fell out of ready (e.g. a failed catalog) may be re-picked within its product.
       if (w.execute && w.selection?.stage === "ready") throw new Error("구현 담당이 이미 생성되어 바꿀 수 없습니다.");
@@ -1134,6 +1117,61 @@ export class WorkflowEngine {
       await this.save();
       if (held) await this.advance(w);
       return { ok: true, detail: held ? "보관한 계획을 구현 담당에게 전달합니다." : "구현 담당을 확정했습니다. 계획이 나오면 바로 전달합니다." };
+    });
+  }
+  /** Manual and reserved starts share the same held-plan approval and dispatch checks. */
+  private async approveExecutor(w: Workflow, holdId?: number, unverified = false, automatic = false) {
+    const hold = w.heldApproval, draft = w.selectionDraft;
+    if (!draft) return { ok: false, detail: "구현 담당 선택을 확인하세요." };
+    if (!holdId || hold?.id !== holdId || !w.selectionPlan ||
+        w.inbox?.key !== w.selectionPlan || w.selectionPlan !== hold.inboxKey) {
+      await this.save();
+      return { ok: false, detail: "계획이 바뀌었습니다. 현재 계획을 확인하고 다시 고르세요." };
+    }
+    if (draft.stage !== "ready" || draft.pending || !draft.provider || draft.thinking === null) {
+      await this.save();
+      return { ok: false, detail: draft.error || "구현 담당 선택을 확인하세요." };
+    }
+    if (capabilities(w).planReview) {
+      const review = w.planReview;
+      if (w.reviewSelection.enabled === null) return { ok: false, detail: "계획 검증 켜기/끄기를 먼저 선택하세요." };
+      if (w.pending) return { ok: false, detail: "진행 중인 검증·기록 응답을 기다리세요." };
+      if (w.reviewSelection.enabled) {
+        if (review.stage === "limit" && unverified) {
+          review.stage = "unverified_approved"; review.hash = hold.decisionHash;
+        }
+        if (!["passed", "unverified_approved"].includes(review.stage) || review.hash !== hold.decisionHash)
+          return { ok: false, detail: "현재 계획의 검증이 끝나지 않았습니다." };
+      }
+    }
+    w.selection = structuredClone(draft);
+    w.approvedHold = holdId;
+    if (capabilities(w).planReview) w.implementationReserved = false;
+    w.asker = null;
+    if (w.status === "needs_input") w.status = "active";
+    await this.save();
+    await this.advance(w);
+    if (automatic && w.status === "active" && w.execute?.workspaceId && !w.placement) {
+      this.touch(w, "계획 검증 통과 — 예약한 구현 담당으로 구현을 시작합니다.");
+      await this.save();
+    }
+    return { ok: true, detail: "승인한 계획을 구현 담당에게 전달합니다." };
+  }
+  private async startReservedImplementation(w: Workflow): Promise<boolean> {
+    if (!capabilities(w).planReview || !this.firstPlan(w) || !w.implementationReserved ||
+        w.reviewSelection.enabled !== true || w.planReview.stage !== "passed" ||
+        !w.heldApproval || w.planReview.hash !== w.heldApproval.decisionHash ||
+        w.selectionDraft?.stage !== "ready" || w.pending) return false;
+    return (await this.approveExecutor(w, w.heldApproval.id, false, true)).ok;
+  }
+  cancelImplementationReservation(id: string) {
+    return this.serial(async () => {
+      const w = (await this.db()).workflows.find(w => w.id === id);
+      if (!w || !capabilities(w).planReview || !this.firstPlan(w)) return { ok: false, detail: "구현 시작 예약을 취소할 수 없습니다." };
+      w.implementationReserved = false;
+      this.touch(w, "구현 시작 예약을 취소했습니다. 검증 뒤 직접 구현 담당을 확정하세요.");
+      await this.save();
+      return { ok: true, detail: w.detail };
     });
   }
   private assignRepositories(w: Workflow, roots: string[], preservePush = false) {
@@ -1380,6 +1418,7 @@ export class WorkflowEngine {
         brainstorm: w.brainstorm,
         firstPlan: this.firstPlan(w),
         heldApproval: w.heldApproval,
+        implementationReserved: w.implementationReserved,
         reviewSelection: w.reviewSelection, planReview: w.planReview, reviewerAgentId: w.reviewer?.id ?? null,
         heldPlan: !!w.selectionPlan && w.inbox?.key === w.selectionPlan,
         planConflict: w.planConflict,
@@ -1473,6 +1512,7 @@ export class WorkflowEngine {
         reviewPlan: null,
         reviewSelection: reviewSelectionSchema.parse({}),
         planReview: planReviewSchema.parse({}),
+        implementationReserved: false,
         planIssue: null,
         planConflict: null,
         contract: mode === "general" && contract < 3 ? 1 : contract,

@@ -20,6 +20,7 @@ export interface PlanReviewHost {
   settings(): Promise<Settings>;
   queue(w: Workflow, role: Role, prompt: string, phase: Workflow["phase"]): void;
   touch(w: Workflow, detail: string): void;
+  startReserved(w: Workflow): Promise<boolean>;
 }
 
 /** First-plan verification; delivery, recovery, and compaction stay in the common engine. */
@@ -69,6 +70,7 @@ export class PlanReviewGate {
       return;
     }
     if (!choice.enabled) {
+      w.implementationReserved = false;
       w.reviewSelection.enabled = false;
       review.outcome = "off"; review.error = "";
       if (w.pending?.role === "reviewer" && w.pending.stage !== "queued") {
@@ -164,6 +166,7 @@ export class PlanReviewGate {
       if (review.verdict?.verdict === "APPROVED") {
         review.stage = "passed"; review.hash = w.heldApproval!.decisionHash;
         this.restore(w); this.host.touch(w, `계획 검증 통과 (${review.round}회). 현재 계획을 승인하면 구현합니다.`);
+        await this.host.startReserved(w);
       } else { w.status = "needs_input"; w.asker = "plan"; }
       return true;
     }

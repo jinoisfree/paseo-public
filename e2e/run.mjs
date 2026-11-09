@@ -787,21 +787,29 @@ try {
       const thinking=model.thinkingOptions?.find(o=>o.isDefault)?.id??model.thinkingOptions?.[0]?.id??"";
       const choice={id:flow.id,provider:"codex",model:model.id,thinking};
       assert((await rpc("workflow.select-plan-review",{...choice,enabled:true})).ok,"early reviewer draft failed");
-      assert((await rpc("workflow.select-executor",choice)).ok,"early executor draft failed");
+      // Keep Codex's read-only assertion independent of the normal executor's trust-file writes.
+      const executorModel=(await rpc("workflow.models",{id:flow.id,provider:"claude"})).models[0];
+      assert(executorModel,"no Claude executor model");
+      const executorThinking=executorModel.thinkingOptions.find(o=>o.isDefault)?.id??executorModel.thinkingOptions[0]?.id??"";
+      assert((await rpc("workflow.select-executor",{id:flow.id,provider:"claude",model:executorModel.id,thinking:executorThinking})).ok,"early executor draft failed");
       const target=join(work,"codex-reviewer-must-not-exist.txt");
       const before=(await run("git",["status","--porcelain=v1"],{cwd:work})).stdout;
       const verdict={status:"result",summary:"읽기 전용 검증",next:"",handoff:"쓰기 거부 후 판정",checks:[],planReview:{planHash:"__PLAN_HASH__",verdict:"APPROVED",findings:[]}};
-      writeFileSync(control,JSON.stringify({mode:"role",scenario:"codex-readonly",plan:[workflowBlock("plan","docs/changes/review/handoff.md 구현"),workflowBlock("note",""),workflowBlock("input","검토 끝")],reviewer:[`<paseo-workflow>${JSON.stringify(verdict)}</paseo-workflow>`],reviewerCommand:"printf forbidden > codex-reviewer-must-not-exist.txt"}));
+      writeFileSync(control,JSON.stringify({mode:"role",scenario:"codex-readonly",plan:[workflowBlock("plan","docs/changes/review/handoff.md 구현"),workflowBlock("note",""),workflowBlock("input","검토 끝")],reviewer:[`<paseo-workflow>${JSON.stringify(verdict)}</paseo-workflow>`],reviewerCommand:"printf forbidden > codex-reviewer-must-not-exist.txt",execute:[workflowBlock("input","예약 구현 시작 확인")]}));
       await agent.send("첫 계획을 확정해줘.");
-      flow=await waitFor("Codex verdict parsed and recorded",async()=>state().workflows.find(w=>w.id===flow.id&&w.planReview.stage==="passed"),120000);
+      flow=await waitFor("Codex verdict parsed and recorded",async()=>state().workflows.find(w=>w.id===flow.id&&w.execute&&w.approvedHold>0),120000);
+      // AC-8: no select-executor RPC after the draft. Only the existing placement choice may remain.
+      flow=await waitFor("reserved executor placement",async()=>state().workflows.find(w=>w.id===flow.id&&(w.placement?.stage==="choice"||w.execute?.workspaceId)),60000);
+      if(flow.placement?.stage==="choice")await rpc("workflow.select-placement",{id:flow.id,placement:"worktree"});
+      flow=await waitFor("reserved executor created",async()=>state().workflows.find(w=>w.id===flow.id&&w.execute?.workspaceId),60000);
       const calls=readFileSync(modelLog,"utf8").trim().split("\n").map(line=>JSON.parse(line)).filter(c=>c.role==="reviewer"&&c.mode==="role"&&c.api==="responses");
       const outputs=calls.filter(c=>c.toolResult).map(c=>c.toolResult).join("\n");
       assert(calls.some(c=>c.callsTool),"Codex did not attempt its real shell tool");
       assert(/Operation not permitted|Read-only file system|Permission denied|sandbox.*denied/i.test(outputs),`write was not denied: ${outputs}`);
       assert(!existsSync(target),"read-only reviewer wrote a file");
       assert(before===(await run("git",["status","--porcelain=v1"],{cwd:work})).stdout,"reviewer changed the worktree");
-      assert(flow.planReview.verdict.verdict==="APPROVED"&&flow.planReview.verdict.planHash===flow.heldApproval.decisionHash,"verdict did not parse with the held hash");
-      assert(!flow.execute&&flow.approvedHold===0,"early draft approved implementation");
+      assert(flow.planReview.verdict.verdict==="APPROVED"&&flow.planReview.verdict.planHash===flow.planReview.hash,"verdict did not parse with the held hash");
+      assert(flow.execute&&flow.approvedHold>0&&flow.planReview.stage==="done","AC-8 reserved implementation did not start automatically");
       assert((await cards()).length===1,"held plan duplicated the early picker");
       const reviewer=JSON.parse(readFileSync(agentFile(flow.reviewer.id),"utf8"));
       assert(reviewer.config.providerOptions.sandbox_mode==="read-only"&&reviewer.config.providerOptions.approval_policy==="never","per-conversation sandbox options missing");
