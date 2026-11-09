@@ -805,7 +805,7 @@ class Airport:
             result[product] = version([cli, '--version'], self.home) if cli else None
         return result
 
-    def doctor(self):
+    def doctor(self, *, caskroom_prefixes=('/opt/homebrew', '/usr/local')):
         checks = []
         def add(key, ok, instruction, manual=False, blocking=True):
             checks.append({'key': key, 'ok': bool(ok), 'manual': manual, 'instruction': instruction, 'blocking': blocking, 'severity': 'error' if blocking else 'warning'})
@@ -856,12 +856,29 @@ class Airport:
                 occupied = probe.connect_ex(('127.0.0.1', int(match[1]))) == 0
             add('port.conflict', not occupied or daemon_running(self.home), '다른 계정 데몬의 포트 점유 여부를 확인하세요.')
         # Running brew can populate HOME caches even for `list`; read its cask receipts instead.
-        receipts = []
-        for prefix in ('/opt/homebrew', '/usr/local'):
-            receipts.extend((Path(prefix)/'Caskroom/paseo/.metadata').glob('*/**/Casks/*.json'))
-        if receipts:
-            recorded = [read_json(file).get('version') for file in receipts]
-            add('brew.cask', versions['app'] in recorded, 'brew cask 기록과 앱 버전을 확인하세요.')
+        metadata_roots = [Path(prefix)/'Caskroom/paseo/.metadata' for prefix in caskroom_prefixes]
+        metadata_roots = [directory for directory in metadata_roots if directory.is_dir()]
+        recorded = set()
+        for metadata in metadata_roots:
+            recorded.update(directory.name for directory in metadata.iterdir() if directory.is_dir())
+            receipt = metadata/'INSTALL_RECEIPT.json'
+            for file in [*metadata.glob('*/**/Casks/*.json'), receipt]:
+                try:
+                    data = read_json(file)
+                except (OSError, ValueError):
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                if file == receipt:
+                    data = data.get('source', {})
+                value = data.get('version') if isinstance(data, dict) else None
+                if isinstance(value, str) and value.strip():
+                    recorded.add(value.strip())
+        if metadata_roots:
+            if recorded:
+                add('brew.cask', versions['app'] in recorded, 'brew cask 기록과 앱 버전을 확인하세요.')
+            else:
+                add('brew.cask', False, 'Homebrew 기록에서 앱 버전을 확인할 수 없습니다. 앱 버전과 설치 기록을 직접 확인하세요.', blocking=False)
         from public_runtime import auto_update_data
         state = read_json(auto_update_data(self.config)/'state.json')
         success = state.get('lastSuccessAt') or (state.get('finishedAt') if state.get('result') == 'updated' else None)

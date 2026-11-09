@@ -138,6 +138,72 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(self.snapshot(),before)
         self.assertFalse(any('set' in c or 'restart' in c or 'bootstrap' in c for c in self.calls()))
 
+    def brew_doctor(self, prefix, app_version='0.15.3'):
+        before = {str(p): (p.read_bytes(), p.stat().st_mtime_ns) for p in prefix.rglob('*') if p.is_file()}
+        home_before = self.snapshot()
+        actual_run = setup.run
+        def readonly_run(command, home, **kwargs):
+            self.assertNotEqual(Path(command[0]).name, 'brew', 'doctor must not run brew')
+            return actual_run(command, home, **kwargs)
+        with mock.patch.object(setup.Airport, 'versions', return_value={'app':app_version, 'claude':None, 'codex':None}), \
+             mock.patch.object(setup, 'run', side_effect=readonly_run):
+            result = setup.Airport().doctor(caskroom_prefixes=(prefix,))
+        self.assertEqual({str(p): (p.read_bytes(), p.stat().st_mtime_ns) for p in prefix.rglob('*') if p.is_file()}, before)
+        self.assertEqual(self.snapshot(), home_before)
+        return result, next((row for row in result['checks'] if row['key'] == 'brew.cask'), None)
+
+    def test_brew_cask_ac1_homebrew7_empty_cask_uses_receipt_and_metadata_version(self):
+        prefix = self.base/'brew'; metadata = prefix/'Caskroom/paseo/.metadata'
+        cask = metadata/'0.15.3/stamp/Casks/paseo.json'; cask.parent.mkdir(parents=True); cask.write_text('{}')
+        (metadata/'INSTALL_RECEIPT.json').write_text(json.dumps({'source':{'version':'0.15.3'}}))
+        _, row = self.brew_doctor(prefix)
+        self.assertTrue(row['ok'])
+
+    def test_brew_cask_ac2_mismatched_app_version_still_blocks(self):
+        prefix = self.base/'brew'; metadata = prefix/'Caskroom/paseo/.metadata'
+        cask = metadata/'0.15.3/stamp/Casks/paseo.json'; cask.parent.mkdir(parents=True); cask.write_text('{}')
+        (metadata/'INSTALL_RECEIPT.json').write_text(json.dumps({'source':{'version':'0.15.3'}}))
+        result, row = self.brew_doctor(prefix, '0.15.4')
+        self.assertFalse(row['ok']); self.assertTrue(row['blocking'])
+        # Isolate this actual check from unrelated fixture failures to exercise the CLI exit.
+        with mock.patch.object(setup.Airport, 'doctor', return_value={**result, 'checks':[row]}):
+            self.assertEqual(self.execute('doctor')[0], 1)
+
+    def test_brew_cask_ac3_legacy_cask_json_version_remains_supported(self):
+        prefix = self.base/'brew'
+        # No matching directory name or receipt: only the legacy JSON carries 0.15.3.
+        cask = prefix/'Caskroom/paseo/.metadata/legacy/stamp/Casks/paseo.json'
+        cask.parent.mkdir(parents=True); cask.write_text(json.dumps({'version':'0.15.3'}))
+        _, row = self.brew_doctor(prefix)
+        self.assertTrue(row['ok'])
+
+    def test_brew_cask_ac4_unknown_version_warns_without_failing_doctor(self):
+        prefix = self.base/'brew'; metadata = prefix/'Caskroom/paseo/.metadata'; metadata.mkdir(parents=True)
+        (metadata/'0.15.3').write_text('a file is not a version directory')
+        for receipt in ('{}', '{"source":{"version":null}}', '{"source":{"version":""}}', '{broken'):
+            with self.subTest(receipt=receipt):
+                (metadata/'INSTALL_RECEIPT.json').write_text(receipt)
+                result, row = self.brew_doctor(prefix)
+                self.assertFalse(row['ok']); self.assertFalse(row['blocking'])
+                self.assertEqual(row['severity'], 'warning')
+                self.assertIn('Homebrew 기록에서 앱 버전을 확인할 수 없습니다', row['instruction'])
+                with mock.patch.object(setup.Airport, 'doctor', return_value={**result, 'checks':[row]}):
+                    self.assertEqual(self.execute('doctor')[0], 0)
+
+    def test_brew_cask_ac5_absent_caskroom_adds_no_check(self):
+        _, row = self.brew_doctor(self.base/'no-brew')
+        self.assertIsNone(row)
+
+    def test_brew_cask_req1_unions_independent_record_sources(self):
+        prefix = self.base/'brew'; metadata = prefix/'Caskroom/paseo/.metadata'
+        cask = metadata/'0.15.1/stamp/Casks/paseo.json'; cask.parent.mkdir(parents=True)
+        cask.write_text(json.dumps({'version':'0.15.2'}))
+        (metadata/'INSTALL_RECEIPT.json').write_text(json.dumps({'source':{'version':'0.15.3'}}))
+        for app_version in ('0.15.1', '0.15.2', '0.15.3'):
+            with self.subTest(app_version=app_version):
+                _, row = self.brew_doctor(prefix, app_version)
+                self.assertTrue(row['ok'])
+
     def test_uninstall_with_stopped_daemon_and_provider_restore(self):
         self.execute('install')
         a=setup.Airport(); a.record['providerCommands']={'codex':'original-command'}
