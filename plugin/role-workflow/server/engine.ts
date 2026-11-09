@@ -3389,6 +3389,7 @@ export class WorkflowEngine {
 
   private async advance(w: Workflow) {
     if (this.stopped || w.status !== "active" || w.generalTransition) return;
+    const reviewingKey = w.planConflict?.stage === "review" ? w.planConflict.key : undefined;
     try {
       if (w.inbox) await this.consumeInbox(w);
       if (w.status !== "active") {
@@ -3406,6 +3407,12 @@ export class WorkflowEngine {
       this.touch(w, failure);
       this.recovery.describeTransient(w, failure);
       await this.save();
+    } finally {
+      if (reviewingKey !== undefined && w.planConflict?.key === reviewingKey &&
+          w.planConflict.stage === "resolved" && w.planConflict.confirmedKey === undefined) {
+        this.touch(w, `${w.detail} 보류했던 계획은 검토 결과에 따라 적용하지 않았습니다.`);
+        await this.save();
+      }
     }
   }
   private async prepareMember(w: Workflow, role: "plan" | "execute" | "reviewer") {
@@ -3835,7 +3842,15 @@ export class WorkflowEngine {
       this.recovery.describeTransient(w);
       return;
     }
-    const d = this.read(w, role, inbox, true);
+    const d = this.read(w, role, inbox, true, decision => {
+      const conflict = w.planConflict;
+      if (role !== "plan" || conflict?.stage !== "review" || !inbox.answers) return;
+      conflict.stage = "resolved";
+      if (decision.status === "plan") conflict.confirmedKey = inbox.key;
+      else {
+        delete conflict.confirmedKey;
+      }
+    });
     if (d) await this.act(w, role, d, this.record(w, role, d, inbox), inbox);
   }
   /** Nothing is outstanding, so the conversation the user is in moves the flow. */
@@ -3949,7 +3964,7 @@ export class WorkflowEngine {
     }
   }
   /** Returns the turn's decision, or settles why there is none and returns null. */
-  private read(w: Workflow, role: Role, inbox: Inbox, repairable: boolean): Decision | null {
+  private read(w: Workflow, role: Role, inbox: Inbox, repairable: boolean, onDecision?: (d: Decision) => void): Decision | null {
     let problem: string;
     // A malformed block cannot erase a read-only violation via the formatting repair turn.
     if (role === "reviewer" && w.reviewSelection.enabled && inbox.reviewerViolation) {
@@ -3959,7 +3974,10 @@ export class WorkflowEngine {
     }
     try {
       const d = parseDecision(inbox.text);
-      const invalid = this.assignmentError(w, role, d) ?? (
+      const assignmentError = this.assignmentError(w, role, d);
+      // A correlated review answer settles the proposal even when note retains its existing rejection.
+      if (!assignmentError) onDecision?.(d);
+      const invalid = assignmentError ?? (
         inbox.answers && d.status === "note" && !(role === "plan" && w.planReview.stage === "revising")
           ? "전달한 지시에는 note로 답할 수 없습니다. 담당 역할의 작업 결과를 확인하세요." : null);
       if (!invalid) {
@@ -4047,13 +4065,9 @@ export class WorkflowEngine {
         await this.reviewConflict(w);
         return;
       }
-      if (w.planConflict.stage !== "review" || !inbox.answers) {
-        w.status = "needs_input";
-        this.touch(w, "기존 실행 결과와 보존된 충돌 계획을 먼저 검토해야 새 계획을 실행할 수 있습니다.");
-        return;
-      }
-      w.planConflict.stage = "resolved";
-      w.planConflict.confirmedKey = inbox.key;
+      w.status = "needs_input";
+      this.touch(w, "기존 실행 결과와 보존된 충돌 계획을 먼저 검토해야 새 계획을 실행할 수 있습니다.");
+      return;
     }
     if (d.status === "input") {
       w.status = "needs_input";

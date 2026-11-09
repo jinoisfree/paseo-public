@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { WorkflowEngine } from '../server/engine.ts';
@@ -9,8 +9,8 @@ import { WorkflowEngine } from '../server/engine.ts';
 // Every synthetic database is owned by WorkflowEngine. No direct state writes or live agents.
 const NEW = 'REPRO: handoff.md를 읽고 새 지시를 구현하세요';
 const OLD = 'REPRO: 이전 구현 지시';
-const block = (status, next = NEW) => `<paseo-workflow>${JSON.stringify({
-  status, summary: status, next, handoff: '격리 재현', checks: [],
+const block = (status, next = NEW, extra = {}) => `<paseo-workflow>${JSON.stringify({
+  status, summary: status, next, handoff: '격리 재현', checks: [], ...extra,
 })}</paseo-workflow>`;
 async function fixture(t, mode, contract = mode === 'general' ? 3 : 2) {
   const dir = await mkdtemp(path.join(tmpdir(), 'resume-2acb3d85-'));
@@ -21,6 +21,7 @@ async function fixture(t, mode, contract = mode === 'general' ? 3 : 2) {
   const sent = [], histories = new Map();
   let failSend = false, executorBusy = false;
   const port = {
+    ...(contract >= 4 ? {models: async()=>[{id:'builder',label:'Builder',thinkingOptions:[{id:'high',label:'High'}]}]} : {}),
     inspect: async id => agents.get(id) ?? null,
     projectName: async () => 'Fixture', workspaceName: async () => 'Fixture', rename: async () => {},
     quotaAccount: async () => null, quotaAvailable: async () => null,
@@ -50,9 +51,9 @@ async function fixture(t, mode, contract = mode === 'general' ? 3 : 2) {
     agent: 'Codex', model: 'codex/builder', thinking: 'high',
   });
   const state = async () => JSON.parse(await readFile(file, 'utf8')).workflows[0];
-  const finish = async (agentId, status, next = NEW, key = `${status}-${sent.length}`) => {
+  const finish = async (agentId, status, next = NEW, key = `${status}-${sent.length}`, extra = {}) => {
     const delivery = sent.findLast(row => row.id === agentId);
-    const text = block(status, next);
+    const text = block(status, next, extra);
     agents.get(agentId).status = 'idle';
     const h = { text, key, failed: null, messageIds: delivery ? [delivery.messageId] : [] };
     histories.set(agentId, h);
@@ -178,4 +179,66 @@ test(`message correlation boundary ${kind}`,async t=>{
  const before=f.sent.length;await f.engine.ended('A',kind,block('plan'),null,'',false,request,false,ids);
  const accepts=['undefined','empty-blank','matched','task-prefix'].includes(kind);
  assert.equal(f.sent.length,before+(accepts?1:0));assert.equal(!!(await f.state()).planIssue,!accepts);
+});
+
+
+// PLAN-CONFLICT-SETTLE: reach the review through real deliveries, never by editing stored state.
+const DISCARD_NOTICE = '보류했던 계획은 검토 결과에 따라 적용하지 않았습니다.';
+const FOLLOWUP = '사용자가 새로 승인한 후속 구현 지시';
+async function conflictReview(t, mode='federated', contract) {
+ const f=await fixture(t,mode,contract);
+ await f.finish('A','plan',OLD);
+ if(contract>=6){
+  if(contract>=7)await f.engine.selectPlanReview(f.id,{enabled:false,holdId:1});
+  await f.engine.selectExecutor(f.id,{provider:'codex',model:'builder',thinking:'high',holdId:1});
+ }
+ let w=await f.state();const executor=w.execute.id;
+ await f.engine.ended('A','held-conflict',block('plan'),null,'',false,'계획 수정',false,['side-user']);
+ w=await f.state();assert.equal(w.planConflict.stage,'executing');
+ await f.finish(executor,'result');w=await f.state();
+ assert.equal(w.planConflict.stage,'review');assert.equal(w.pending.role,'plan');
+ assert.match(f.sent.at(-1).prompt,/적용하지 않은 새 계획/);
+ return {f,executor};
+}
+async function userPlan(f, key='after-input') {
+ const text=block('plan',FOLLOWUP);f.agents.get('A').status='idle';
+ f.histories.set('A',{text,key,failed:null,messageIds:['user-message']});
+ await f.engine.ended('A',key,text,null,'',false,'이제 후속 작업을 진행해줘',false,['user-message']);
+}
+const instructions=(f,executor)=>f.sent.filter(row=>row.id===executor).map(row=>row.prompt.split('이번 지시:\n').at(-1));
+
+for(const mode of ['general','federated'])for(const status of ['input','complete','note','continue'])
+test(`SETTLE AC-1/2: ${mode} review ${status} discards the held plan and preserves reply handling`,async t=>{
+ const {f,executor}=await conflictReview(t,mode);
+ const verdict=path.join(f.dir,'verdict.md');await writeFile(verdict,'완료 / 단일 모델\n');
+ await f.finish('A',status,'기존 답변 처리','review-answer',status==='complete'?{verdict:{path:verdict,judgement:'완료',condition:'단일 모델'}}:{});
+ let w=await f.state();assert.equal(w.planConflict.stage,'resolved');assert.equal(w.planConflict.confirmedKey,undefined);
+ assert.deepEqual(instructions(f,executor),[OLD]);assert.equal(w.detail.split(DISCARD_NOTICE).length,2);
+ if(status==='input'){assert.equal(w.status,'needs_input');assert.match(w.detail,/기존 답변 처리/);}
+ if(status==='complete')assert.equal(w.status,'completed');
+ if(status==='note'){assert.equal(w.repairs,0);assert.equal(w.pending,null);assert.equal(w.status,'needs_input');assert.match(w.detail,/전달한 지시에는 note로 답할 수 없습니다/);}
+ if(status==='continue'){assert.equal(w.pending.role,'plan');assert.equal(w.pending.prompt,'기존 답변 처리');}
+ const sent=f.sent.length;await f.engine.ended('A','review-answer',block(status,'기존 답변 처리'),null,'',false,'',false,[]);
+ await f.restart();await f.engine.tick();w=await f.state();assert.equal(w.planConflict.stage,'resolved');assert.equal(f.sent.length,sent);assert.equal(w.detail.split(DISCARD_NOTICE).length,2);
+});
+for(const contract of [2,7])test(`SETTLE AC-5: contract${contract} result → conflict review → input → user plan dispatches without resume`,async t=>{
+ const {f,executor}=await conflictReview(t,'federated',contract);
+ await f.finish('A','input','푸시 승인을 기다립니다.','input-review');let w=await f.state();
+ assert.equal(w.planConflict.stage,'resolved');assert.equal(w.planConflict.confirmedKey,undefined);assert.equal(w.status,'needs_input');
+ await f.restart();await userPlan(f);w=await f.state();
+ assert.equal(w.status,'active');assert.equal(w.planConflict.stage,'resolved');assert.equal(w.planConflict.confirmedKey,undefined);
+ assert.deepEqual(instructions(f,executor),[OLD,FOLLOWUP]);assert.equal(w.lastInstruction,FOLLOWUP);assert.doesNotMatch(w.detail,/먼저 검토해야/);
+ await f.finish(executor,'result');w=await f.state();assert.equal(w.planConflict.stage,'resolved');
+ assert.doesNotMatch(w.pending.prompt,/적용하지 않은 새 계획/);assert.doesNotMatch(w.detail,/보류했던 계획/);
+});
+test('SETTLE AC-3: correlated review plan confirms its own key and dispatches exactly that plan',async t=>{
+ const {f,executor}=await conflictReview(t);await f.finish('A','plan',FOLLOWUP,'confirmed-review');
+ const w=await f.state();assert.equal(w.planConflict.stage,'resolved');assert.equal(w.planConflict.confirmedKey,'confirmed-review');
+ assert.deepEqual(instructions(f,executor),[OLD,FOLLOWUP]);assert.doesNotMatch(w.detail,/보류했던 계획/);
+});
+for(const status of ['plan','input','complete','note','continue'])test(`SETTLE AC-4: uncorrelated review ${status} never settles the conflict`,async t=>{
+ const {f,executor}=await conflictReview(t);const key='unrelated-review',text=block(status,FOLLOWUP);
+ f.histories.set('A',{key,text,failed:null,messageIds:['another-user']});f.agents.get('A').status='idle';
+ await f.engine.ended('A',key,text,null,'',false,'별도 사용자 메시지',false,['another-user']);
+ const w=await f.state();assert.equal(w.planConflict.stage,'review');assert.equal(w.planConflict.confirmedKey,undefined);assert.equal(w.planConflict.next,NEW);assert.deepEqual(instructions(f,executor),[OLD]);
 });
