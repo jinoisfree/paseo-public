@@ -4,8 +4,8 @@
 사장은 금고·지시서·명부·사물함을 가진다. 본체가 제공하는 칸의 수명이 이 원칙에 맞으면 본체가 원본이다.
 업데이트·플러그인 제거가 사장 자료를 지우는 칸은 원본으로 쓰지 않는다.
 
-본체는 Paseo 앱·데몬·내장 CLI, Claude Code, Codex CLI다. 직원은 에이전트 프로필이고 직책은 planner·executor다.
-연합개발은 별도 대화 두 개이며 provider/model이 같으면 단일 모델 검증이다.
+본체는 Paseo 앱·데몬·내장 CLI, Claude Code, Codex CLI다. 직원은 에이전트 프로필이고 직책은 planner·executor·reviewer다.
+연합개발은 별도 대화 두 개(planner·executor)다. 계획 검증을 켜면 읽기 전용 reviewer 대화가 하나 더 생기며, planner와 다른 (제품, 모델)이어야 한다. 최종 구현 검증은 planner가 맡고 planner·executor의 provider/model이 같으면 단일 모델 검증이다.
 사장 홈은 `$PASEO_HOME`(기본 `~/.paseo`), 현장은 프로젝트 저장소다.
 현장의 `AGENTS.md`·`paseo.json`은 현장이 원본이다. 시설의 승인된 Git 동작 외에 공항은 이를 읽기만 한다.
 

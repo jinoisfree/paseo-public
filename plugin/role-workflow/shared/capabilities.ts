@@ -4,6 +4,7 @@ export function capabilities(w: { contract?: number; mode: string }) {
   const splitGeneral = w.contract === 3 && w.mode === "general";
   return {
     current,
+    planReview: (w.contract ?? 1) >= 7 && w.mode === "federated",
     brainstorm: (w.contract ?? 1) >= 6 && w.mode === "undecided",
     firstPlanGate: (w.contract ?? 1) >= 6 && w.mode === "federated",
     splitGeneral,

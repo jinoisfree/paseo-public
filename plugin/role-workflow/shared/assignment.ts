@@ -2,7 +2,7 @@ import type { Settings } from "./contracts";
 import { recommendedSettings } from "./recommended";
 
 export type WorkflowProvider = "claude" | "codex";
-export type WorkflowRole = "plan" | "execute";
+export type WorkflowRole = "plan" | "execute" | "reviewer";
 
 export function oppositeProvider(provider: string): WorkflowProvider {
   const base = provider.split("/")[0];
@@ -31,6 +31,6 @@ export function creationRole(
   declared: string | undefined,
 ): WorkflowRole | undefined {
   if (newAutomated) return "plan";
-  if (declared === "plan" || declared === "execute") return declared;
+  if (declared === "plan" || declared === "execute" || declared === "reviewer") return declared;
   return undefined;
 }

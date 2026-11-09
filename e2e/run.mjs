@@ -142,7 +142,12 @@ const startDaemon = async () => {
 };
 const readyCount = async () =>
   ((await cli("plugin", "logs", "role-workflow")).stdout.match(/Plugin ready/g) ?? []).length;
-const state = () => JSON.parse(readFileSync(join(home, "role-workflow", "state.json"), "utf8"));
+const state = () => {
+  const db = JSON.parse(readFileSync(join(home, "role-workflow", "state.json"), "utf8"));
+  // Read the contract7 runtime snapshot rather than the legacy rollback projection.
+  db.workflows = db.workflows.map(w => ({...w,...w.planReviewRuntime}));
+  return db;
+};
 const agentFile = (id) => {
   const walk = (dir) =>
     readdirSync(dir).flatMap((name) => {
@@ -287,8 +292,9 @@ try {
       const { models } = await rpc("workflow.models", { provider: "claude" });
       const model = models.find(m => m.isDefault) ?? models[0];
       const thinking = model.thinkingOptions.find(o => o.isDefault)?.id ?? model.thinkingOptions[0]?.id ?? "";
+      await rpc("workflow.select-plan-review", {id:flow.id,holdId:flow.heldApproval.id,enabled:false});
       const selected = await rpc("workflow.select-executor", { id: flow.id, provider: "claude", model: model.id, thinking, holdId: flow.heldApproval?.id });
-      assert(flow.contract === 6 && flow.heldApproval?.id > 0, "fresh flow did not hold a contract6 plan");
+      assert(flow.contract === 7 && flow.heldApproval?.id > 0, "fresh flow did not hold a contract7 plan");
       assert(selected.ok, selected.detail);
       flow = await waitFor("shared executor tab", async () => state().workflows.find(w => w.id === flow.id && w.execute?.workspaceId), 60_000);
       assert(flow.isolation === "shared", `isolation ${flow.isolation}`);
@@ -367,6 +373,7 @@ try {
       const model = models.find((m) => m.isDefault) ?? models[0];
       assert(model, "no Claude model in the catalog");
       const thinking = model.thinkingOptions.find((o) => o.isDefault)?.id ?? model.thinkingOptions[0]?.id ?? "";
+      await rpc("workflow.select-plan-review", {id:flow.id,holdId:flow.heldApproval.id,enabled:false});
       const selected = await rpc("workflow.select-executor", { id: flow.id, provider: "claude", model: model.id, thinking, holdId: flow.heldApproval?.id });
       assert(selected.ok, `executor selection failed: ${selected.detail}`);
       flow = await waitFor("overlapping placement choice", async () => state().workflows.find(w => w.id === flow.id && w.placement?.stage === "choice"));
@@ -653,7 +660,7 @@ try {
     try {
       const planner = await runAgent("브레인스토밍");
       let flow = await waitFor("brainstorm flag", async () => state().workflows.find(w => w.plan?.id === planner && w.brainstorm));
-      assert(flow.contract === 6 && flow.mode === "undecided", "brainstorm changed the persisted mode");
+      assert(flow.contract === 7 && flow.mode === "undecided", "brainstorm changed the persisted mode");
       await rpc("workflow.status", {});
       const api = createPaseoApi(client);
       const timeline = async () => (await api.agents.ref(planner).timeline.refetch({ direction: "tail", limit: 200 })).entries.map(e => e.item);
@@ -710,6 +717,44 @@ try {
   await step("airport C3/C4: daemon restart keeps policy and does not repeat migration",async()=>{
     assert(readFileSync(policyFile,"utf8")===policyBeforeRestart,"policy changed on daemon restart");
     assert(JSON.stringify(state().settings)===JSON.stringify(legacySettings),"frozen rollback snapshot changed on restart");
+  });
+
+  for (const blocked of [false, true]) await step(`AC-20: plan reviewer ${blocked ? "two blocked rounds and user override" : "approval before execution"}`, async () => {
+    const first = workflowBlock("plan", "docs/changes/review/handoff.md 구현");
+    const decision = {status:"result",summary:"계획 검증",handoff:"읽기 전용 판정",next:"",checks:[],
+      planReview:{planHash:"__PLAN_HASH__",verdict:blocked?"BLOCKED":"APPROVED",findings:blocked?[{id:"F1",severity:"차단",text:"시험 보완 필요",evidence:"설계 7절"}]:[]}};
+    writeFileSync(control, JSON.stringify({mode:"role",scenario:`plan-review-${blocked}`, plan:blocked
+      ? [first,workflowBlock("plan","docs/changes/review/handoff.md 수정1"),workflowBlock("plan","docs/changes/review/handoff.md 수정2"),workflowBlock("input","검토 끝")]
+      : [first,workflowBlock("note",""),workflowBlock("input","검토 끝")],
+      reviewer:[`<paseo-workflow>${JSON.stringify(decision)}</paseo-workflow>`],execute:[workflowBlock("result","구현 완료")]}));
+    try {
+      const planner=await runAgent("연합개발로 진행해줘. 첫 계획을 검증할 시험 계획을 확정해줘.","codex");
+      let flow=await waitFor("review held plan",async()=>state().workflows.find(w=>w.plan?.id===planner && w.heldApproval));
+      const {providers}=await rpc("workflow.review-options",{id:flow.id});
+      const candidate=providers.find(p=>p.provider==="claude"),model=candidate?.models.find(m=>!m.reason);
+      assert(model,"no eligible Claude plan-mode reviewer");
+      const thinking=model.thinkingOptions?.find(o=>o.isDefault)?.id ?? model.thinkingOptions?.[0]?.id ?? "";
+      const selected=await rpc("workflow.select-plan-review",{id:flow.id,holdId:flow.heldApproval.id,enabled:true,provider:"claude",model:model.id,thinking});
+      assert(selected.ok,selected.detail);
+      flow=await waitFor("review verdict and planner recording",async()=>state().workflows.find(w=>w.id===flow.id && w.planReview?.stage===(blocked?"limit":"passed")),120000);
+      assert(!flow.execute,"executor created before review approval");
+      assert(flow.cycles===0,"review consumed implementation cycles");
+      assert(flow.planReview.round===(blocked?2:1),"unexpected review rounds");
+      const reviewer=JSON.parse(readFileSync(agentFile(flow.reviewer.id),"utf8"));
+      assert(reviewer.currentModeId==="plan" || reviewer.config?.modeId==="plan" || reviewer.modeId==="plan","reviewer is not in plan mode");
+      assert(reviewer.labels?.["role-workflow.role"] === "reviewer", "reviewer label missing");
+      assert(reviewer.launchEnv?.PASEO_ROLE_WORKFLOW_ROLE === "reviewer", "reviewer environment role missing");
+      assert(flow.reviewer.workspaceId===flow.plan.workspaceId,"reviewer left planner workspace");
+      const accepted=await rpc("workflow.select-executor",{id:flow.id,holdId:flow.heldApproval.id,provider:"claude",model:model.id,thinking,...(blocked?{unverified:true}:{})});
+      assert(accepted.ok,accepted.detail);
+      flow=await waitFor("review placement or dispatch",async()=>state().workflows.find(w=>w.id===flow.id && (w.placement?.stage==="choice" || w.execute?.workspaceId)),60000);
+      if(flow.placement) await rpc("workflow.select-placement",{id:flow.id,placement:"worktree"});
+      flow=await waitFor("review gate dispatch",async()=>state().workflows.find(w=>w.id===flow.id && w.execute?.workspaceId),60000);
+      assert(flow.planReview.stage==="done","review gate did not finish");
+      assert(flow.planReview.outcome===(blocked?"unverified_approved":"passed"),"review outcome missing");
+      writeFileSync(join(root,`plan-review-${blocked?"blocked":"approved"}.json`),JSON.stringify(flow,null,2));
+      await rpc("workflow.control",{id:flow.id,action:"pause"});
+    } finally {writeFileSync(control,JSON.stringify({mode:"text",text:"2"}));}
   });
 
   await step("the plugin logged no errors", async () => {

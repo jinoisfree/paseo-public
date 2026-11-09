@@ -3,7 +3,7 @@ import type { PaseoProviderUsageResult } from "@getpaseo/client";
 type ProviderUsage = PaseoProviderUsageResult["providers"][number];
 
 export const quotaPauseSchema = z.object({
-  role: z.enum(["plan", "execute"]),
+  role: z.enum(["plan", "execute", "reviewer"]),
   provider: z.enum(["codex", "claude"]),
   stoppedAt: z.number(),
   retryAt: z.number().nullable(),

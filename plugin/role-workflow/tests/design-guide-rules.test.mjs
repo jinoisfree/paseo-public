@@ -8,7 +8,7 @@ test("AC-1/2: design guide has one short original and stage links", () => {
  for (const text of ['소유 칸','공식 원본','쓰기 주체','수명','gh search repos|code|issues','GET','웹 검색','선택지 2~4개','파일로 쓰지 않음','개발 안 함','일반개발·개발 안 함','라이선스']) assert.ok(guide.includes(text), text);
  for (const file of ['README.md','00-common.md','10-planning.md','40-paseo-role-workflow.md']) assert.ok(RULES[file].includes('15-design-guide'),file);
  assert.match(RULES['00-common.md'],/신규 계약6\(계약5 \+ 브레인스토밍·첫 계획 승인\)/);
- assert.match(RULES['40-paseo-role-workflow.md'],/신규 등록은 계약6, 계약5 이하는 기존 동작/);
+ assert.match(RULES['40-paseo-role-workflow.md'],/신규 등록은 계약7, 계약5 이하는 기존 동작/);
 });
 
 // v3.6 restored specification: protect the entire manual rather than only its title.

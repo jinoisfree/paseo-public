@@ -54,6 +54,7 @@ export class PushAudit {
       w.conflict,
       w.plan?.compaction,
       w.execute?.compaction,
+      w.reviewer?.compaction,
     ];
     return (
       w.progress === "done" &&
@@ -75,7 +76,7 @@ export class PushAudit {
           w.progress,
           [...w.repositories].sort(),
           pushReviewKey(w.pushTargets),
-          [w.plan, w.execute].map(
+          [w.plan, w.execute, w.reviewer].map(
             (member) => member && [member.id, member.generation, member.config.provider],
           ),
         ]),
@@ -110,6 +111,7 @@ export class PushAudit {
       const members: PushRecoveryInput["members"] = [];
       if (w.plan) members.push({ id: w.plan.id, role: "plan" });
       if (w.execute) members.push({ id: w.execute.id, role: "execute" });
+      if (w.reviewer) members.push({ id: w.reviewer.id, role: "reviewer" });
       await this.host.save();
       return {
         workflowId: w.id,

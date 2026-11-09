@@ -39,6 +39,8 @@ export const settingsValuesSchema = z.object({
     .trim()
     .regex(/^codex(?:\/[^\s]+)?$/, "codex 또는 codex/모델 ID를 입력하세요.")
     .max(120),
+  reviewerMode: z.string().trim().min(1).max(80),
+  claudeReviewerMode: z.string().trim().min(1).max(80),
   executorMode: z.string().trim().min(1).max(80),
   claudeExecutorModel: z
     .string()

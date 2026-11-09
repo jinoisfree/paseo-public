@@ -12,7 +12,7 @@ export interface PushRecoveryInput {
   mode: "general" | "federated";
   repositories: string[];
   targets: PushTarget[];
-  members: { id: string; role: "plan" | "execute" }[];
+  members: { id: string; role: "plan" | "execute" | "reviewer" }[];
 }
 
 export type PushRecoveryResult =
@@ -102,6 +102,7 @@ async function matchingTargets(
   sources: Row[],
   probe: RepoProbe,
 ): Promise<PushTarget[] | null> {
+  if (sources.some(row => row.member.role === "reviewer")) return null;
   const actual = await Promise.all(sources.map((row) => executions(row, probe)));
   const expected = input.targets.length
     ? await resolvedPushTargets(probe, input.cwd, input.targets)

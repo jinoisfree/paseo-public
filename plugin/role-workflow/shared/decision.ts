@@ -1,3 +1,4 @@
+import { planReviewVerdictSchema } from "./plan-review";
 import { z } from "zod";
 import {
   repositoryPathsSchema,
@@ -27,6 +28,7 @@ export const decisionSchema = z
     pushTargets: pushTargetsSchema.optional(),
     verification: z.array(verificationSchema).max(30).optional(),
     verdict: verdictSchema.optional(),
+    planReview: planReviewVerdictSchema.optional(),
     constraints: z
       .array(z.object({ id: z.string().min(1).max(120), text: z.string().max(1000) }))
       .max(10)

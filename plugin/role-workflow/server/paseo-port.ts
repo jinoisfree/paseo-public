@@ -480,6 +480,19 @@ export function createPort(
     async rename(workspaceId, title) {
       await getApi().workspaces.ref(workspaceId).setTitle(title);
     },
+    async reviewerModes(provider, cwd) {
+      const api = getApi();
+      let enabled: Record<string, { enabled?: boolean }> = {};
+      try { enabled = JSON.parse(await readFile(path.join(paseoHome(), "config.json"), "utf8"))?.agents?.providers ?? {}; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      const [available, catalog] = await Promise.all([
+        withBudget("검증 제품", 5000, api.providers.listAvailable()),
+        withBudget("검증 권한 모드", 5000, api.providers.listModes(provider, { cwd })),
+      ]);
+      if (available.error || catalog.error) throw new Error("검증 카탈로그를 읽을 수 없습니다.");
+      return { enabled: enabled[provider]?.enabled !== false && available.providers.some(row => row.provider === provider && row.available),
+        modes: (catalog.modes ?? []).map(row => row.id) };
+    },
     async models(provider, cwd) {
       let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
@@ -541,7 +554,7 @@ export function createPort(
       // A workspace of its own is only for a conversation without one.
       const isolated =
         role === "execute" && w.isolation === "worktree" ? (w.worktree?.workspaceId ?? null) : null;
-      const beside = role === "execute" && !isolated ? (w.plan?.workspaceId ?? null) : null;
+      const beside = (role === "execute" || role === "reviewer") && !isolated ? (w.plan?.workspaceId ?? null) : null;
       const workspace = isolated
         ? api.workspaces.ref(isolated)
         : beside
@@ -554,7 +567,7 @@ export function createPort(
       const agent = await workspace.agents.create({
         agentId: member.id,
         idempotencyKey: `role-workflow-agent:${member.id}`,
-        title: beside ? `${TAB_NAMES[base] ?? base} 실행` : title,
+        title: beside ? `${TAB_NAMES[base] ?? base} ${role === "reviewer" ? "계획 검증" : "실행"}` : title,
         config: member.config,
         env: { ...member.env, PASEO_ROLE_WORKFLOW_MANAGED: "1", PASEO_ROLE_WORKFLOW_ROLE: role },
         labels: {

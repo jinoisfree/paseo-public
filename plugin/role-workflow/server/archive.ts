@@ -34,6 +34,7 @@ export interface ArchiveFlow {
   isolation?: string;
   worktreeCleanup?: { stage: string } | null;
   plan: { id: string; workspaceId: string | null; compaction?: string | null } | null;
+  reviewer?: { id: string; workspaceId: string | null; compaction?: string | null } | null;
   execute: { id: string; workspaceId: string | null; compaction?: string | null } | null;
   pending?: unknown;
   inbox?: unknown;
@@ -61,7 +62,7 @@ function hasUnsettledWork(w: ArchiveFlow): boolean {
 
 /** Shared ownership and member identity checks used by both archive paths. */
 export function archiveWorkspaceShared(workflows: readonly ArchiveFlow[], ownerId: string, ids: readonly string[]) {
-  return workflows.some(other => other.id !== ownerId && [other.plan, other.execute].some(member =>
+  return workflows.some(other => other.id !== ownerId && [other.plan, other.execute, other.reviewer].some(member =>
     member?.workspaceId && ids.includes(member.workspaceId)));
 }
 export function archiveMembersPresent(
@@ -99,7 +100,7 @@ export function archiveCandidate(
     hasUnsettledWork(w)
   )
     return null;
-  const members = [w.plan, w.execute].filter((m) => m !== null);
+  const members = [w.plan, w.execute, w.reviewer].filter((m) => m != null);
   if (!members.length || members.some((m) => !m.workspaceId || m.compaction)) return null;
   const workspaceIds = [...new Set(members.map((m) => m.workspaceId!))];
   const conversations = inspection.conversations.filter((a) =>
@@ -136,7 +137,7 @@ export function archiveCandidates(
   return workflows.flatMap((w) => {
     if (ids && !ids.includes(w.id)) return [];
     const shared = archiveWorkspaceShared(workflows, w.id,
-      [w.plan?.workspaceId, w.execute?.workspaceId].filter((id): id is string => !!id));
+      [w.plan?.workspaceId, w.execute?.workspaceId, w.reviewer?.workspaceId].filter((id): id is string => !!id));
     const row = shared ? null : archiveCandidate(w, inspection, progress, days, now);
     return row ? [row] : [];
   });

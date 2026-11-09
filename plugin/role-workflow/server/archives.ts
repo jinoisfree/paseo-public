@@ -28,7 +28,7 @@ export class Archives {
   archived(agentId: string) {
     return this.host.serial(async () => {
       const w = (await this.host.db()).workflows.find(
-        (candidate) => candidate.plan?.id === agentId || candidate.execute?.id === agentId,
+        (candidate) => candidate.plan?.id === agentId || candidate.execute?.id === agentId || candidate.reviewer?.id === agentId,
       );
       if (!w) return;
       if (isFinished(w)) await this.collectArchived(w);
@@ -69,7 +69,7 @@ export class Archives {
     }
   }
   archiveEntry(w: Workflow, archivedAt = new Date().toISOString()): ArchiveEntry {
-    const members = [w.plan, w.execute].filter((m) => m !== null);
+    const members = [w.plan, w.execute, w.reviewer].filter((m) => m !== null);
     return {
       id: w.id,
       number: w.number,
@@ -83,7 +83,7 @@ export class Archives {
     };
   }
   async collectArchived(w: Workflow): Promise<boolean> {
-    const members = [w.plan, w.execute].filter((m) => m !== null);
+    const members = [w.plan, w.execute, w.reviewer].filter((m) => m !== null);
     if (!isFinished(w) || !members.length) return false;
     const times: number[] = [];
     for (const member of members) {
@@ -106,7 +106,7 @@ export class Archives {
     const workspaceIds = [
       ...new Set(
         workflows.flatMap((w) =>
-          [w.plan, w.execute].flatMap((m) => (m?.workspaceId ? [m.workspaceId] : [])),
+          [w.plan, w.execute, w.reviewer].flatMap((m) => (m?.workspaceId ? [m.workspaceId] : [])),
         ),
       ),
     ];

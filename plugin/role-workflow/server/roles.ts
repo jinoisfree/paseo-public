@@ -1,11 +1,19 @@
 import { agentRulesBlock } from "./rules";
 import type { WorkflowRole } from "../shared/assignment";
-import { FEDERATED_ONLY, automationBlock, stripManagedBlocks } from "./protocol";
+import { FEDERATED_ONLY, automationBlock, planReviewProtocol, stripManagedBlocks } from "./protocol";
 
 const START = "<paseo-role-workflow-v1>";
 const END = "</paseo-role-workflow-v1>";
 const BLOCK = /<paseo-role-workflow-v1>[\s\S]*?<\/paseo-role-workflow-v1>/gu;
 const NAMES: Record<string, string> = { claude: "Claude", codex: "Codex" };
+
+export function reviewerInstructions(): string {
+  return `당신은 계약7 첫 계획의 읽기 전용 계획 검증 담당(reviewer)이다. 파일 수정·커밋·푸시·다른 에이전트 실행을 금지한다. plan-review.md는 계획 담당이 쓴다.
+규칙 30-verification.md 3.1의 계획 검토 기준으로 요구 충족, G1~G4 근거, AC↔시험 대응, 위험도·롤백, 공항 소유 칸 점검표, 기존 경로 판정을 확인한다. 지적마다 파일:줄 또는 문서 절을 근거로 적고 사소한 표현은 권고로 한다.
+최종 구현 검증은 계획 담당의 몫이다. 구현하거나 계획을 대신 고치지 않는다. 승인 도구나 계획 모드 종료 도구를 호출하지 말고 판정 응답으로 턴을 끝낸다.
+${planReviewProtocol()}
+검토는 기본 최대2회이며 추가 검토는 사용자가 선택한다. 해시 불일치·파일 변경·푸시 판정은 무효다. 한국어로 설명한다.`;
+}
 
 // Connected conversations hand work over through the state block. The copy-and-paste wording
 // is only for conversations the plugin does not connect, where the user carries each message.
@@ -72,7 +80,7 @@ export function appendRoleInstructions(
   const automated = options.automated ?? false;
   // Without an explicit role each provider keeps its original one.
   const instructions =
-    (role ?? (provider === "claude" ? "plan" : "execute")) === "plan"
+    role === "reviewer" ? reviewerInstructions() : (role ?? (provider === "claude" ? "plan" : "execute")) === "plan"
       ? plannerInstructions(counterpart, automated)
       : executorInstructions(counterpart, automated);
 

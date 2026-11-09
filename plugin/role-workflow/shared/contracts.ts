@@ -1,3 +1,4 @@
+import { planReviewSchema, reviewSelectionSchema } from "./plan-review";
 import { executorSelectionSchema } from "./executor-selection";
 import { planConflictSchema } from "./plan-disposition";
 import { generalAgentSchema } from "./general-agent";
@@ -42,6 +43,8 @@ export const settingsSchema = z.object({
   maxCycles: settingsValuesSchema.shape.maxCycles.default(recommendedSettings.maxCycles),
   maxTurns: settingsValuesSchema.shape.maxTurns.default(recommendedSettings.maxTurns),
   executorModel: settingsValuesSchema.shape.executorModel.default(recommendedSettings.executorModel),
+  reviewerMode: settingsValuesSchema.shape.reviewerMode.default(recommendedSettings.reviewerMode),
+  claudeReviewerMode: settingsValuesSchema.shape.claudeReviewerMode.default(recommendedSettings.claudeReviewerMode),
   executorMode: settingsValuesSchema.shape.executorMode.default(recommendedSettings.executorMode),
   claudeExecutorModel: settingsValuesSchema.shape.claudeExecutorModel.default(recommendedSettings.claudeExecutorModel),
   claudeExecutorThinking: settingsValuesSchema.shape.claudeExecutorThinking.default(recommendedSettings.claudeExecutorThinking),
@@ -91,6 +94,9 @@ export const workflowViewSchema = z.object({
   contract: z.number().int().default(1),
   selection: executorSelectionSchema.nullable().default(null),
   heldPlan: z.boolean().default(false),
+  reviewSelection: reviewSelectionSchema.optional(),
+  planReview: planReviewSchema.optional(),
+  reviewerAgentId: z.string().nullable().default(null),
   brainstorm: z.boolean().default(false),
   firstPlan: z.boolean().default(false),
   heldApproval: z.object({ id: z.number().int().positive(), decisionHash: z.string(), summary: z.string(), handoff: z.string() }).nullable().default(null),
@@ -178,6 +184,7 @@ export const selectExecutor = defineRpc({
   input: z.object({
     id: z.string(),
     holdId: z.number().int().positive().optional(),
+    unverified: z.boolean().optional(),
     provider: z.enum(["codex", "claude"]),
     model: z.string().trim().min(1).max(120),
     // An empty value is only valid for a model without thinking options.
@@ -223,6 +230,18 @@ export const models = defineRpc({
   output: z.object({ models: z.array(executorModelSchema), error: z.string().nullable() }),
 });
 
+export const reviewOptions = defineRpc({
+  name: "workflow.review-options", input: z.object({ id: z.string() }),
+  output: z.object({ providers: z.array(z.object({ provider: z.enum(["codex", "claude"]), mode: z.string(), reason: z.string().nullable(),
+    models: z.array(z.object({ id: z.string(), label: z.string(), isDefault: z.boolean().optional(),
+      thinkingOptions: z.array(z.object({ id: z.string(), label: z.string(), isDefault: z.boolean().optional() })).optional(), reason: z.string().nullable() })) })) }),
+});
+export const selectPlanReview = defineRpc({
+  name: "workflow.select-plan-review",
+  input: z.object({ id: z.string(), holdId: z.number().int().positive(), enabled: z.boolean(),
+    provider: z.enum(["codex", "claude"]).optional(), model: z.string().optional(), thinking: z.string().optional(), extra: z.boolean().optional() }),
+  output: z.object({ ok: z.boolean(), detail: z.string() }),
+});
 export const setProgress = defineRpc({
   name: "workflow.progress",
   input: z.object({
@@ -268,7 +287,7 @@ export const retitle = defineRpc({
           projectId: z.string().default(""),
           cwd: z.string().default(""),
           provider: z.string(),
-          role: z.enum(["plan", "execute"]).nullable().default(null),
+          role: z.enum(["plan", "execute", "reviewer"]).nullable().default(null),
           title: z.string().max(500),
         }),
       )

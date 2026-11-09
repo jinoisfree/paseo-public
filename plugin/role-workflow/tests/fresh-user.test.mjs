@@ -268,10 +268,10 @@ test("the selected replacement conversation receives general rules without askin
 });
 
 for (const provider of ["claude", "codex"])
-  test(`fresh ${provider} federation enrollment uses contract 6 and exactly one verdict instruction`, async (t) => {
+  test(`fresh ${provider} federation enrollment uses contract 7 and exactly one verdict instruction`, async (t) => {
     const f = await freshUser(t);
     const result = await f.enroll(provider);
-    assert.equal(result.state.contract, 6);
+    assert.equal(result.state.contract, 7);
     assert.equal(result.state.mode, "federated");
     assert.equal(result.state.completeRepairs, 0);
     assert.equal(
@@ -280,12 +280,24 @@ for (const provider of ["claude", "codex"])
     );
   });
 
-test("fresh saved general enrollment uses contract6 standalone behavior",async t=>{
+test("fresh saved general enrollment uses contract7 standalone behavior",async t=>{
  const f=await freshUser(t,{general:true});const result=await f.enroll("claude");
- assert.equal(result.state.contract,6);assert.equal(result.state.mode,"general");assert.equal(result.state.execute,null);
+ assert.equal(result.state.contract,7);assert.equal(result.state.mode,"general");assert.equal(result.state.execute,null);
  assert.doesNotMatch(result.prompt,/<paseo-automation-v1>/);
 });
-test("fresh ask-mode general choice retains contract6 without role separation",async t=>{
+test("fresh ask-mode general choice retains contract7 without role separation",async t=>{
  const f=await freshUser(t);const result=await f.enroll("codex","일반개발");
- assert.equal(result.state.mode,"general");assert.equal(result.state.contract,6);assert.equal(result.state.execute,null);
+ assert.equal(result.state.mode,"general");assert.equal(result.state.contract,7);assert.equal(result.state.execute,null);
+});
+
+// N-1: verify the real creation hook, separately from explicit-version engine fixtures.
+test("N-1: new federation and general registrations receive contract7 with unchanged standalone behavior",async t=>{
+ const {capabilities}=await import('../shared/capabilities.ts');
+ for(const general of [false,true]){
+  const f=await freshUser(t,{general});const result=await f.enroll('claude');
+  assert.equal(result.state.contract,7);assert.equal(result.state.execute,null);
+  assert.equal(capabilities(result.state).planReview,!general);
+  assert.equal(capabilities(result.state).standalone,general);
+  if(general)assert.doesNotMatch(result.prompt,/<paseo-automation-v1>/);
+ }
 });

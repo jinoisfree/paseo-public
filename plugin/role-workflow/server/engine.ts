@@ -1,3 +1,5 @@
+import { planReviewSchema, reviewSelectionSchema } from "../shared/plan-review";
+import { PlanReviewGate } from "./plan-review";
 import { decisionHash } from "../shared/plan-approval";
 import { OwnerPolicyStore } from "./owner-policy";
 import { recommendedSettings } from "../shared/recommended";
@@ -100,16 +102,21 @@ const inboxSchema = z.object({
   failed: z.string().nullable(),
   compacted: z.boolean().default(false),
   canceled: z.boolean().default(false),
+  reviewerViolation: z.string().default(""),
   // The turn arrived while the flow waited for an answer.
   resumed: z.boolean().default(false),
   // The turn replies to the instruction this engine delivered, not to something the user typed.
   answers: z.boolean().default(false),
 });
 type Inbox = z.infer<typeof inboxSchema>;
-type Role = "plan" | "execute";
+type Role = "plan" | "execute" | "reviewer";
+function memberRole(w: { plan: Member | null; execute: Member | null; reviewer?: Member | null }, id: string): Role | null {
+  for (const role of ["plan", "execute", "reviewer"] as const) if (w[role]?.id === id) return role;
+  return null;
+}
 const pendingSchema = z.object({
   id: z.string(),
-  role: z.enum(["plan", "execute"]),
+  role: z.enum(["plan", "execute", "reviewer"]),
   prompt: z.string(),
   phase: z.enum(["plan", "execute", "review"]),
   rememberedThrough: z.number().int().nonnegative().optional(),
@@ -150,6 +157,10 @@ const workflowSchema = z.object({
   phase: z.enum(["plan", "execute", "review"]),
   plan: memberSchema.nullable(),
   execute: memberSchema.nullable(),
+  reviewer: memberSchema.nullable().default(null),
+  reviewPlan: inboxSchema.nullable().default(null),
+  reviewSelection: reviewSelectionSchema.default(() => reviewSelectionSchema.parse({})),
+  planReview: planReviewSchema.default(() => planReviewSchema.parse({})),
   cycles: z.number(),
   turns: z.number(),
   detail: z.string(),
@@ -256,7 +267,7 @@ const workflowSchema = z.object({
   repeatedPlans: z.number().int().nonnegative().default(0),
   wantsFederation: z.boolean().default(false),
   // Who asked the user something. The answer goes there, and a resume without one is refused.
-  asker: z.enum(["plan", "execute"]).nullable().default(null),
+  asker: z.enum(["plan", "execute", "reviewer"]).nullable().default(null),
   // An executor instruction parked while the planner's question about it is open.
   held: pendingSchema.nullable().default(null),
   repairs: z.number().int().nonnegative().default(0),
@@ -332,7 +343,13 @@ const databaseSchema = z.object({
   sequences: z.record(z.string(), z.number().int().nonnegative()).default({}),
   settings: settingsSchema,
   projects: z.record(z.string(), projectDefaultsSchema).default({}),
-  workflows: z.array(workflowSchema),
+  workflows: z.array(z.preprocess((value) => {
+    if (!value || typeof value !== "object") return value;
+    const raw = value as Record<string, unknown>;
+    // New runtime fields are parked outside legacy enums. Older builds load a safe wait.
+    return raw.planReviewRuntime && typeof raw.planReviewRuntime === "object"
+      ? { ...raw, ...raw.planReviewRuntime } : raw;
+  }, workflowSchema)),
   archives: z.array(archiveEntrySchema).max(500).default([]),
 });
 export type Database = z.infer<typeof databaseSchema>;
@@ -374,6 +391,7 @@ export interface History {
   failed: string | null;
 }
 export interface WorkflowPort {
+  reviewerModes?(provider: "codex" | "claude", cwd: string): Promise<{ enabled: boolean; modes: string[] }>;
   federationAvailability?(cwd?: string): Promise<{ available: boolean; reason: string | null }>;
   models?(provider: "codex" | "claude", cwd: string): Promise<readonly ExecutorModel[]>;
   syncProjectTitles?(): Promise<void>;
@@ -387,7 +405,7 @@ export interface WorkflowPort {
   inspect(id: string): Promise<Snapshot | null>;
   create(
     workflow: Workflow,
-    role: "plan" | "execute",
+    role: "plan" | "execute" | "reviewer",
     member: Member,
     marker?: boolean,
   ): Promise<string>;
@@ -489,7 +507,7 @@ interface Unmanaged {
   projectId: string;
   cwd?: string;
   provider: string;
-  role: "plan" | "execute" | null;
+  role: "plan" | "execute" | "reviewer" | null;
   title: string;
 }
 function nextNumber(sequences: Record<string, number>, projectId: string): number {
@@ -574,6 +592,11 @@ export class WorkflowEngine {
   private readonly scopeCache = new Map<string, Promise<string>>();
   private readonly managedRunner: ManagedPushRunner;
   private readonly managedExecutions = new Map<string, ManagedPush>();
+  private readonly planReviewGate = new PlanReviewGate({
+    port: () => this.port, settings: () => this.settings(),
+    queue: (w, role, prompt, phase) => this.queue(w, role, prompt, phase),
+    touch: (w, detail) => this.touch(w, detail),
+  });
   private readonly archives = new Archives({
     lifecycle: () => this.lifecycle,
     port: () => this.port,
@@ -781,7 +804,16 @@ export class WorkflowEngine {
         w.status !== "completed" && !this.executorChoice.selectedExecutor(w),
     );
     for (const w of pickers) w.pickerPosted = true;
-    const persisted = { ...db, settings: this.frozenSettings };
+    const persisted = { ...db, settings: this.frozenSettings, workflows: db.workflows.map(w => {
+      const reviewerRuntime = w.pending?.role === "reviewer" || w.asker === "reviewer" || w.quotaPause?.role === "reviewer" || w.transientPause?.role === "reviewer" || w.held?.role === "reviewer";
+      if (!reviewerRuntime && (!capabilities(w).planReview || !this.firstPlan(w) || w.reviewSelection.enabled === false)) return w;
+      // One authoritative runtime snapshot. Legacy fields are only a rollback-safe projection;
+      // they cannot dispatch either a reviewer or an unapproved executor after rollback.
+      return { ...w, status: "needs_input", pending: null, inbox: null, held: null,
+        asker: "plan", quotaPause: null, transientPause: null, selectionPlan: "",
+        planReviewRuntime: { status: w.status, pending: w.pending, inbox: w.inbox, held: w.held,
+          asker: w.asker, quotaPause: w.quotaPause, transientPause: w.transientPause, selectionPlan: w.selectionPlan } };
+    }) };
     const serialized = JSON.stringify(persisted);
     if (serialized !== this.savedDatabase) {
       try {
@@ -880,6 +912,7 @@ export class WorkflowEngine {
       lastResult: w.lastResult,
       planHandoff: w.plan?.handoff,
       executeHandoff: w.execute?.handoff,
+      reviewerHandoff: w.reviewer?.handoff, reviewSelection: w.reviewSelection, planReview: w.planReview,
       remember: w.memories.map((item) => item.text),
       constraints: w.constraints,
       repositories: w.repositories,
@@ -892,6 +925,7 @@ export class WorkflowEngine {
       previousAgentIds: w.history,
       planAgentId: w.plan?.id,
       executeAgentId: w.execute?.id,
+      reviewerAgentId: w.reviewer?.id,
     };
     const serializedHandoff = JSON.stringify(handoff);
     if (serializedHandoff !== this.savedHandoffs.get(w.id)) {
@@ -995,8 +1029,26 @@ export class WorkflowEngine {
       return { repositories: w.repositories };
     });
   }
+  reviewOptions(id: string) {
+    return this.serial(async () => {
+      const w = (await this.db()).workflows.find(w => w.id === id);
+      if (!w || !capabilities(w).planReview) throw new Error("계획 검증 대상 작업이 아닙니다.");
+      return { providers: await this.planReviewGate.options(w) };
+    });
+  }
+  selectPlanReview(id: string, choice: { holdId: number; enabled: boolean; provider?: "codex" | "claude"; model?: string; thinking?: string; extra?: boolean }) {
+    return this.serial(async () => {
+      const w = (await this.db()).workflows.find(w => w.id === id);
+      if (!w || !capabilities(w).planReview || !this.firstPlan(w)) throw new Error("첫 계획에서만 검증을 선택할 수 있습니다.");
+      if (w.heldApproval?.id !== choice.holdId) return { ok: false, detail: "계획이 바뀌었습니다. 현재 계획을 다시 확인하세요." };
+      await this.planReviewGate.choose(w, choice);
+      await this.save();
+      if (w.status === "active") await this.advance(w);
+      return { ok: true, detail: w.detail };
+    });
+  }
   /** The executor chosen on the plugin screen; a held plan goes out once it is valid. */
-  selectExecutor(id: string, choice: { provider: "codex" | "claude"; model: string; thinking: string; holdId?: number }) {
+  selectExecutor(id: string, choice: { provider: "codex" | "claude"; model: string; thinking: string; holdId?: number; unverified?: boolean }) {
     return this.serial(async () => {
       const w = (await this.db()).workflows.find((entry) => entry.id === id);
       if (!w) throw new Error("작업을 찾을 수 없습니다.");
@@ -1019,6 +1071,18 @@ export class WorkflowEngine {
         if (draft.stage !== "ready" || draft.pending || !draft.provider || draft.thinking === null) {
           await this.save();
           return { ok: false, detail: draft.error || "구현 담당 선택을 확인하세요." };
+        }
+        if (capabilities(w).planReview) {
+          const review = w.planReview;
+          if (w.reviewSelection.enabled === null) return { ok: false, detail: "계획 검증 켜기/끄기를 먼저 선택하세요." };
+          if (w.pending) return { ok: false, detail: "진행 중인 검증·기록 응답을 기다리세요." };
+          if (w.reviewSelection.enabled) {
+            if (review.stage === "limit" && choice.unverified) {
+              review.stage = "unverified_approved"; review.hash = hold.decisionHash;
+            }
+            if (!["passed", "unverified_approved"].includes(review.stage) || review.hash !== hold.decisionHash)
+              return { ok: false, detail: "현재 계획의 검증이 끝나지 않았습니다." };
+          }
         }
         w.selection = structuredClone(draft);
         w.approvedHold = choice.holdId;
@@ -1298,6 +1362,7 @@ export class WorkflowEngine {
         brainstorm: w.brainstorm,
         firstPlan: this.firstPlan(w),
         heldApproval: w.heldApproval,
+        reviewSelection: w.reviewSelection, planReview: w.planReview, reviewerAgentId: w.reviewer?.id ?? null,
         heldPlan: !!w.selectionPlan && w.inbox?.key === w.selectionPlan,
         planConflict: w.planConflict,
         planIssue: w.planIssue ? { key: w.planIssue.response.key, reason: w.planIssue.reason } : null,
@@ -1354,6 +1419,7 @@ export class WorkflowEngine {
         (w) =>
           w.plan?.id === snapshot.id ||
           w.execute?.id === snapshot.id ||
+          w.reviewer?.id === snapshot.id ||
           w.history.includes(snapshot.id),
       );
       if (known) return known.id;
@@ -1385,6 +1451,10 @@ export class WorkflowEngine {
       const w: Workflow = {
         id: randomUUID(),
         selection: contract >= 4 ? executorSelectionSchema.parse({responses:{}}) : null,
+        reviewer: null,
+        reviewPlan: null,
+        reviewSelection: reviewSelectionSchema.parse({}),
+        planReview: planReviewSchema.parse({}),
         planIssue: null,
         planConflict: null,
         contract: mode === "general" && contract < 3 ? 1 : contract,
@@ -1498,14 +1568,22 @@ export class WorkflowEngine {
   ) {
     return this.serial(async () => {
       const w = (await this.db()).workflows.find(
-        (candidate) => candidate.plan?.id === agentId || candidate.execute?.id === agentId,
+        (candidate) => memberRole(candidate, agentId) !== null,
       );
       if (!w) return;
+      if (memberRole(w, agentId) === "reviewer" && w.planReview.stage === "done") return;
       if (w.processed.includes(key) || w.inbox?.key === key || w.planIssue?.response.key === key) return;
       if (capabilities(w).brainstorm && requestsBrainstorm(userText(request || goal))) await this.startBrainstorm(w);
       if (canceled) w.transientPause = null;
       this.pushAudit.invalidatePushAudit(w);
-      await this.recordTurnEvidence(w, text, failed, evidence, agentId, key);
+      let foreignReview = false;
+      try { foreignReview = memberRole(w, agentId) !== "reviewer" && !!parseDecision(text).planReview; } catch { /* read() owns malformed-block handling. */ }
+      if (foreignReview && w.pending?.role !== memberRole(w, agentId)) {
+        const error = this.assignmentError(w, memberRole(w, agentId)!, parseDecision(text))!;
+        w.planReview.error = error; this.touch(w, error); this.seen(w, key);
+        await this.save(); return;
+      }
+      if (memberRole(w, agentId) !== "reviewer" && !foreignReview) await this.recordTurnEvidence(w, text, failed, evidence, agentId, key);
       await this.refreshConflicts();
       const turn = {
         agentId,
@@ -1514,6 +1592,7 @@ export class WorkflowEngine {
         failed,
         compacted,
         canceled,
+        reviewerViolation: evidence?.changed || evidence?.pushes.length ? "검증 턴에서 파일 변경 또는 푸시가 관측됐습니다." : "",
         resumed: false,
         answers: true,
       };
@@ -1548,7 +1627,7 @@ export class WorkflowEngine {
       // An informational turn with no outstanding work must not consume the initial
       // selection or trigger recovery/continuation. Live deliveries keep their existing
       // receipt and side-turn rules, including rejection of note as an instruction answer.
-      const note = failed === null ? this.sideDecision(w, w.plan?.id === agentId ? "plan" : "execute", text) : null;
+      const note = failed === null ? this.sideDecision(w, memberRole(w, agentId)!, text) : null;
       if (capabilities(w).current && !capabilities(w).standalone && !w.pending && !w.inbox && note?.status === "note") {
         this.seen(w, key);
         this.remember(w, note.remember);
@@ -1579,7 +1658,7 @@ export class WorkflowEngine {
       if (await this.generalMode.finishGeneralChoice(w, agentId, text, goal, request, failed, key)) return;
       if (await this.transitionTurn(w, turn, request, messageIds)) return;
       const chatResume = await this.chatResume(w, turn, request);
-      const role: Role = w.plan?.id === agentId ? "plan" : "execute";
+      const role: Role = memberRole(w, agentId)!;
       if (chatResume === "resumed" && !this.sideDecision(w, role, text)) {
         this.seen(w, key);
         // This turn may itself have ended the outstanding instruction. Settle it before
@@ -1610,9 +1689,9 @@ export class WorkflowEngine {
   /** A /compact turn is maintenance, never a new product response or a role handoff. */
   maintenanceEnded(agentId: string, key: string, compacted: boolean, maintenanceId?: string) {
     return this.serial(async () => {
-      const w = (await this.db()).workflows.find(w => w.plan?.id === agentId || w.execute?.id === agentId);
+      const w = (await this.db()).workflows.find(w => memberRole(w, agentId) !== null);
       if (!w || !compacted || w.processed.includes(key)) return;
-      const member = w.plan?.id === agentId ? w.plan : w.execute!;
+      const member = w[memberRole(w, agentId)!]!;
       this.seen(w, key);
       if (!this.compacting.has(member.id)) {
         if (member.compaction && maintenanceId === member.compaction) {
@@ -1640,7 +1719,7 @@ export class WorkflowEngine {
   ) {
     const { agentId, key, text, failed, compacted, canceled } = turn;
     const report = evidence?.report ?? text;
-    const role: Role = w.plan?.id === agentId ? "plan" : "execute";
+    const role: Role = memberRole(w, agentId)!;
     if (!(await this.admits(w, agentId, text, failed, request, key, report))) {
       await this.rememberSideTurn(w, key, evidence);
       return;
@@ -1677,7 +1756,7 @@ export class WorkflowEngine {
         w.pending.role === role && failed === null && this.sideDecision(w, role, text))
       w.status = "active";
     if (!w.goal) w.goal = goal.slice(0, 32000);
-    w.inbox = { agentId, key, text, failed, compacted, canceled, resumed, answers };
+    w.inbox = { agentId, key, text, failed, compacted, canceled, reviewerViolation: evidence?.changed || evidence?.pushes.length ? "검증 턴에서 파일 변경 또는 푸시가 관측됐습니다." : "", resumed, answers };
     await this.save();
     await this.advance(w);
   }
@@ -2021,7 +2100,7 @@ export class WorkflowEngine {
     await this.assertQuietProgressChange(w);
   }
   private async assertQuietProgressChange(w: Workflow) {
-    for (const member of [w.plan, w.execute]) {
+    for (const member of [w.plan, w.execute, w.reviewer]) {
       if (!member) continue;
       const snapshot = await this.port.inspect(member.id);
       if (!snapshot || !this.quiet(snapshot))
@@ -2150,7 +2229,7 @@ export class WorkflowEngine {
       return;
     }
     if (w.generalTransition || w.inbox || w.pending || w.status === "needs_input") return;
-    for (const member of [w.plan, w.execute]) {
+    for (const member of [w.plan, w.execute, w.reviewer]) {
       if (!member) continue;
       const snapshot = await this.port.inspect(member.id).catch(() => null);
       if (!snapshot || snapshot.archived || !this.quiet(snapshot)) return;
@@ -2243,7 +2322,7 @@ export class WorkflowEngine {
       base: string;
       found: boolean;
     }[] = [];
-    for (const member of [w.plan, w.execute]) {
+    for (const member of [w.plan, w.execute, w.reviewer]) {
       if (!member?.workspaceId || rows.some((row) => row.workspaceId === member.workspaceId))
         continue;
       const name = keep
@@ -2343,7 +2422,7 @@ export class WorkflowEngine {
       w.pushReceipt
     )
       throw new Error("새 작업이나 기존 푸시 기록이 있는 작업은 과거 응답으로 복구할 수 없습니다.");
-    const members = [w.plan, w.execute].filter((member) => !!member);
+    const members = [w.plan, w.execute, w.reviewer].filter((member) => !!member);
     if (!members.some((member) => member.id === agentId))
       throw new Error("현재 작업의 대화에서만 과거 푸시를 확인할 수 있습니다.");
     for (const member of members) {
@@ -2590,7 +2669,7 @@ export class WorkflowEngine {
     return this.serial(async () => {
       const db = await this.db();
       const w = db.workflows.find(
-        (candidate) => candidate.plan?.id === agentId || candidate.execute?.id === agentId,
+        (candidate) => memberRole(candidate, agentId) !== null,
       );
       const key = `${agentId}:${request.id}`;
       if (w && capabilities(w).current && w.mode === "undecided" && w.plan?.id === agentId) {
@@ -2639,7 +2718,7 @@ export class WorkflowEngine {
       this.permissions.add(key);
       if (this.permissions.size > 200)
         this.permissions.delete(this.permissions.values().next().value!);
-      const member = w.plan?.id === agentId ? w.plan : w.execute;
+      const member = w[memberRole(w, agentId)!];
       this.dispatch({
         kind: "permission",
         title: `권한 요청 · ${w.title}`,
@@ -2673,7 +2752,7 @@ export class WorkflowEngine {
       const label = typeof answer === "string" ? ((workflow?.contract ?? 1) >= 6 ? normalizeModeLabel(answer) : answer) : "";
       if (label !== "브레인스토밍" && label !== "일반개발" && label !== "연합개발") return;
       const w = (await this.db()).workflows.find(
-        (candidate) => candidate.plan?.id === agentId || candidate.execute?.id === agentId,
+        (candidate) => memberRole(candidate, agentId) !== null,
       );
       if (label === "브레인스토밍") {
         if (w) await this.startBrainstorm(w);
@@ -2866,7 +2945,7 @@ export class WorkflowEngine {
       w.cycles = 0;
       w.turns = 0;
     }
-    for (const member of [w.plan, w.execute]) {
+    for (const member of [w.plan, w.execute, w.reviewer]) {
       if (member?.compaction && !this.compacting.has(member.id)) member.compaction = null;
     }
     w.status = "active";
@@ -2885,7 +2964,7 @@ export class WorkflowEngine {
     await this.clearSettled(w);
   }
   private async received(w: Workflow, response: Inbox, pendingId: string): Promise<boolean> {
-    const member = [w.plan, w.execute].find((m) => m?.id === response.agentId);
+    const member = [w.plan, w.execute, w.reviewer].find((m) => m?.id === response.agentId);
     if (!member) return false;
     const history = await this.port.history(member.id, pendingId).catch(() => null);
     if (!history || history.failed !== null || history.key !== response.key ||
@@ -2894,10 +2973,10 @@ export class WorkflowEngine {
     // Histories without turns keep the planner's earlier exact-response rule.
     return history.turnId
       ? history.messageTurns?.[pendingId] === history.turnId
-      : member === w.plan;
+      : member === w.plan || member === w.reviewer;
   }
   private async checkResume(w: Workflow, message: string) {
-    for (const member of [w.plan, w.execute]) {
+    for (const member of [w.plan, w.execute, w.reviewer]) {
       // An executor whose creation failed is restored by resume below.
       if (!member || (member === w.execute && member.workspaceId === null)) continue;
       const snapshot = await this.port.inspect(member.id);
@@ -2945,6 +3024,7 @@ export class WorkflowEngine {
   }
   /** The role expected to act when no instruction is outstanding. */
   private floor(w: Workflow): Role {
+    if (w.planReview.stage === "reviewing" && w.reviewSelection.enabled) return "reviewer";
     return !w.held && w.phase === "execute" && w.execute ? "execute" : "plan";
   }
   /** A resume must leave something queued, running or asked, or the flow looks alive and idles. */
@@ -3053,7 +3133,7 @@ export class WorkflowEngine {
   private async observe(w: Workflow) {
     this.asking.delete(w.id);
     let responding = false;
-    for (const member of [w.plan, w.execute]) {
+    for (const member of [w.plan, w.execute, w.reviewer]) {
       if (!member?.workspaceId) continue;
       const snapshot = await this.port.inspect(member.id);
       // Finished work is being collected, possibly with only one legacy half archived.
@@ -3105,7 +3185,7 @@ export class WorkflowEngine {
     } else if (turn.history.text) {
       // The turn-ended event for this turn will now find it taken and skip its evidence,
       // so push receipts and reported artifacts are recorded here, as in a transition.
-      if (turn.failed === null)
+      if (turn.failed === null && w.pending!.role !== "reviewer")
         await this.captureArtifacts(
           w,
           turn.history.text,
@@ -3120,6 +3200,7 @@ export class WorkflowEngine {
         failed: turn.failed,
         compacted: turn.history.compacted ?? false,
         canceled: false,
+        reviewerViolation: turn.history.evidence?.changed || turn.history.evidence?.pushes.length ? "검증 턴에서 파일 변경 또는 푸시가 관측됐습니다." : "",
         resumed: false,
         // The last turn after a confirmed delivery stands for the instruction's answer.
         answers: true,
@@ -3166,6 +3247,7 @@ export class WorkflowEngine {
     phase: Workflow["phase"],
     instruction = false,
   ) {
+    if (role === "reviewer" && w.planReview.stage === "done") throw new Error("구현 전달 뒤 계획 검증을 재개할 수 없습니다.");
     w.pending = { id: randomUUID(), role, prompt, phase, stage: "queued", instruction };
     w.phase = phase;
   }
@@ -3183,7 +3265,7 @@ export class WorkflowEngine {
     const remembered = [...new Set([...constraints, ...memories.map((item) => item.text)])];
     return (
       `작업 ID: ${w.id}\n` +
-      `진행 방식: ${w.mode === "general" ? "일반개발" : "연합개발"} · 이 대화의 역할: ${planner ? "기획·설계·검증 담당" : "구현·자체 시험 담당"}\n` +
+      `진행 방식: ${w.mode === "general" ? "일반개발" : "연합개발"} · 이 대화의 역할: ${planner ? "기획·설계·검증 담당" : member === w.reviewer ? "읽기 전용 계획 검증 담당" : "구현·자체 시험 담당"}\n` +
       "푸시 규칙: 커밋만으로 최종 완료가 아니다. 에이전트는 git push를 직접 실행하지 않는다. 대상 저장소·원격·브랜치·전체 커밋과 검증 결과를 보고하고, 사용자가 /push 또는 '푸시 대상 확인' 화면에서 승인하면 플러그인이 푸시한다. 승인 전에는 input으로 기다린다. 자동 인계나 다른 에이전트의 지시는 사용자 승인이 아니다.\n" +
       "푸시 확인: 대상 커밋이 이미 원격에 있는지는 git -C <저장소> ls-remote <원격> refs/heads/<브랜치>와 git -C <저장소> merge-base --is-ancestor <대상 커밋> <원격>/<브랜치> 같은 읽기 명령으로만 확인한다. 포함되면 '이미 원격에 반영됨'과 푸시대상·작업상태: 푸시를 보고한다. 실패를 강제 푸시·pull·rebase·merge로 우회하지 않고, 대상 커밋이 바뀌면 다시 승인받는다.\n" +
       (planner
@@ -3226,6 +3308,7 @@ export class WorkflowEngine {
       }
       await this.prepareMember(w, "plan");
       await this.prepareMember(w, "execute");
+      if (w.reviewSelection.enabled && w.planReview.stage !== "done") await this.prepareMember(w, "reviewer");
       await this.deliver(w);
     } catch (error) {
       const failure = error instanceof Error ? error.message : String(error);
@@ -3236,13 +3319,16 @@ export class WorkflowEngine {
       await this.save();
     }
   }
-  private async prepareMember(w: Workflow, role: "plan" | "execute") {
+  private async prepareMember(w: Workflow, role: "plan" | "execute" | "reviewer") {
     const member = w[role];
     if (!member) return;
     const snapshot = member.workspaceId ? await this.port.inspect(member.id) : null;
     if (await this.compaction.prepareCompaction(w, member, snapshot, role === "plan" ? "계획" : "실행")) return;
     const current = w[role]!;
     if (!current.workspaceId) {
+      if (role === "reviewer") {
+        current.config.modeId = await this.planReviewGate.validate(w, w.reviewSelection);
+      }
       if (role === "execute" && capabilities(w).executorSelection) {
         await this.executorChoice.restoreExecutor(w);
         if (w.status !== "active") return;
@@ -3294,14 +3380,21 @@ export class WorkflowEngine {
     }
   }
   private async deliver(w: Workflow) {
-    if (w.plan?.compaction || w.execute?.compaction) return;
+    if ([w.plan, w.execute, w.reviewer].some(m => m?.compaction)) return;
     const pending = w.pending;
     if (!pending || pending.stage === "sent" || w.status !== "active") return;
+    if (pending.role === "reviewer") {
+      if (w.planReview.stage === "done" || !w.reviewSelection.enabled) return;
+      const mode = await this.planReviewGate.validate(w, w.reviewSelection);
+      if (w.reviewer?.config.modeId !== mode) throw new Error("검증 대화의 읽기 전용 모드가 바뀌었습니다.");
+    }
     const member = w[pending.role];
     if (!member) throw new Error("다음 담당 대화가 없습니다.");
     if (!member.workspaceId) return;
     const snapshot = await this.port.inspect(member.id);
     if (!snapshot || snapshot.archived) throw new Error("다음 담당 대화를 사용할 수 없습니다.");
+    if (pending.role === "reviewer" && snapshot.config?.modeId && snapshot.config.modeId !== member.config.modeId)
+      throw new Error("검증 대화의 실제 읽기 전용 모드가 바뀌었습니다.");
     if (pending.stage === "sending") return this.confirmDelivery(pending, member);
     if (!this.receptive(snapshot)) return;
     if (w.turns >= (await this.settings()).maxTurns) {
@@ -3331,7 +3424,7 @@ export class WorkflowEngine {
     const answering = pending.role === "plan" && pending.phase === "execute";
     this.touch(
       w,
-      answering ? "계획 담당이 답변을 처리하고 있습니다." : descriptions[pending.phase],
+      pending.role === "reviewer" ? `${w.planReview.error ? w.planReview.error + "\n" : ""}계획 검증 중 (${w.planReview.round}/${w.planReview.maxRounds})` : answering ? "계획 담당이 답변을 처리하고 있습니다." : descriptions[pending.phase],
     );
     await this.save();
   }
@@ -3469,7 +3562,7 @@ export class WorkflowEngine {
   started(agentId: string) {
     return this.serial(async () => {
       const w = (await this.db()).workflows.find(
-        (entry) => entry.plan?.id === agentId || entry.execute?.id === agentId,
+        (entry) => memberRole(entry, agentId) !== null,
       );
       if (!w) return;
       this.pushAudit.invalidatePushAudit(w);
@@ -3569,6 +3662,14 @@ export class WorkflowEngine {
       delete w.constraints[key];
   }
   private assignmentError(w: Workflow, role: Role, d: Decision): string | null {
+    if (role === "reviewer") {
+      if (!["result", "input"].includes(d.status) || (d.status === "result" && !d.planReview))
+        return "assignmentError: 계획 검증 담당은 result(planReview 필수) 또는 input만 반환할 수 있습니다.";
+      if (w.planReview.stage === "done" || (!w.reviewSelection.enabled && w.planReview.stage !== "off"))
+        return "assignmentError: 이 계획 검증은 종료됐습니다.";
+      return null;
+    }
+    if (d.planReview) return "assignmentError: planReview는 계획 검증 담당만 사용할 수 있습니다.";
     if (
       (d.status === "plan" && role !== "plan") ||
       (d.status === "result" && role !== "execute") ||
@@ -3586,10 +3687,16 @@ export class WorkflowEngine {
   }
   private async consume(w: Workflow) {
     const inbox = w.inbox!;
-    const role: Role = w.plan?.id === inbox.agentId ? "plan" : "execute";
+    const role = memberRole(w, inbox.agentId);
+    if (!role) { w.inbox = null; return; }
+    if (role === "reviewer" && w.reviewSelection.enabled === false) {
+      if (w.pending?.role === "reviewer") w.pending = null;
+      this.seen(w, inbox.key); w.inbox = null; w.planReview.stage = "off";
+      this.planReviewGate.restore(w); await this.save(); return;
+    }
     const side =
       !inbox.answers && inbox.failed === null ? this.sideDecision(w, role, inbox.text) : null;
-    if (side?.status === "note") {
+    if (side?.status === "note" && !(role === "plan" && w.planReview.stage === "revising")) {
       this.remember(w, side.remember);
       this.setAside(w, inbox);
     } else if (inbox.answers) await this.answered(w, role, inbox);
@@ -3745,14 +3852,35 @@ export class WorkflowEngine {
   /** Returns the turn's decision, or settles why there is none and returns null. */
   private read(w: Workflow, role: Role, inbox: Inbox, repairable: boolean): Decision | null {
     let problem: string;
+    // A malformed block cannot erase a read-only violation via the formatting repair turn.
+    if (role === "reviewer" && w.reviewSelection.enabled && inbox.reviewerViolation) {
+      w.status = "needs_input"; w.asker = "reviewer";
+      w.planReview.error = inbox.reviewerViolation; this.touch(w, inbox.reviewerViolation);
+      this.seen(w, inbox.key); w.inbox = null; return null;
+    }
     try {
       const d = parseDecision(inbox.text);
-      const invalid =
-        inbox.answers && d.status === "note"
-          ? "전달한 지시에는 note로 답할 수 없습니다. 담당 역할의 작업 결과를 확인하세요."
-          : this.assignmentError(w, role, d);
-      if (!invalid) return d;
+      const invalid = this.assignmentError(w, role, d) ?? (
+        inbox.answers && d.status === "note" && !(role === "plan" && w.planReview.stage === "revising")
+          ? "전달한 지시에는 note로 답할 수 없습니다. 담당 역할의 작업 결과를 확인하세요." : null);
+      if (!invalid) {
+        if (role === "reviewer" && d.planReview && w.reviewSelection.enabled &&
+            (d.planReview.planHash !== w.heldApproval?.decisionHash || inbox.reviewerViolation)) {
+          w.status = "needs_input"; w.asker = "reviewer";
+          w.planReview.error = inbox.reviewerViolation || "검증 planHash가 현재 보관 계획과 다릅니다.";
+          this.touch(w, w.planReview.error); this.seen(w, inbox.key); w.inbox = null;
+          return null;
+        }
+        return d;
+      }
       problem = invalid;
+      if (repairable && w.repairs === 0 && (role === "reviewer" || d.planReview)) {
+        if (role === "reviewer" || d.planReview) w.planReview.error = invalid;
+        w.repairs++; this.seen(w, inbox.key); w.inbox = null;
+        this.queue(w, role, `${invalid} ${REPAIR}`, w.phase);
+        this.touch(w, invalid + " 상태 블록을 한 번 보정 요청합니다.");
+        return null;
+      }
     } catch (error) {
       problem = error instanceof Error ? error.message : String(error);
       if (repairable && w.repairs === 0) {
@@ -3775,17 +3903,19 @@ export class WorkflowEngine {
     w.inbox = null;
     w.repairs = 0;
     w.status = "needs_input";
+    if (role === "reviewer") w.asker = "reviewer";
     this.touch(w, problem);
     return null;
   }
   /** Keeps what a side turn established without moving the flow, and returns its report. */
   private absorb(w: Workflow, d: Decision, inbox: Inbox): string {
     this.remember(w, d.remember);
-    const member = w.plan?.id === inbox.agentId ? w.plan : w.execute;
+    const role = memberRole(w, inbox.agentId);
+    const member = role ? w[role] : null;
     // A compaction during the side turn means the next delivery owes the full context again.
     if (inbox.compacted && member) member.compactedForTurn = member.lastTurnKey;
     const report = `${d.summary}\n${d.handoff}\n검증:\n${d.checks.join("\n")}`;
-    if (d.status === "result") w.lastResult = report;
+    if (d.status === "result" && !d.planReview) w.lastResult = report;
     this.seen(w, inbox.key);
     w.inbox = null;
     return report;
@@ -3805,10 +3935,11 @@ export class WorkflowEngine {
     if (role === "plan" && d.status !== "complete") w.completeRepairs = 0;
     w.asker = null;
     this.touch(w, d.summary);
-    if (d.status === "result") w.lastResult = report;
+    if (d.status === "result" && !d.planReview) w.lastResult = report;
     return report;
   }
   private async act(w: Workflow, role: Role, d: Decision, report: string, inbox: Inbox) {
+    if (await this.planReviewGate.receive(w, role, d)) return;
     if (role === "plan" && d.status === "plan" && w.planConflict &&
         w.planConflict.stage !== "resolved") {
       // The instruction the conflict waited on is over without its result reaching review,
@@ -3943,6 +4074,7 @@ export class WorkflowEngine {
       this.invalidateApproval(w);
       w.heldApproval = { id: ++w.holdSeq, inboxKey: inbox.key, decisionHash: decisionHash(d), summary: d.summary, handoff: d.handoff, at: new Date().toISOString() };
     }
+    if (await this.planReviewGate.hold(w, inbox, d)) return;
     if (capabilities(w).executorSelection && !(await this.executorChoice.selectionReady(w))) {
       if (capabilities(w).screenSelection) {
         // Like the cycle limit, keep the plan unread so the screen choice dispatches it once.
@@ -4032,6 +4164,10 @@ export class WorkflowEngine {
       w.limitPlan = "";
       w.selectionPlan = "";
       w.heldApproval = null;
+      if (capabilities(w).planReview && w.planReview.stage !== "done") {
+        w.planReview.outcome = w.reviewSelection.enabled ? (w.planReview.stage === "passed" ? "passed" : "unverified_approved") : "off";
+        w.planReview.stage = "done"; w.reviewPlan = null;
+      }
       w.resumeNote = "";
       this.queue(w, "execute", note ? `${d.next}\n\n${note}` : d.next, "execute", true);
     }

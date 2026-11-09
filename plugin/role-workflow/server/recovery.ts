@@ -4,7 +4,7 @@ import type { Workflow, WorkflowPort } from "./engine";
 import { recordQuotaFailure, usageLimit, quotaDelay, quotaCheckDue, QUOTA_ACCOUNT_SETTLE_MS } from "./quota";
 import { transientFailure, transientDelay } from "./transient";
 
-type Role = "plan" | "execute";
+type Role = "plan" | "execute" | "reviewer";
 
 /** What usage-limit and transient-error recovery needs from the engine. */
 export interface RecoveryHost {
@@ -100,7 +100,7 @@ export class Recovery {
       w.cycles >= settings.maxCycles ||
       w.turns >= settings.maxTurns
     ) return "permanent";
-    if ([w.plan, w.execute].some(member => member?.compaction && this.host.compacting(member.id)))
+    if ([w.plan, w.execute, w.reviewer].some(member => member?.compaction && this.host.compacting(member.id)))
       return "temporary";
     return null;
   }
@@ -196,7 +196,7 @@ export class Recovery {
     this.describeTransient(w);
   }
   async transientConversationsReady(w: Workflow) {
-    for (const member of [w.plan, w.execute]) {
+    for (const member of [w.plan, w.execute, w.reviewer]) {
       if (!member || (member === w.execute && member.workspaceId === null)) continue;
       const snapshot = await this.host.port().inspect(member.id);
       if (!snapshot || snapshot.archived || snapshot.permission) return false;

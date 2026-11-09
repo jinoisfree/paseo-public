@@ -328,7 +328,7 @@ export function stripTitleDecor(title: string): string {
     .trim();
 }
 /** "pair" names a workspace that holds both conversations of a federation. */
-export type TitleRole = "plan" | "execute" | "pair";
+export type TitleRole = "plan" | "execute" | "reviewer" | "pair";
 export function decorateTitle(
   provider: string,
   role: TitleRole | null,
@@ -365,8 +365,13 @@ export function decorateTitle(
   const generation = detail.generation ?? 1;
   let label = projectTitleLabel(detail.projectName ?? "");
   if (role && role !== "pair")
-    label += `:${role === "plan" ? "계획" : "실행"}${generation > 1 ? generation : ""}`;
+    label += `:${role === "plan" ? "계획" : role === "reviewer" ? "계획검증" : "실행"}${generation > 1 ? generation : ""}`;
   const number = String(detail.number ?? 0).padStart(2, "0");
   const symbol = marker ? `${PROGRESS_SYMBOLS[detail.progress ?? "active"]} ` : "";
   return `${symbol}${name}[${label}]-${number} ${base}`;
+}
+
+/** Only the reviewer receives the plan-review extension to the shared decision protocol. */
+export function planReviewProtocol() {
+  return '판정은 응답 맨 끝의 paseo-workflow JSON에서 status=result와 planReview를 쓴다. planReview={planHash:"전달받은 64자리 해시",verdict:"APPROVED"|"BLOCKED",findings:[{id,severity:"차단"|"권고",text,evidence}]}이다. BLOCKED는 차단 지적 1개 이상, APPROVED는 차단 지적 0개다. findings는 최대30개, text·evidence는 각각2000자 이하다. summary·handoff·checks도 기존 상태 블록 계약을 따른다. 사용자 정보가 필요하면 input만 허용한다.';
 }

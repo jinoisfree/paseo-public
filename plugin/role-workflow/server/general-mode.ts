@@ -455,7 +455,7 @@ export class GeneralMode {
           text: latest.text,
           failed: latest.failed,
           compacted: !!latest.compacted,
-          canceled: false,
+          canceled: false, reviewerViolation: "",
           resumed: false,
           answers: true,
         });

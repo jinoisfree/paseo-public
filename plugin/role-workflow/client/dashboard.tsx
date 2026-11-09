@@ -743,6 +743,8 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
                 `${w.automatic || w.mode === "federated" ? "기획·설계·검증" : "대화"}${w.planGeneration > 1 ? w.planGeneration : ""} 열기 · ${w.planUsage === null ? "사용량 미제공" : Math.round(w.planUsage * 100) + "%"}`,
                 () => navigation?.openAgent({ agentId: w.planAgentId! }),
               )}
+            {w.reviewerAgentId && button("계획 검증 대화", () => navigation?.openAgent({agentId:w.reviewerAgentId!}))}
+            {w.mode === "federated" && (w.contract ?? 1) >= 7 && w.planReview && <Text selectable style={s.muted}>{`계획 검증 ${w.planReview.round}/${w.planReview.maxRounds} · ${w.planReview.stage} · ${w.planReview.verdict?.verdict ?? "대기"} · 차단 ${w.planReview.verdict?.findings.filter(f=>f.severity === "차단").length ?? 0}\n${w.planReview.path} · 최종 기록 ${w.planReview.outcome ?? "대기"}`}</Text>}
             {w.executeAgentId &&
               button(
                 `실행${w.executeGeneration > 1 ? w.executeGeneration : ""} 열기 · ${w.executeUsage === null ? "사용량 미제공" : Math.round(w.executeUsage * 100) + "%"}`,

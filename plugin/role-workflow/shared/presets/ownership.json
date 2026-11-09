@@ -389,5 +389,15 @@
     "외부 사용량 앱의 제품 홈 참조",
     "VPN·휴대폰 연결"
   ],
-  "inventoryRule": "정확한 이름을 우선하고 *는 한 config 키, 끝의 *는 하위 트리다. 미일치 항목은 미확정으로 보고하며 자동 삭제하지 않는다."
+  "inventoryRule": "정확한 이름을 우선하고 *는 한 config 키, 끝의 *는 하위 트리다. 미일치 항목은 미확정으로 보고하며 자동 삭제하지 않는다.",
+  "roleWorkflowSettings": {
+    "reviewerMode": {
+      "slot": "policy",
+      "recommended": "shared/presets/recommended.json#/roleWorkflow/reviewerMode"
+    },
+    "claudeReviewerMode": {
+      "slot": "policy",
+      "recommended": "shared/presets/recommended.json#/roleWorkflow/claudeReviewerMode"
+    }
+  }
 }

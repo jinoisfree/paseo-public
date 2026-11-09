@@ -27,6 +27,8 @@ import {
   forgetProject,
   control,
   selectExecutor,
+  selectPlanReview,
+  reviewOptions,
   selectMode,
   selectPlacement,
   testNotification,
@@ -201,7 +203,7 @@ export default function contribute(server: PluginServerContext) {
         const snapshot = await port.inspect(agent.id).catch(() => null);
         if (!snapshot) continue;
         await engine
-          .enroll(snapshot, seed.config, seed.env, seed.mode, seed.titled, 6)
+          .enroll(snapshot, seed.config, seed.env, seed.mode, seed.titled, 7)
           .catch(report);
         return;
       }
@@ -396,6 +398,8 @@ export default function contribute(server: PluginServerContext) {
     attach(context.paseo);
     return engine.selectMode(input.id, input.mode);
   });
+  server.handle(reviewOptions, async (input, context) => { attach(context.paseo); return engine.reviewOptions(input.id); });
+  server.handle(selectPlanReview, async (input, context) => { attach(context.paseo); return engine.selectPlanReview(input.id, input); });
   server.handle(selectExecutor, async (input, context) => {
     attach(context.paseo);
     return engine.selectExecutor(input.id, input);

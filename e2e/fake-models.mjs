@@ -10,14 +10,14 @@ import { createServer } from "node:http";
 import { appendFileSync, readFileSync } from "node:fs";
 
 const [port, controlFile, logFile] = process.argv.slice(2);
-const turns = { plan: 0, execute: 0 };
+const turns = { plan: 0, execute: 0, reviewer: 0 };
 let scenario;
 const control = () => {
   try {
     const settings = JSON.parse(readFileSync(controlFile, "utf8"));
     if (settings.scenario !== scenario) {
       scenario = settings.scenario;
-      turns.plan = turns.execute = 0;
+      turns.plan = turns.execute = turns.reviewer = 0;
     }
     return settings;
   } catch {
@@ -38,7 +38,7 @@ function responses(parsed, res) {
   const toolOutput = input.findLast?.((item) => item.type === "function_call_output" || item.type === "custom_tool_call_output");
   const lastUser = input.filter((item) => item.role === "user").at(-1);
   const instructions = `${parsed.instructions ?? ""}${JSON.stringify(input.filter((item) => item.role === "developer" || item.role === "system"))}`;
-  const role = instructions.includes("당신은 이 사용자의 구현 역할이다") ? "execute" : "plan";
+  const role = instructions.includes("당신은 계약7 첫 계획의") ? "reviewer" : instructions.includes("당신은 이 사용자의 구현 역할이다") ? "execute" : "plan";
   // Recent Codex sends its tools as an "additional_tools" input item, with shell access through a
   // JavaScript "exec" custom tool; older releases list function tools in `tools`.
   const offered = JSON.stringify([parsed.tools ?? [], input.filter((item) => item.type === "additional_tools")]);
@@ -49,6 +49,7 @@ function responses(parsed, res) {
     const list = settings[role] ?? [text];
     text = list[Math.min(turns[role]++, list.length - 1)];
   }
+  text = text.replaceAll("__PLAN_HASH__", /planHash: ([a-f0-9]{64})/.exec(textOf(lastUser?.content?.map?.(part => ({text:part.text ?? part.input_text})) ?? lastUser?.content))?.[1] ?? "");
   appendFileSync(
     logFile,
     JSON.stringify({
@@ -121,13 +122,14 @@ createServer((req, res) => {
     const { mode = "text", command = "" } = settings;
     let { text = "Done." } = settings;
     const system = JSON.stringify(parsed.system ?? "");
-    const role = system.includes("당신은 이 사용자의 구현 역할이다") ? "execute" : "plan";
+    const role = system.includes("당신은 계약7 첫 계획의") ? "reviewer" : system.includes("당신은 이 사용자의 구현 역할이다") ? "execute" : "plan";
     if (mode === "role" && (parsed.tools ?? []).length) {
       const list = settings[role] ?? [text];
       text = list[Math.min(turns[role]++, list.length - 1)];
     }
     const lastUser = (parsed.messages ?? []).filter((m) => m.role === "user").at(-1);
     const last = textOf(lastUser?.content);
+    text = text.replaceAll("__PLAN_HASH__", /planHash: ([a-f0-9]{64})/.exec(last)?.[1] ?? "");
     const toolResult = Array.isArray(lastUser?.content)
       ? lastUser.content.find((block) => block.type === "tool_result")
       : undefined;

@@ -47,7 +47,7 @@ export class ManagedPushes {
   async pushReady(w: Workflow) {
     if (w.mode === "undecided" || w.generalTransition || w.pending || w.inbox)
       throw new Error("현재 작업 전달이 끝난 뒤 푸시 대상을 확인하세요.");
-    for (const member of [w.plan, w.execute]) {
+    for (const member of [w.plan, w.execute, w.reviewer]) {
       if (!member) continue;
       const snapshot = await this.host.port().inspect(member.id);
       if (!snapshot || snapshot.archived || member.compaction || !this.host.quiet(snapshot))

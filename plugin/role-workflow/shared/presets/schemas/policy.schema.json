@@ -394,6 +394,16 @@
         "claudeStartMode": {
           "type": "string",
           "maxLength": 80
+        },
+        "reviewerMode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "claudeReviewerMode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
         }
       },
       "additionalProperties": false

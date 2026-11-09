@@ -2,7 +2,7 @@ import { z } from "zod";
 import { usageLimit } from "./quota";
 
 export const transientPauseSchema = z.object({
-  role: z.enum(["plan", "execute"]),
+  role: z.enum(["plan", "execute", "reviewer"]),
   phase: z.enum(["plan", "execute", "review"]),
   failure: z.string(),
   attempts: z.number().int().nonnegative(),

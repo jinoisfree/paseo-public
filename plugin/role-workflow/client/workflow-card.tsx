@@ -50,6 +50,7 @@ export function WorkflowCard({
       {!!item.data.prose && <ReportMarkdown text={item.data.prose} theme={theme} />}
       <View style={styles.card}>
         <Text style={styles.title}>{labels[d.status]}</Text>
+        {d.planReview && <Text selectable style={styles.muted}>{`계획 검증: ${d.planReview.verdict} · 차단 ${d.planReview.findings.filter(f=>f.severity === "차단").length} · ${d.planReview.planHash}`}</Text>}
         <Text selectable style={styles.text}>
           {d.summary}
         </Text>

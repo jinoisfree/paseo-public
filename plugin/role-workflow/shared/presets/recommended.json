@@ -37,7 +37,9 @@
     "claudeExecutorModel": "claude",
     "claudeExecutorThinking": "",
     "claudeExecutorMode": "bypassPermissions",
-    "claudeStartMode": "bypassPermissions"
+    "claudeStartMode": "bypassPermissions",
+    "reviewerMode": "read-only",
+    "claudeReviewerMode": "plan"
   },
   "core": {
     "pluginsEnabled": true,
