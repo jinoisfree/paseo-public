@@ -27,7 +27,7 @@ class UpdateVerifyTests(unittest.TestCase):
         self.clock = [100000.0]
         self.daemon = daemon
         self.status = status
-        self.commands, self.setup_calls, self.statuses = [], [], []
+        self.commands, self.setup_calls, self.statuses, self.status_calls = [], [], [], []
         self.check = {'differences': []} if check is None else check
         self.doctor = {'checks': []} if doctor is None else doctor
         if clone:
@@ -49,9 +49,12 @@ class UpdateVerifyTests(unittest.TestCase):
                 if isinstance(value, BaseException): raise value
                 return subprocess.CompletedProcess(args, 1 if value == 'one' else 0, stdout=value if isinstance(value, str) else json.dumps(value), stderr='')
             if args[0] == str(self.cli) and args[1:3] == ['daemon', 'status']:
-                self.statuses.append(kwargs['timeout'])
+                self.statuses.append(kwargs['timeout']); self.status_calls.append((self.clock[0], kwargs['timeout']))
                 reply = self.status(self) if self.status else None
-                if isinstance(reply, BaseException): raise reply
+                if isinstance(reply, BaseException):
+                    # A hung status call consumes its whole timeout on the fake clock.
+                    if isinstance(reply, subprocess.TimeoutExpired): self.clock[0] += kwargs['timeout']
+                    raise reply
                 if reply is not None: return reply
                 return subprocess.CompletedProcess(args, 0, stdout=json.dumps({'pid': 1, 'daemonVersion': self.daemon}), stderr='')
             if 'kickstart' in args: self.daemon = self.version()
@@ -139,8 +142,12 @@ class UpdateVerifyTests(unittest.TestCase):
             self.assertEqual(self.results(), ['restarted', 'verify-deferred'])
             self.assertFalse((self.paseo_home/RECORD).exists()); self.assertEqual(self.setup_calls, [])
             self.assertEqual([n for n in self.notices() if 'Paseo 설비' in n[-1] and '점검' in n[-1]], [])
-            self.assertGreaterEqual(self.clock[0]-started, 60); self.assertLess(self.clock[0]-started, 70)
-            self.assertTrue(all(t == 10 for t in self.statuses[1:])); self.assertGreater(len(self.statuses), 2)
+            elapsed = self.clock[0]-started
+            self.assertLessEqual(elapsed, 60); self.assertGreaterEqual(elapsed, 58)
+            waits = self.status_calls[1:]
+            self.assertGreater(len(waits), 2); self.assertTrue(all(t <= 10 for _, t in waits))
+            # Every wait call fits inside the deadline and nothing is queried at or after it.
+            self.assertTrue(all(at-started < 60 and at-started+t <= 60 for at, t in waits))
             for f in (self.paseo_home/'airport/logs/update-watch.jsonl',): f.unlink()
 
     def test_AC07_second_recheck_ready_verifies_immediately(self):
@@ -152,6 +159,21 @@ class UpdateVerifyTests(unittest.TestCase):
         with mock.patch.object(service, 'kickstart'):
             service.update_watch()
         self.assertEqual(count[0], 3); self.assertEqual(self.results(), ['restarted', 'verified']); self.assertTrue(self.record()['ok'])
+
+    def test_AC07_call_near_the_deadline_gets_the_remaining_time_and_none_after(self):
+        seen = []
+        def status(test):
+            seen.append(test.clock[0])
+            if len(seen) == 2: test.clock[0] += 55  # the first wait query returns only at 55s
+            return subprocess.CompletedProcess([], 0, stdout=json.dumps({'daemonVersion': '0.15.2'}), stderr='')
+        service = self.build(daemon='0.15.2', status=status)
+        started = self.clock[0]
+        with mock.patch.object(service, 'kickstart'):
+            service.update_watch()
+        waits = self.status_calls[1:]
+        self.assertEqual([round(at-started) for at, _ in waits], [0, 57, 59])
+        self.assertEqual([t for _, t in waits], [10, 3, 1]); self.assertLessEqual(self.clock[0]-started, 60)
+        self.assertEqual(self.results(), ['restarted', 'verify-deferred'])
 
     def test_frozen_clock_still_terminates(self):
         service = self.build(daemon='0.15.2')

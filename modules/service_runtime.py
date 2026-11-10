@@ -166,15 +166,20 @@ class Service:
         """True once status reports the app version; any failed or odd response counts as not ready yet."""
         deadline = self.now() + READY_DEADLINE
         for _ in range(READY_MAX_ATTEMPTS):
+            # The 60s limit is real elapsed time: neither a call nor a sleep may run past it.
+            remaining = deadline - self.now()
+            if remaining <= 0:
+                return False
             try:
-                data = json.loads(self.command('daemon', 'status', '--json', check=False, timeout=STATUS_TIMEOUT).stdout)
+                data = json.loads(self.command('daemon', 'status', '--json', check=False, timeout=min(STATUS_TIMEOUT, remaining)).stdout)
             except (OSError, ValueError, subprocess.SubprocessError, TypeError):
                 data = None
             if isinstance(data, dict) and data.get('daemonVersion') == version:
                 return True
-            if self.now() >= deadline:
+            remaining = deadline - self.now()
+            if remaining <= 0:
                 return False
-            self.sleep(READY_POLL)
+            self.sleep(min(READY_POLL, remaining))
         return False
 
     def clone_setup(self):
