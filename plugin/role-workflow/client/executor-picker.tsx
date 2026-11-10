@@ -1,12 +1,12 @@
 import { decisionHash } from "../shared/plan-approval";
 import type { Decision } from "../shared/decision";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import { useRpc, type PluginHostProps, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import type { z } from "zod";
 import { models, selectExecutor, cancelImplementationReservation, status, reviewOptions, selectPlanReview, type ExecutorModel } from "../shared/contracts";
 import type { PlanReview, ReviewSelection } from "../shared/plan-review";
-import { type executorPickerCardSchema, picksExecutor, pickerDefaultThinking, pickerThinking } from "../shared/executor-picker";
+import { type executorPickerCardSchema, picksExecutor, pickerBlockers, pickerDefaultThinking, pickerThinking } from "../shared/executor-picker";
 import type { WorkflowProvider } from "../shared/assignment";
 
 type ReviewChoice = { enabled: boolean | null; provider: WorkflowProvider | null; model: string; thinking: string | null };
@@ -27,27 +27,57 @@ type Workflow = Parameters<typeof picksExecutor>[0] & {
 };
 const PROVIDERS: [WorkflowProvider, string][] = [["codex", "Codex"], ["claude", "Claude Code"]];
 
-/** Shared rows, selection emphasis, labels and disabled colors for both pickers. */
+/** Shared rows, selection emphasis, labels, step boxes and action buttons for both pickers. */
 function usePickerOptions(theme: PluginHostProps["theme"], busy: boolean) {
   const c = theme.colors;
+  const colors = useMemo(
+    () => ({ accent: c.accent ?? c.foreground, accentForeground: c.accentForeground ?? "#000",
+      warning: c.statusWarning ?? c.foreground, success: c.statusSuccess ?? c.foreground }),
+    [c],
+  );
   const styles = useMemo(
     () => ({
       box: { gap: 8 },
       row: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 6 },
+      line: { flexDirection: "row" as const, alignItems: "flex-start" as const, gap: 8 },
+      label: { color: c.foregroundMuted, minWidth: 32, paddingVertical: 6 },
       text: { color: c.foreground },
       muted: { color: c.foregroundMuted },
       choice: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, borderWidth: 1, borderColor: c.border },
-      chosen: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, borderWidth: 1, borderColor: c.foreground },
+      chosen: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, borderWidth: 1, borderColor: colors.accent, backgroundColor: colors.accent },
+      chosenText: { color: colors.accentForeground },
+      todo: { color: colors.warning },
     }),
-    [c],
+    [c, colors],
   );
   const option = (label: string, on: boolean, press: () => void, key = label, disabled = false) => (
     <Pressable key={key} accessibilityRole="button" accessibilityState={{ selected: on }} disabled={busy || disabled}
       onPress={press} style={on ? styles.chosen : styles.choice}>
-      <Text style={disabled ? styles.muted : styles.text}>{on ? "✓ " : ""}{label}</Text>
+      <Text style={on ? styles.chosenText : disabled ? styles.muted : styles.text}>{on ? "✓ " : ""}{label}</Text>
     </Pressable>
   );
-  return { styles, option };
+  /** A selection row with its muted lead label. */
+  const line = (label: string, children: ReactNode) => (
+    <View style={styles.line}><Text style={styles.label}>{label}</Text><View style={[styles.row, { flex: 1 }]}>{children}</View></View>
+  );
+  /** A numbered step box whose border and title text say whether its choice is made. */
+  const zone = (testID: string, title: string, done: boolean, children: ReactNode) => (
+    <View testID={testID} style={{ gap: 8, padding: 10, borderRadius: 10, borderWidth: 1, borderColor: done ? colors.success : colors.warning }}>
+      <View style={styles.line}>
+        <Text style={styles.text}>{title}</Text>
+        <Text style={done ? { color: colors.success } : styles.todo}>{done ? "선택 완료" : "선택 필요"}</Text>
+      </View>
+      {children}
+    </View>
+  );
+  /** Filled while pressable, outlined and muted while not, from the real disabled value only. */
+  const action = (label: string, disabled: boolean, press: () => void) => (
+    <Pressable accessibilityRole="button" disabled={disabled} onPress={press}
+      style={disabled ? styles.choice : styles.chosen}>
+      <Text style={disabled ? styles.muted : styles.chosenText}>{label}</Text>
+    </Pressable>
+  );
+  return { styles, option, line, zone, action };
 }
 
 /** Picks the federated executor from the live catalog, with every thinking option shown. */
@@ -68,13 +98,11 @@ export function ExecutorPicker({
   const canSubmit = !gated || !!approval || earlyDraft;
   const review = workflow.planReview;
   const reviewRequired = (workflow.contract ?? 1) >= 7;
-  const reviewReady = earlyDraft || !reviewRequired || (workflow.reviewSelection?.enabled === false && !["reviewing", "revising"].includes(review?.stage ?? "")) ||
-    (!!approval && review?.stage === "passed" && review.hash === approval.decisionHash);
   const combinedSetup = reviewRequired && gated;
   const canReserve = reviewRequired && workflow.reviewSelection?.enabled === true && !!approval && ["reviewing", "revising"].includes(review?.stage ?? "");
   const [reviewChoice, setReviewChoice] = useState<ReviewChoice>({ enabled: workflow.reviewSelection?.enabled ?? null,
     provider: workflow.reviewSelection?.provider ?? null, model: workflow.reviewSelection?.model ?? "", thinking: workflow.reviewSelection?.thinking ?? null });
-  const [reviewValid, setReviewValid] = useState(false);
+  const [reviewComplete, setReviewComplete] = useState(false);
   const [placement, setPlacement] = useState<"worktree" | "wait" | null>(workflow.reservedPlacement ?? (placementDefault === "ask" ? null : placementDefault));
   const [provider, setProvider] = useState<WorkflowProvider>(s?.provider ?? "codex");
   const [catalog, setCatalog] = useState<{ models: ExecutorModel[]; error: string | null } | null>(null);
@@ -82,7 +110,7 @@ export function ExecutorPicker({
   const [thinking, setThinking] = useState<string | null>(model && s?.model === model ? (s.thinking ?? null) : null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
-  const { styles, option } = usePickerOptions(theme, busy);
+  const { styles, option, line, zone, action } = usePickerOptions(theme, busy);
   useEffect(() => {
     let live = true;
     setCatalog(null);
@@ -94,9 +122,14 @@ export function ExecutorPicker({
     };
   }, [provider, readModels]);
   const selected = catalog?.models.find((row) => row.id === model);
-  const automaticReady = reviewValid && !!placement && !["reviewing", "revising", "limit", "done"].includes(review?.stage ?? "");
+  const blockerInput = { contract: workflow.contract ?? 1, mode: workflow.mode, firstPlan: workflow.firstPlan, approvalHash: approval?.decisionHash ?? null,
+    savedReview: workflow.reviewSelection?.enabled ?? null, localReview: reviewChoice.enabled, localReviewComplete: reviewComplete,
+    stage: review?.stage, reviewHash: review?.hash, placement, model, thinking };
+  const primaryBlockers = pickerBlockers(blockerInput, "primary"), automaticBlockers = pickerBlockers(blockerInput, "automatic");
+  const primaryBlocked = primaryBlockers.choose.length + primaryBlockers.wait.length > 0;
+  const automaticBlocked = automaticBlockers.choose.length + automaticBlockers.wait.length > 0;
   const submit = useCallback(async (unverified = false, reserve = false, automatic = earlyDraft) => {
-    if (!canSubmit || !model || thinking === null || (automatic && !automaticReady)) return;
+    if (!canSubmit || !model || thinking === null || (automatic && automaticBlocked)) return;
     setBusy(true);
     try {
       const result = await choose({ id: workflow.id, provider, model, thinking, ...(gated && approval ? {holdId: approval.id} : {}), ...(unverified ? {unverified:true} : {}), ...(reserve ? {reserve:true} : {}),
@@ -108,7 +141,14 @@ export function ExecutorPicker({
     } finally {
       setBusy(false);
     }
-  }, [choose, model, onChanged, provider, thinking, workflow.id, gated, approval, canSubmit, earlyDraft, automaticReady, reviewChoice, placement]);
+  }, [choose, model, onChanged, provider, thinking, workflow.id, gated, approval, canSubmit, earlyDraft, automaticBlocked, reviewChoice, placement]);
+  /** Why a button is off: what the user can still pick, and what only the system can finish. */
+  const hint = (testID: string, { choose, wait }: ReturnType<typeof pickerBlockers>) => !busy && choose.length + wait.length > 0 && (
+    <View testID={testID} style={{ gap: 2 }}>
+      {choose.length > 0 && <Text style={styles.todo}>{`남은 선택: ${choose.join(", ")}`}</Text>}
+      {wait.length > 0 && <Text style={styles.muted}>{`대기: ${wait.join(", ")}`}</Text>}
+    </View>
+  );
   return (
     <View testID="executor-picker" style={styles.box}>
       <Text style={styles.text}>
@@ -117,44 +157,31 @@ export function ExecutorPicker({
       {gated && !approval && <Text style={styles.muted}>{earlyDraft ? (reviewChoice.enabled === false ? "계획이 나오면 바로 구현을 시작합니다. 계획 확인 없이 구현이 시작됩니다." : "검증을 통과하면 이 담당으로 바로 구현을 시작합니다.") : "계획이 나오면 그 계획을 확인하고 구현 담당을 고르면 전달합니다."}</Text>}
       {gated && approval && <Text selectable style={styles.text}>{`보관 계획 #${approval.id}\n${approval.summary}\n${approval.handoff}`}</Text>}
       {!!s?.error && <Text style={styles.muted}>{s.error}</Text>}
-      {reviewRequired && <PlanReviewPicker workflow={workflow} approval={approval} theme={theme} onChanged={onChanged} choice={reviewChoice} onChoice={setReviewChoice} onValid={setReviewValid} />}
-      <View style={styles.row}>
-        {PROVIDERS.map(([id, label]) => option(label, provider === id, () => {
+      {reviewRequired && <PlanReviewPicker workflow={workflow} approval={approval} theme={theme} onChanged={onChanged} choice={reviewChoice} onChoice={setReviewChoice} onComplete={setReviewComplete} title="1. 계획 검증" />}
+      {zone("executor-zone", `${reviewRequired ? 2 : 1}. 구현 담당`, !!model && thinking !== null, <>
+        {line("제품", PROVIDERS.map(([id, label]) => option(label, provider === id, () => {
           setProvider(id); setModel(""); setThinking(null);
-        }, id))}
-      </View>
-      {!catalog && <Text style={styles.muted}>모델 목록을 불러오는 중…</Text>}
-      {!!catalog?.error && <Text style={styles.muted}>{catalog.error}</Text>}
-      <View style={styles.row}>
-        {catalog?.models.map((row) => option(row.label, model === row.id, () => {
+        }, id)))}
+        {!catalog && <Text style={styles.muted}>모델 목록을 불러오는 중…</Text>}
+        {!!catalog?.error && <Text style={styles.muted}>{catalog.error}</Text>}
+        {line("모델", catalog?.models.map((row) => option(row.label, model === row.id, () => {
           setModel(row.id); setThinking(pickerDefaultThinking(row));
-        }, row.id))}
-      </View>
-      {!!selected && (
-        <View style={styles.row}>
-          {pickerThinking(selected).map((row) => option(row.label, thinking === row.id, () => setThinking(row.id), row.id || "none"))}
-        </View>
-      )}
-      {combinedSetup && <>
-        <Text style={styles.text}>겹칠 때 배치</Text>
+        }, row.id)))}
+        {!!selected && line("추론", pickerThinking(selected).map((row) => option(row.label, thinking === row.id, () => setThinking(row.id), row.id || "none")))}
+      </>)}
+      {combinedSetup && zone("placement-zone", "3. 겹칠 때 배치", !!placement, <>
         <Text style={styles.muted}>같은 저장소의 작업과 겹칠 때만 적용합니다.</Text>
         <View style={styles.row}>
           {option("워크트리", placement === "worktree", () => setPlacement("worktree"))}
           {option("앞 작업 대기", placement === "wait", () => setPlacement("wait"))}
         </View>
+      </>)}
+      {hint("primary-blockers", primaryBlockers)}
+      {action(busy ? "확인 중…" : earlyDraft ? "이 설정으로 자동 진행" : "이 담당으로 확정", busy || primaryBlocked, () => void submit())}
+      {combinedSetup && approval && <>
+        {hint("automatic-blockers", automaticBlockers)}
+        {action("이 설정으로 자동 진행", busy || automaticBlocked, () => void submit(false, false, true))}
       </>}
-      {!reviewReady && <Text style={styles.muted}>계획 검증 선택·판정·기록이 끝날 때까지 구현 승인은 비활성입니다.</Text>}
-      <Pressable accessibilityRole="button" disabled={busy || !canSubmit || !reviewReady || !model || thinking === null || (earlyDraft && !automaticReady)} onPress={() => void submit()}
-        style={styles.choice}>
-        <Text style={model && thinking !== null ? styles.text : styles.muted}>
-          {busy ? "확인 중…" : earlyDraft ? "이 설정으로 자동 진행" : "이 담당으로 확정"}
-        </Text>
-      </Pressable>
-      {combinedSetup && approval && <Pressable accessibilityRole="button"
-        disabled={busy || !canSubmit || !model || thinking === null || !automaticReady}
-        onPress={() => void submit(false, false, true)} style={styles.choice}>
-        <Text style={styles.text}>이 설정으로 자동 진행</Text>
-      </Pressable>}
       {canReserve && option("검증 통과 시 구현 시작", false, () => void submit(false, true), "reserve", !model || thinking === null)}
       {workflow.implementationReserved && <>
         <Text style={styles.text}>구현 시작 예약됨 — {workflow.reviewSelection?.enabled === false ? "계획이 나오면 바로 구현을 시작합니다." : "검증 통과 후 자동으로 시작합니다."}</Text>
@@ -173,9 +200,9 @@ export function ExecutorPicker({
   );
 }
 
-function PlanReviewPicker({ workflow, approval, theme, onChanged, choice, onChoice, onValid }: {
+function PlanReviewPicker({ workflow, approval, theme, onChanged, choice, onChoice, onComplete, title }: {
   workflow: Workflow; approval: Workflow["heldApproval"]; theme: PluginHostProps["theme"]; onChanged?: () => void;
-  choice: ReviewChoice; onChoice: (choice: ReviewChoice) => void; onValid: (valid: boolean) => void;
+  choice: ReviewChoice; onChoice: (choice: ReviewChoice) => void; onComplete: (complete: boolean) => void; title: string;
 }) {
   const read = useRpc(reviewOptions), choose = useRpc(selectPlanReview);
   const [catalog, setCatalog] = useState<Awaited<ReturnType<typeof read>> | null>(null);
@@ -183,7 +210,7 @@ function PlanReviewPicker({ workflow, approval, theme, onChanged, choice, onChoi
   const update = (patch: Partial<ReviewChoice>) => onChoice({ ...choice, ...patch });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const c = theme.colors, review = workflow.planReview;
+  const review = workflow.planReview;
   useEffect(() => {
     let live = true;
     read({ id: workflow.id }).then(result => { if (live) setCatalog(result); }).catch(e => { if (live) setError(String(e)); });
@@ -194,9 +221,9 @@ function PlanReviewPicker({ workflow, approval, theme, onChanged, choice, onChoi
   const selected = models.find(m => m.id === model);
   const earlyDraft = (workflow.contract ?? 1) >= 7 && workflow.mode === "federated" && !approval;
   const pending = ["reviewing", "revising"].includes(review?.stage ?? "");
-  const valid = enabled === false || !!(enabled && !pending && provider && selected && !selected.reason && thinking !== null);
-  useEffect(() => onValid(valid), [valid, onValid]);
-  const { styles, option } = usePickerOptions(theme, busy);
+  const complete = enabled === false || !!(enabled && provider && selected && !selected.reason && thinking !== null);
+  useEffect(() => onComplete(complete), [complete, onComplete]);
+  const { styles, option, line, zone } = usePickerOptions(theme, busy);
   const submit = async (extra = false) => {
     if ((!approval && !earlyDraft) || enabled === null) return;
     setBusy(true);
@@ -206,24 +233,23 @@ function PlanReviewPicker({ workflow, approval, theme, onChanged, choice, onChoi
       setError(result.detail); onChanged?.();
     } catch(e) { setError(String(e)); } finally { setBusy(false); }
   };
-  return <View testID="plan-review-picker" style={styles.box}>
-    <Text style={{color:c.foreground}}>계획 검증</Text>
+  return zone("plan-review-picker", title, complete, <>
     <View style={styles.row}>
       {option("끄기", enabled === false, () => update({enabled:false}))}
       {option("켜기", enabled === true, () => update({enabled:true}), "on", !available || pending)}
     </View>
-    {!available && <Text style={{color:c.foregroundMuted}}>적격 검증 후보가 없습니다. 켜진 제품·다른 모델·읽기 전용 모드를 확인하세요.</Text>}
+    {!available && <Text style={styles.muted}>적격 검증 후보가 없습니다. 켜진 제품·다른 모델·읽기 전용 모드를 확인하세요.</Text>}
     {enabled && <>
-      <View style={styles.row}>{catalog?.providers.map(p => option(`${PROVIDERS.find(([id]) => id === p.provider)?.[1] ?? p.provider}${p.reason ? ` · ${p.reason}` : ""}`, provider === p.provider, () => {update({provider:p.provider,model:"",thinking:null});}, p.provider, !!p.reason || pending))}</View>
-      <View style={styles.row}>{models.map(m => option(`${m.label}${m.reason ? ` · ${m.reason}` : ""}`, model === m.id, () => {update({model:m.id,thinking:pickerDefaultThinking(m)});}, m.id, !!m.reason || pending))}</View>
-      <View style={styles.row}>{selected && pickerThinking(selected).map(o => option(o.label, thinking === o.id, () => update({thinking:o.id}), o.id || "none", pending))}</View>
+      {line("제품", catalog?.providers.map(p => option(`${PROVIDERS.find(([id]) => id === p.provider)?.[1] ?? p.provider}${p.reason ? ` · ${p.reason}` : ""}`, provider === p.provider, () => {update({provider:p.provider,model:"",thinking:null});}, p.provider, !!p.reason || pending)))}
+      {line("모델", models.map(m => option(`${m.label}${m.reason ? ` · ${m.reason}` : ""}`, model === m.id, () => {update({model:m.id,thinking:pickerDefaultThinking(m)});}, m.id, !!m.reason || pending)))}
+      {line("추론", selected && pickerThinking(selected).map(o => option(o.label, thinking === o.id, () => update({thinking:o.id}), o.id || "none", pending)))}
     </>}
     {!earlyDraft && option(enabled === true ? "검증 선택·시작" : "검증 끄기 확정", false, () => void submit(), "confirm", (!approval && !earlyDraft) || enabled === null || (enabled && (pending || !provider || !selected || !!selected.reason || thinking === null)))}
     {review?.stage === "limit" && option("검토 1회 더", false, () => void submit(true), "extra", !approval)}
-    {review && <Text selectable style={{color:c.foregroundMuted}}>{`계획 검증 ${review.round}/${review.maxRounds} · ${review.stage} · 판정 ${review.verdict?.verdict ?? "대기"} · 차단 ${review.verdict?.findings.filter(f=>f.severity === "차단").length ?? 0}\n${review.path}\n최종 기록: ${review.outcome ?? "대기"}`}</Text>}
-    {!!review?.error && <Text style={{color:c.foregroundMuted}}>{review.error}</Text>}
-    {!!error && <Text style={{color:c.foregroundMuted}}>{error}</Text>}
-  </View>;
+    {review && <Text selectable style={styles.muted}>{`계획 검증 ${review.round}/${review.maxRounds} · ${review.stage} · 판정 ${review.verdict?.verdict ?? "대기"} · 차단 ${review.verdict?.findings.filter(f=>f.severity === "차단").length ?? 0}\n${review.path}\n최종 기록: ${review.outcome ?? "대기"}`}</Text>}
+    {!!review?.error && <Text style={styles.muted}>{review.error}</Text>}
+    {!!error && <Text style={styles.muted}>{error}</Text>}
+  </>);
 }
 
 /** Loads the live workflow that `find` names and offers the picker while it is open. */
