@@ -20,6 +20,12 @@ TASKS = {'daemon-service': 'daemon_service', 'update-watch': 'update_watch',
          'paseo-watchdog': 'watchdog', 'archive-rotate': 'archive_rotate'}
 NOTIFY_INTERVAL = 3600
 RECHECK_SECONDS = 10
+READY_DEADLINE = 60       # fake-clock seconds to wait for the restarted daemon to report the app version
+READY_POLL = 2
+READY_MAX_ATTEMPTS = 120  # guard against a frozen injected clock
+STATUS_TIMEOUT = 10
+VERIFY_TIMEOUT = 120
+VERIFY_FILE = 'airport/runtime/update-verify.json'
 
 
 def port_open(host, port, timeout=2):
@@ -63,9 +69,9 @@ class Service:
         self.app = Path(self.vault.get('paths', {}).get('app', os.environ.get('PASEO_APP', '/Applications/Paseo.app')))
         self.cli = paseo_cli(self.app, validate_version=False)
 
-    def command(self, *args, check=True):
+    def command(self, *args, check=True, timeout=120):
         env = dict(os.environ);env.pop('PASEO_HOST', None);env['PASEO_HOME'] = str(self.home)
-        result = self.runner([self.cli, *args, '--home', str(self.home)], capture_output=True, text=True, timeout=120, env=env)
+        result = self.runner([self.cli, *args, '--home', str(self.home)], capture_output=True, text=True, timeout=timeout, env=env)
         if check and result.returncode:
             raise RuntimeError('Paseo 설비 명령 실패(내용은 비밀 보호를 위해 출력하지 않습니다).')
         return result
@@ -135,16 +141,76 @@ class Service:
         actual = json.loads(status.stdout).get('daemonVersion')
         if not actual:
             self.event('update-watch', 'version-unknown');return
-        if actual == version:
+        if actual != version:
+            if self.busy():
+                self.event('update-watch', 'busy');self.notify('작업 전송·압축 중이라 Paseo 버전 전환을 보류했습니다.', key='update-watch:busy');return
+            # B's KeepAlive would race a separate stop with kickstart and restart twice.
+            if self.daemon_variant() == 'A':
+                self.command('daemon', 'stop')
+            self.kickstart()
+            self.event('update-watch', 'restarted', appVersion=version, daemonVersion=actual)
+            self.notify('업데이트된 Paseo 데몬 supervisor를 다시 시작했습니다.')
+            if not self.wait_ready(version):
+                self.event('update-watch', 'verify-deferred', appVersion=version);return
+        commit = read(self.home/'airport/install.json').get('activatedCommit')
+        previous = read(self.home/VERIFY_FILE)
+        if previous.get('ok') is True and self.same_pair(previous, version, commit):
             self.event('update-watch', 'current');return
-        if self.busy():
-            self.event('update-watch', 'busy');self.notify('작업 전송·압축 중이라 Paseo 버전 전환을 보류했습니다.', key='update-watch:busy');return
-        # B's KeepAlive would race a separate stop with kickstart and restart twice.
-        if self.daemon_variant() == 'A':
-            self.command('daemon', 'stop')
-        self.kickstart()
-        self.event('update-watch', 'restarted', appVersion=version, daemonVersion=actual)
-        self.notify('업데이트된 Paseo 데몬 supervisor를 다시 시작했습니다.')
+        self.verify(version, commit, previous)
+
+    @staticmethod
+    def same_pair(record, version, commit):
+        return record.get('appVersion') == version and record.get('activatedCommit') == commit
+
+    def wait_ready(self, version):
+        """True once status reports the app version; any failed or odd response counts as not ready yet."""
+        deadline = self.now() + READY_DEADLINE
+        for _ in range(READY_MAX_ATTEMPTS):
+            try:
+                data = json.loads(self.command('daemon', 'status', '--json', check=False, timeout=STATUS_TIMEOUT).stdout)
+            except (OSError, ValueError, subprocess.SubprocessError, TypeError):
+                data = None
+            if isinstance(data, dict) and data.get('daemonVersion') == version:
+                return True
+            if self.now() >= deadline:
+                return False
+            self.sleep(READY_POLL)
+        return False
+
+    def clone_setup(self):
+        entry = read(self.home/'config.json').get('plugins', {}).get('role-workflow')
+        path = entry.get('path') if isinstance(entry, dict) else None
+        if not isinstance(path, str) or not path:
+            return None
+        script = Path(path).parents[1]/'scripts/setup.py'
+        return script if script.is_file() else None
+
+    def setup_failures(self, script, name):
+        """Keys only: stdout bodies never reach events, records or notifications."""
+        env = {k: v for k, v in os.environ.items() if k != 'PASEO_HOST'}
+        env.update(HOME=os.environ.get('HOME') or str(Path.home()), PASEO_HOME=str(self.home), PYTHONDONTWRITEBYTECODE='1')
+        try:
+            result = self.runner([sys.executable, str(script), name, '--json'], capture_output=True, text=True, timeout=VERIFY_TIMEOUT, env=env)
+            data = json.loads(result.stdout)
+            if not isinstance(data, dict):
+                raise ValueError('shape')
+            if name == 'check':
+                return [str(row['key']) for row in data['differences']]
+            return [str(row['key']) for row in data['checks'] if row.get('ok') is False and row.get('blocking')]
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            return [name+':error']
+
+    def verify(self, version, commit, previous):
+        script = self.clone_setup()
+        if script is None:
+            failing = ['clone:unavailable']
+        else:
+            failing = sorted(set(self.setup_failures(script, 'check') + self.setup_failures(script, 'doctor')))
+        ok = not failing
+        atomic(self.home/VERIFY_FILE, {'appVersion': version, 'daemonVersion': version, 'activatedCommit': commit, 'ok': ok, 'failing': failing, 'at': self.now()})
+        self.event('update-watch', 'verified', appVersion=version, ok=ok, failing=failing)
+        if not ok and not (previous.get('ok') is False and self.same_pair(previous, version, commit)):
+            self.notify(f'Paseo {version} 세팅 점검 실패 {len(failing)}건: {", ".join(failing[:3])}. setup.py check·doctor로 확인하세요.')
 
     def listen(self):
         value = str(read(self.home/'config.json').get('daemon', {}).get('listen') or '127.0.0.1:6767')

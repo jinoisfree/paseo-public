@@ -27,6 +27,7 @@ sys.path.insert(0, str(ROOT/'modules'))
 from launcher_runtime import tested_version, warn_version
 
 PREFIX = 'io.github.jinoisfree.paseo-public.'
+UPDATE_VERIFY_FILE = 'airport/runtime/update-verify.json'  # written by update-watch; removed with its permit
 STABLE_PATHS = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin']
 
 
@@ -393,6 +394,8 @@ class Airport:
         selected = {row['id'] for row in self.module_plan() if row['install']}
         disabled = sorted(set(disabled) | {row['id'] for row in self.record.get('equipment', []) if row['install'] and row['id'] not in selected})
         if not disabled: return
+        if 'update-watch' in disabled:
+            (self.directory/UPDATE_VERIFY_FILE).unlink(missing_ok=True)
         if files_only:
             keep = {str(row['target']) for row in keep_rows}
             installed = self.record.setdefault('generatedFiles', [])
@@ -846,6 +849,17 @@ class Airport:
         add('models.catalog', bool(usable), '본체 제공자 화면에서 모델 사용 가능 여부를 확인하세요.', True)
         add('core.skills', account.get('agents', {}).get('skills', {}).get('selection', {}).get('mode') == 'all', '본체 스킬을 설치·선택하고 Claude 분리 홈 링크를 확인하세요.', True)
         add('daemon.account', daemon_running(self.home), '이 계정의 Paseo 데몬을 실행하세요.', True)
+        if daemon_running(self.home):
+            wanted = [name for name, entry in account.get('plugins', {}).items()
+                      if isinstance(entry, dict) and entry.get('enabled') is True and entry.get('source') in ('directory', 'npm')]
+            if wanted:
+                try:
+                    listed = json.loads(self.command('plugin', 'ls', '--json', check=False).stdout)
+                except (OSError, ValueError, RuntimeError):
+                    listed = None
+                rows = {row.get('id'): row for row in listed if isinstance(row, dict)} if isinstance(listed, list) else {}
+                broken = [name for name in wanted if not (name in rows and rows[name].get('enabled') is True and rows[name].get('status') == 'running' and not rows[name].get('error'))]
+                add('plugins.loaded', isinstance(listed, list) and not broken, '활성 플러그인이 모두 실행 중입니다.' if isinstance(listed, list) and not broken else '플러그인이 로드되지 않았거나 오류 상태입니다: '+(', '.join(broken) if isinstance(listed, list) else '목록 조회 실패')+'. 앱 플러그인 화면과 daemon 로그를 확인하세요.')
         # A TCP bind probe checks the configured local port, without starting a service.
         import socket
         listen = account.get('listen', account.get('daemon', {}).get('listen', '127.0.0.1:6767'))
@@ -959,6 +973,7 @@ class Airport:
         if purge and (self.directory/'owner').exists():
             backup(self.home)
             shutil.rmtree(self.directory/'owner')
+        (self.directory/UPDATE_VERIFY_FILE).unlink(missing_ok=True)
         self.record_file.unlink(missing_ok=True)
         return {'uninstalled': True, 'ownerPreserved': not purge}
 
