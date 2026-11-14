@@ -1,3 +1,4 @@
+import { reviewProgress } from "../shared/plan-review";
 import { selectionStageLabel } from "../shared/executor-selection";
 import { picksExecutor } from "../shared/executor-picker";
 import { ExecutorPicker } from "./executor-picker";
@@ -744,7 +745,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
                 () => navigation?.openAgent({ agentId: w.planAgentId! }),
               )}
             {w.reviewerAgentId && button("계획 검증 대화", () => navigation?.openAgent({agentId:w.reviewerAgentId!}))}
-            {w.mode === "federated" && (w.contract ?? 1) >= 7 && w.planReview && <Text selectable style={s.muted}>{`계획 검증 ${w.planReview.round}/${w.planReview.maxRounds} · ${w.planReview.stage} · ${w.planReview.verdict?.verdict ?? "대기"} · 차단 ${w.planReview.verdict?.findings.filter(f=>f.severity === "차단").length ?? 0}\n${w.planReview.path} · 최종 기록 ${w.planReview.outcome ?? "대기"}`}</Text>}
+            {w.mode === "federated" && (w.contract ?? 1) >= 7 && w.planReview && <Text selectable style={s.muted}>{reviewProgress(w.planReview)}</Text>}
             {w.executeAgentId &&
               button(
                 `실행${w.executeGeneration > 1 ? w.executeGeneration : ""} 열기 · ${w.executeUsage === null ? "사용량 미제공" : Math.round(w.executeUsage * 100) + "%"}`,

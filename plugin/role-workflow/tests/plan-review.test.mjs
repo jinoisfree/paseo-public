@@ -71,32 +71,42 @@ test('AC-4/5: read-only review precedes approval and executor delivery', async t
   assert.equal(f.sent.filter(s=>s.id===w.reviewer.id).length,1);
 });
 
-async function blockedTwice(f) {
+async function blockedToLimit(f) {
+  assert.equal((await f.live()).planReview.maxRounds, 5);
   await enable(f);
-  await reply(f,'reviewer','result',{planReview:verdict((await f.live()).heldApproval.decisionHash,true)});
-  await reply(f,'plan','plan',{summary:'수정1',next:'docs/changes/test/handoff.md 수정 구현'});
-  let w=await f.live();
-  assert.equal(w.planReview.round,2); assert.equal(w.cycles,0);
-  assert.match(f.sent.at(-1).prompt,/이전 회차 기록: docs\/changes\/test\/plan-review.md/);
-  await reply(f,'reviewer','result',{planReview:verdict(w.heldApproval.decisionHash,true)});
-  assert.match(f.sent.at(-1).prompt,/다음 자동 검토 없음/);
-  await reply(f,'plan','plan',{summary:'수정2',next:'docs/changes/test/handoff.md 최종 구현'});
-  w=await f.live(); assert.equal(w.planReview.stage,'limit'); assert.equal(w.status,'needs_input');
-  assert.equal(f.sent.filter(s=>s.id===w.reviewer.id).length,2);
+  for (let round = 1; round <= 5; round++) {
+    let w = await f.live();
+    assert.equal(w.planReview.round, round);
+    assert.equal(w.planReview.stage, 'reviewing');
+    assert.equal(w.cycles, 0);
+    await reply(f, 'reviewer', 'result', { planReview: verdict(w.heldApproval.decisionHash, true) });
+    if (round === 5) assert.match(f.sent.at(-1).prompt, /다음 자동 검토 없음/);
+    await reply(f, 'plan', 'plan', { summary: `수정${round}`, next: 'docs/changes/test/handoff.md 수정 구현' });
+    w = await f.live();
+    if (round === 4) {
+      assert.equal(w.planReview.round, 5);
+      assert.equal(w.planReview.stage, 'reviewing');
+    }
+  }
+  const w = await f.live();
+  assert.equal(w.planReview.stage, 'limit');
+  assert.equal(w.status, 'needs_input');
+  assert.equal(f.sent.filter(s => s.id === w.reviewer.id).length, 5);
+  assert.equal(f.created.filter(c => c.role === 'execute').length, 0);
 }
-test('AC-6/7: two blocked rounds wait for user; unverified approval dispatches once',async t=>{
-  const f=await setup(t); await blockedTwice(f); const w=await f.live();
+test('AC-6/7: five blocked rounds wait for user; unverified approval dispatches once',async t=>{
+  const f=await setup(t); await blockedToLimit(f); const w=await f.live();
   assert.equal((await f.engine.selectExecutor(f.id,{...choice,holdId:w.heldApproval.id})).ok,false);
   assert.equal((await f.engine.selectExecutor(f.id,{...choice,holdId:w.heldApproval.id,unverified:true})).ok,true);
   assert.equal((await f.live()).planReview.outcome,'unverified_approved');
   assert.equal(f.created.filter(c=>c.role==='execute').length,1);
 });
 test('AC-7: explicit additional round authorizes exactly one further review',async t=>{
-  const f=await setup(t);await blockedTwice(f);
-  await assert.rejects(f.engine.selectPlanReview(f.id,{...choice,enabled:true,holdId:(await f.live()).heldApproval.id}),/검토 한도/);
+  const f=await setup(t);await blockedToLimit(f);
+  await assert.rejects(f.engine.selectPlanReview(f.id,{...choice,enabled:true,holdId:(await f.live()).heldApproval.id}),/검증 횟수/);
   await f.engine.selectPlanReview(f.id,{enabled:true,extra:true,holdId:(await f.live()).heldApproval.id});
-  const w=await f.live(); assert.equal(w.planReview.round,3);assert.equal(w.planReview.maxRounds,3);
-  assert.equal(f.sent.filter(s=>s.id===w.reviewer.id).length,3);
+  const w=await f.live(); assert.equal(w.planReview.round,6);assert.equal(w.planReview.maxRounds,6);
+  assert.equal(f.sent.filter(s=>s.id===w.reviewer.id).length,6);
 });
 for(const kind of ['hash','changed','push','format'])test(`AC-8: invalid verdict ${kind} consumes no round and never dispatches executor`,async t=>{
   const f=await setup(t);await enable(f); const w=await f.live();
@@ -271,4 +281,16 @@ test('AC-19: reviewer modes are recommended, policy-valid, and classified in own
   for(const key of ['reviewerMode','claudeReviewerMode']){assert.ok(schema.properties.roleWorkflow.properties[key]);assert.equal(ownership.roleWorkflowSettings[key].slot,'policy');}
   const example=JSON.parse(await readFile(new URL('../shared/presets/examples/policy.example.json',import.meta.url),'utf8'));
   assert.equal(ownerPolicySchema.safeParse({...example,roleWorkflow:{...example.roleWorkflow,reviewerMode:'read-only',claudeReviewerMode:'plan'}}).success,true);
+});
+
+test('AC-1.4: loading saved maxRounds=2 preserves the record without sending', async t => {
+  const f = await setup(t);
+  await f.flush();
+  const snapshot = JSON.parse(await readFile(f.file, 'utf8'));
+  snapshot.workflows.find(w => w.id === f.id).planReview.maxRounds = 2;
+  const before = f.sent.length;
+  await f.restart(snapshot);
+  assert.equal((await f.live()).planReview.maxRounds, 2);
+  assert.equal(JSON.parse(await readFile(f.file, 'utf8')).workflows.find(w => w.id === f.id).planReview.maxRounds, 2);
+  assert.equal(f.sent.length, before);
 });

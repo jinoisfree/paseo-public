@@ -41,9 +41,9 @@ for(const kind of ['none','cancel','off','not-ready'])test(`AC-7: ${kind} cannot
  const w=await f.live();assert.equal(w.approvedHold,0);assert.equal(w.execute,null);assert.equal(f.created.filter(c=>c.role==='execute').length,0);
  if(kind==='off')assert.equal(w.implementationReserved,false);
 });
-test('AC-7: BLOCKED and the two-round limit never consume the reservation as approval',async t=>{
+test('AC-7: BLOCKED and the five-round limit never consume the reservation as approval',async t=>{
  const f=await setup(t);const blocked=()=>({planHash:'',verdict:'BLOCKED',findings:[{id:'F1',severity:'차단',text:'보완',evidence:'설계'}]});
- for(let round=1;round<=2;round++){
+ for(let round=1;round<=5;round++){
   await reply(f,'reviewer','result',{planReview:{...blocked(),planHash:(await f.live()).heldApproval.decisionHash}});
   assert.equal((await f.live()).approvedHold,0);await reply(f,'plan','plan',{summary:`수정${round}`});
  }

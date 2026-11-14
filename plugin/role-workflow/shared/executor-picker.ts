@@ -34,7 +34,7 @@ export function picksExecutor(w: {
 export const executorPickerCardSchema = z.object({ workflowId: z.string() }).strict();
 
 const REVIEW_PENDING = ["reviewing", "revising"];
-const LIMIT_REASON = "검증 한도 처리(미통과로 승인 또는 검토 1회 더)";
+const LIMIT_REASON = "검증 횟수 소진 — '검증 통과 없이 구현' 또는 '검증 1회 더'";
 
 /** Raw card values the picker buttons' disabled state is derived from. */
 export type PickerBlockerInput = {
@@ -69,28 +69,60 @@ export function pickerBlockers(input: PickerBlockerInput, kind: "primary" | "aut
   const pending = REVIEW_PENDING.includes(stage ?? "");
   const automatic = kind === "automatic" || earlyDraft;
   const review: string[] = [], wait: string[] = [];
-  if (gated && !approved && !earlyDraft) wait.push("현재 계획 대기");
+  if (gated && !approved && !earlyDraft) wait.push("계획이 아직 나오지 않음");
   if (automatic) {
-    if (input.localReview === null) review.push("계획 검증 켜기/끄기");
-    else if (input.localReview && !input.localReviewComplete && !pending) review.push("검증 제품·모델·추론");
-    if (pending) wait.push("계획 검증 진행 중");
+    if (input.localReview === null) review.push("계획 검증 받을지");
+    else if (input.localReview && !input.localReviewComplete && !pending) review.push("검증할 AI(제품·모델·추론)");
+    if (pending) wait.push("다른 AI가 계획을 검증하는 중");
     if (stage === "limit") review.push(LIMIT_REASON);
-    if (stage === "done") wait.push("계획 검증 기록 완료");
+    if (stage === "done") wait.push("계획 검증이 이미 끝남");
   } else if (input.contract >= 7) {
     const skipped = input.savedReview === false && !pending;
     const passed = approved && stage === "passed" && input.reviewHash === input.approvalHash;
     if (!skipped && !passed) {
-      if (pending) wait.push("계획 검증 진행 중");
+      if (pending) wait.push("다른 AI가 계획을 검증하는 중");
       else if (stage === "limit") review.push(LIMIT_REASON);
-      else if (stage === "passed") wait.push("계획이 바뀌어 재검증 대기");
-      else if (stage === "unverified_approved") wait.push("미통과 승인 처리 중");
-      else if (stage === "done") wait.push("계획 검증 기록 완료");
-      else review.push("계획 검증 확정(검증 선택·시작 또는 검증 끄기 확정)");
+      else if (stage === "passed") wait.push("계획이 바뀌어 다시 검증해야 함");
+      else if (stage === "unverified_approved") wait.push("검증 통과 없이 구현 요청을 처리하는 중");
+      else if (stage === "done") wait.push("계획 검증이 이미 끝남");
+      else review.push("계획 검증 확정 — '이 AI로 검증 시작' 또는 '검증 없이 진행'");
     }
   }
   const choose = [...review];
   if (!input.model) choose.push("구현 모델");
-  else if (input.thinking === null) choose.push("구현 추론");
-  if (automatic && !input.placement) choose.push("겹칠 때 배치");
+  else if (input.thinking === null) choose.push("구현 추론 수준");
+  if (automatic && !input.placement) choose.push("다른 작업과 겹칠 때 방법");
   return { choose, wait };
+}
+
+export const BLINK_MS = 600;
+export type FocusTarget = "review-toggle" | "review-provider" | "review-model" | "review-thinking" | "review-confirm" | "review-limit"
+  | "executor-model" | "executor-thinking" | "placement" | "primary" | "automatic";
+export type PickerFocusInput = {
+  busy: boolean; stage?: string; earlyDraft: boolean; reviewRequired: boolean; automaticShown: boolean;
+  localReview: boolean | null; reviewProvider: string | null; reviewModel: string; reviewThinking: string | null;
+  model: string; thinking: string | null; placement: string | null;
+  primaryEnabled: boolean; automaticEnabled: boolean; limitApproveEnabled: boolean; limitExtraEnabled: boolean;
+  reviewConfirmEnabled: boolean; primaryChoose: string[];
+};
+
+/** The next available choice, ordered independently of either action's blocker list. */
+export function pickerFocus(i: PickerFocusInput): FocusTarget | null {
+  if (i.busy) return null;
+  if (i.stage === "limit" && (i.limitApproveEnabled || i.limitExtraEnabled)) return "review-limit";
+  if (i.reviewRequired && !["reviewing", "revising", "limit", "done", "unverified_approved"].includes(i.stage ?? "")) {
+    if (i.localReview === null) return "review-toggle";
+    if (i.localReview) {
+      if (!i.reviewProvider) return "review-provider";
+      if (!i.reviewModel) return "review-model";
+      if (i.reviewThinking === null) return "review-thinking";
+    }
+  }
+  if (!i.model) return "executor-model";
+  if (i.thinking === null) return "executor-thinking";
+  if (i.primaryEnabled) return "primary";
+  if ((i.earlyDraft || i.automaticShown) && !i.placement) return "placement";
+  if (i.automaticShown && i.automaticEnabled) return "automatic";
+  if (i.reviewConfirmEnabled && i.primaryChoose.some(reason => reason.startsWith("계획 검증 확정 —"))) return "review-confirm";
+  return null;
 }

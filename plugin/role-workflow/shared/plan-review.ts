@@ -14,10 +14,11 @@ export const planReviewVerdictSchema = z.object({
     ctx.addIssue({ code: "custom", message: "BLOCKED는 차단 지적이 필요하고 APPROVED는 차단 지적을 허용하지 않습니다." });
 });
 export const reviewSelectionSchema = executorSelectionSchema.extend({ enabled: z.boolean().nullable().default(null) });
+export const DEFAULT_REVIEW_ROUNDS = 5;
 export const planReviewSchema = z.object({
   stage: z.enum(["off", "waiting_choice", "reviewing", "revising", "passed", "limit", "unverified_approved", "done"]).default("waiting_choice"),
   round: z.number().int().nonnegative().default(0),
-  maxRounds: z.number().int().positive().default(2),
+  maxRounds: z.number().int().positive().default(DEFAULT_REVIEW_ROUNDS),
   hash: z.string().default(""),
   verdict: planReviewVerdictSchema.nullable().default(null),
   path: z.string().default(""),
@@ -37,4 +38,12 @@ export function reviewerEligibility(planner: string, provider: string, model: st
   if (planner === provider) return "계획 담당 모델을 확인한 뒤 같은 제품의 검증 모델을 선택하세요.";
   if (planner === `${provider}/${model}`) return "계획 담당과 다른 (제품, 모델)을 선택하세요.";
   return null;
+}
+
+/** User-facing progress shared by the picker and dashboard. */
+export function reviewProgress(review: Partial<PlanReview>): string {
+  const stages = { off: "검증 안 함", waiting_choice: "선택 기다리는 중", reviewing: "검증 중", revising: "계획 담당이 반영 중",
+    passed: "통과", limit: "횟수 소진", unverified_approved: "통과 없이 승인", done: "구현에 넘김" };
+  const outcomes = { passed: "통과", unverified_approved: "통과 없이 승인", off: "검증 안 함" };
+  return `검증 ${review.round ?? 0}/${review.maxRounds ?? DEFAULT_REVIEW_ROUNDS}회 · ${stages[review.stage ?? "waiting_choice"]} · 판정: ${review.verdict ? (review.verdict.verdict === "APPROVED" ? "통과" : "고칠 점 있음") : "아직 없음"} · 꼭 고칠 점 ${review.verdict?.findings.filter(f => f.severity === "차단").length ?? 0}개\n기록 파일: ${review.path ?? ""}\n최종 결과: ${review.outcome ? outcomes[review.outcome] : "아직 없음"}`;
 }

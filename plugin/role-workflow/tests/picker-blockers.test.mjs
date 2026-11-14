@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { pickerBlockers } from '../shared/executor-picker.ts';
 
 const H = 'a'.repeat(64);
-const LIMIT = '검증 한도 처리(미통과로 승인 또는 검토 1회 더)';
+const LIMIT = "검증 횟수 소진 — '검증 통과 없이 구현' 또는 '검증 1회 더'";
 
 // The button conditions as the picker wrote them before pickerBlockers owned them (busy left out).
 function oldDisabled(i, kind) {
@@ -48,26 +48,26 @@ const base = { contract: 7, mode: 'federated', firstPlan: true, approvalHash: H,
   stage: 'waiting_choice', reviewHash: H, placement: 'worktree', model: 'm', thinking: 'high' };
 const early = { approvalHash: null };
 const cases = [
-  [1, { stage: 'reviewing' }, 'primary', [], ['계획 검증 진행 중']],
-  [2, { stage: 'revising' }, 'primary', [], ['계획 검증 진행 중']],
+  [1, { stage: 'reviewing' }, 'primary', [], ['다른 AI가 계획을 검증하는 중']],
+  [2, { stage: 'revising' }, 'primary', [], ['다른 AI가 계획을 검증하는 중']],
   [3, { stage: 'limit' }, 'primary', [LIMIT], []],
   [4, { stage: 'passed' }, 'primary', [], []],
-  [5, { stage: 'passed', reviewHash: 'b'.repeat(64) }, 'primary', [], ['계획이 바뀌어 재검증 대기']],
-  [6, { stage: 'unverified_approved' }, 'primary', [], ['미통과 승인 처리 중']],
-  [7, { stage: 'done' }, 'primary', [], ['계획 검증 기록 완료']],
-  [8, { stage: 'waiting_choice', savedReview: null }, 'primary', ['계획 검증 확정(검증 선택·시작 또는 검증 끄기 확정)'], []],
+  [5, { stage: 'passed', reviewHash: 'b'.repeat(64) }, 'primary', [], ['계획이 바뀌어 다시 검증해야 함']],
+  [6, { stage: 'unverified_approved' }, 'primary', [], ['검증 통과 없이 구현 요청을 처리하는 중']],
+  [7, { stage: 'done' }, 'primary', [], ['계획 검증이 이미 끝남']],
+  [8, { stage: 'waiting_choice', savedReview: null }, 'primary', ["계획 검증 확정 — '이 AI로 검증 시작' 또는 '검증 없이 진행'"], []],
   [9, { savedReview: false, stage: 'off' }, 'primary', [], []],
-  [10, { ...early, localReview: null, placement: null, stage: 'waiting_choice' }, 'primary', ['계획 검증 켜기/끄기', '겹칠 때 배치'], []],
-  [11, { ...early, localReviewComplete: false, stage: 'waiting_choice' }, 'primary', ['검증 제품·모델·추론'], []],
-  [12, { ...early, stage: 'reviewing' }, 'primary', [], ['계획 검증 진행 중']],
-  [13, { ...early, localReview: false, stage: 'revising' }, 'primary', [], ['계획 검증 진행 중']],
-  [14, { stage: 'limit', placement: null }, 'automatic', [LIMIT, '겹칠 때 배치'], []],
-  [15, { stage: 'done' }, 'automatic', [], ['계획 검증 기록 완료']],
+  [10, { ...early, localReview: null, placement: null, stage: 'waiting_choice' }, 'primary', ['계획 검증 받을지', '다른 작업과 겹칠 때 방법'], []],
+  [11, { ...early, localReviewComplete: false, stage: 'waiting_choice' }, 'primary', ['검증할 AI(제품·모델·추론)'], []],
+  [12, { ...early, stage: 'reviewing' }, 'primary', [], ['다른 AI가 계획을 검증하는 중']],
+  [13, { ...early, localReview: false, stage: 'revising' }, 'primary', [], ['다른 AI가 계획을 검증하는 중']],
+  [14, { stage: 'limit', placement: null }, 'automatic', [LIMIT, '다른 작업과 겹칠 때 방법'], []],
+  [15, { stage: 'done' }, 'automatic', [], ['계획 검증이 이미 끝남']],
   [16, { model: '' }, 'automatic', ['구현 모델'], []],
-  [16, { thinking: null }, 'automatic', ['구현 추론'], []],
+  [16, { thinking: null }, 'automatic', ['구현 추론 수준'], []],
   [17, { contract: 5, approvalHash: null, firstPlan: false }, 'primary', [], []],
   [17, { contract: 5, approvalHash: null, firstPlan: false, model: '' }, 'primary', ['구현 모델'], []],
-  [18, { contract: 6, approvalHash: null }, 'primary', [], ['현재 계획 대기']],
+  [18, { contract: 6, approvalHash: null }, 'primary', [], ['계획이 아직 나오지 않음']],
   [19, { ...early, localReview: false, placement: 'worktree', stage: 'waiting_choice' }, 'primary', [], []],
 ];
 // Protects the wording the card shows: each expectation is written by hand from the reason table, not from the function.

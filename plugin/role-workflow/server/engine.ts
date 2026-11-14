@@ -1098,7 +1098,7 @@ export class WorkflowEngine {
         if (early || combined) {
           if (draft.stage !== "ready") { await this.save(); return { ok: false, detail: draft.error }; }
           if (w.reviewSelection.enabled === null || (w.reviewSelection.enabled && w.reviewSelection.stage !== "ready"))
-            return { ok: false, detail: "계획 검증 켜기/끄기와 검증 담당을 선택하세요." };
+            return { ok: false, detail: "계획 검증을 받을지와 검증할 AI를 고르세요." };
           if (choice.placement !== undefined) w.reservedPlacement = choice.placement;
           w.implementationReserved = true;
           await this.save();
@@ -1159,7 +1159,7 @@ export class WorkflowEngine {
     }
     if (capabilities(w).planReview) {
       const review = w.planReview;
-      if (w.reviewSelection.enabled === null) return { ok: false, detail: "계획 검증 켜기/끄기를 먼저 선택하세요." };
+      if (w.reviewSelection.enabled === null) return { ok: false, detail: "먼저 계획 검증을 받을지 고르세요." };
       if (w.pending) return { ok: false, detail: "진행 중인 검증·기록 응답을 기다리세요." };
       if (w.reviewSelection.enabled) {
         if (review.stage === "limit" && unverified) {

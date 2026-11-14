@@ -31,13 +31,13 @@ createRoot(document.getElementById('root')).render(kind==='mode'?<ModePickerCard
  for(const viewport of [{width:1280,height:800},{width:390,height:844}]){
   const page=await browser.newPage({viewport});const errors=[];page.on('pageerror',e=>errors.push(e.message));const url=`http://127.0.0.1:${server.address().port}`;
   for(const contract of [5,6]){await page.goto(`${url}?kind=mode&contract=${contract}`);await page.getByText('진행 방식을 선택하세요',{exact:true}).waitFor();if(contract===6)await page.getByRole('button',{name:'브레인스토밍',exact:true}).waitFor();assert.equal(await page.getByRole('button').count(),contract===6?3:2);if(contract===6){await page.getByRole('button',{name:'브레인스토밍',exact:true}).click();assert.deepEqual(await page.evaluate(()=>window.__calls),[{id:'task',mode:'brainstorm'}]);}}
-  await page.goto(`${url}?kind=old`);await page.getByText('이전 계획입니다. 현재 계획을 확인하세요.',{exact:true}).waitFor();assert.equal(await page.getByRole('button',{name:'이 담당으로 확정',exact:true}).count(),0);
+  await page.goto(`${url}?kind=old`);await page.getByText('이전 계획입니다. 현재 계획을 확인하세요.',{exact:true}).waitFor();assert.equal(await page.getByRole('button',{name:'이 담당에게 구현 맡기기',exact:true}).count(),0);
   for(const kind of ['card','dashboard']){
-   await page.goto(`${url}?kind=${kind}`);const submit=page.getByRole('button',{name:'이 담당으로 확정',exact:true});await submit.waitFor();await page.getByRole('button',{name:'✓ High',exact:true}).waitFor();
+   await page.goto(`${url}?kind=${kind}`);const submit=page.getByRole('button',{name:'이 담당에게 구현 맡기기',exact:true});await submit.waitFor();await page.getByRole('button',{name:'✓ High',exact:true}).waitFor();
    await page.evaluate(()=>{window.__workflow={...window.__workflow,heldApproval:{id:2,summary:'B',handoff:'b.md',decisionHash:window.__hash(window.__b)}};});
    await submit.click();await page.getByText('보관 계획 #2\nB\nb.md',{exact:true}).waitFor();assert.deepEqual(await page.evaluate(()=>window.__calls.map(c=>c.holdId)),[1]);await submit.click();assert.deepEqual(await page.evaluate(()=>window.__calls.map(c=>c.holdId)),[1,2]);
   }
-  await page.goto(`${url}?kind=replacement`);await page.getByRole('button',{name:'✓ High',exact:true}).waitFor();await page.getByRole('button',{name:'이 담당으로 확정',exact:true}).click();assert.equal(await page.evaluate(()=>window.__calls[0].holdId),undefined);
-  await page.goto(`${url}?kind=aba`);await page.getByRole('button',{name:'✓ High',exact:true}).waitFor();await page.getByRole('button',{name:'이 담당으로 확정',exact:true}).click();assert.deepEqual(await page.evaluate(()=>window.__calls.map(c=>c.holdId)),[3]);assert.deepEqual(errors,[]);await page.close();
+  await page.goto(`${url}?kind=replacement`);await page.getByRole('button',{name:'✓ High',exact:true}).waitFor();await page.getByRole('button',{name:'이 담당에게 구현 맡기기',exact:true}).click();assert.equal(await page.evaluate(()=>window.__calls[0].holdId),undefined);
+  await page.goto(`${url}?kind=aba`);await page.getByRole('button',{name:'✓ High',exact:true}).waitFor();await page.getByRole('button',{name:'이 담당에게 구현 맡기기',exact:true}).click();assert.deepEqual(await page.evaluate(()=>window.__calls.map(c=>c.holdId)),[3]);assert.deepEqual(errors,[]);await page.close();
  }
 });

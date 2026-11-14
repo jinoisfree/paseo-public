@@ -85,7 +85,7 @@ export class PlanReviewGate {
       return;
     }
     if (["reviewing", "revising"].includes(review.stage)) throw new Error("검증 응답 중에는 담당을 변경할 수 없습니다.");
-    if (review.round >= review.maxRounds) throw new Error("검토 한도입니다. 검토 1회 더를 명시적으로 선택하세요.");
+    if (review.round >= review.maxRounds) throw new Error("검증 횟수를 다 썼습니다. 더 받으려면 '검증 1회 더'를 누르세요.");
     const draft = structuredClone(w.reviewSelection);
     draft.enabled = true;
     if (!choice.provider || !choice.model || choice.thinking === undefined) throw new Error("검증 제품·모델·추론을 선택하세요.");
@@ -137,7 +137,7 @@ export class PlanReviewGate {
     w.reviewPlan = inbox;
     if (w.reviewSelection.enabled === null || w.reviewSelection.stage !== "ready") {
       review.stage = "waiting_choice"; this.restore(w);
-      this.host.touch(w, "계획 검증 켜기/끄기를 선택하세요. 구현 승인은 검증 선택 뒤 가능합니다.");
+      this.host.touch(w, "계획 검증을 받을지 고르세요. 고른 뒤에 구현을 승인할 수 있습니다.");
       return true;
     }
     if (["passed", "unverified_approved"].includes(review.stage) && review.hash === w.heldApproval?.decisionHash) {
@@ -146,7 +146,7 @@ export class PlanReviewGate {
     if (review.round >= review.maxRounds) {
       review.stage = "limit"; review.hash = w.heldApproval!.decisionHash;
       this.restore(w);
-      this.host.touch(w, "계획 검증 한도입니다. 미통과로 승인 / 검토 1회 더 / 취소를 선택하세요.");
+      this.host.touch(w, "계획 검증 횟수를 다 썼습니다. '검증 통과 없이 구현', '검증 1회 더', 취소 중에서 고르세요.");
     } else await this.start(w);
     return true;
   }
