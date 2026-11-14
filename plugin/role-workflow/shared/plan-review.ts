@@ -41,9 +41,18 @@ export function reviewerEligibility(planner: string, provider: string, model: st
 }
 
 /** User-facing progress shared by the picker and dashboard. */
-export function reviewProgress(review: Partial<PlanReview>): string {
-  const stages = { off: "검증 안 함", waiting_choice: "선택 기다리는 중", reviewing: "검증 중", revising: "계획 담당이 반영 중",
+export function reviewProgress(review: Partial<PlanReview>, context: { selection?: Partial<Pick<ReviewSelection, "enabled" | "stage">>; hasPlan?: boolean } = {}): string {
+  const stages = { off: "검증 안 함", waiting_choice: "검증 설정 필요", reviewing: "검증 중", revising: "계획 담당이 반영 중",
     passed: "통과", limit: "횟수 소진", unverified_approved: "통과 없이 승인", done: "구현에 넘김" };
+  let stage = stages[review.stage ?? "waiting_choice"];
+  let guidance = "";
+  if (!review.stage || review.stage === "waiting_choice") {
+    if (context.selection?.enabled === false) stage = "검증 안 함";
+    else if (context.selection?.enabled === true && context.selection.stage === "ready") {
+      stage = context.hasPlan ? "검증 시작 대기" : "첫 계획 기다리는 중";
+      if (!context.hasPlan) guidance = " · 검증 설정이 저장되었습니다. 계획 담당이 첫 계획을 제출하면 자동으로 검증합니다.";
+    }
+  }
   const outcomes = { passed: "통과", unverified_approved: "통과 없이 승인", off: "검증 안 함" };
-  return `검증 ${review.round ?? 0}/${review.maxRounds ?? DEFAULT_REVIEW_ROUNDS}회 · ${stages[review.stage ?? "waiting_choice"]} · 판정: ${review.verdict ? (review.verdict.verdict === "APPROVED" ? "통과" : "고칠 점 있음") : "아직 없음"} · 꼭 고칠 점 ${review.verdict?.findings.filter(f => f.severity === "차단").length ?? 0}개\n기록 파일: ${review.path ?? ""}\n최종 결과: ${review.outcome ? outcomes[review.outcome] : "아직 없음"}`;
+  return `검증 ${review.round ?? 0}/${review.maxRounds ?? DEFAULT_REVIEW_ROUNDS}회 · ${stage} · 판정: ${review.verdict ? (review.verdict.verdict === "APPROVED" ? "통과" : "고칠 점 있음") : "아직 없음"} · 꼭 고칠 점 ${review.verdict?.findings.filter(f => f.severity === "차단").length ?? 0}개${guidance}\n기록 파일: ${review.path ?? ""}\n최종 결과: ${review.outcome ? outcomes[review.outcome] : "아직 없음"}`;
 }

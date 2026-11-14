@@ -32,11 +32,32 @@ test('AC-2.1: no replaced copy remains in picker string literals or JSX', async 
   }
 });
 test('AC-2.1: every progress stage, verdict and outcome has the prescribed Korean text', () => {
-  for (const [stage, label] of Object.entries({off:'검증 안 함',waiting_choice:'선택 기다리는 중',reviewing:'검증 중',revising:'계획 담당이 반영 중',passed:'통과',limit:'횟수 소진',unverified_approved:'통과 없이 승인',done:'구현에 넘김'})) {
+  for (const [stage, label] of Object.entries({off:'검증 안 함',waiting_choice:'검증 설정 필요',reviewing:'검증 중',revising:'계획 담당이 반영 중',passed:'통과',limit:'횟수 소진',unverified_approved:'통과 없이 승인',done:'구현에 넘김'})) {
     assert.equal(reviewProgress({stage,round:2,maxRounds:5,path:'record.md'}), `검증 2/5회 · ${label} · 판정: 아직 없음 · 꼭 고칠 점 0개\n기록 파일: record.md\n최종 결과: 아직 없음`);
   }
   for (const [verdict,label] of [['APPROVED','통과'],['BLOCKED','고칠 점 있음']])
     for (const [outcome,result] of [['passed','통과'],['unverified_approved','통과 없이 승인'],['off','검증 안 함']])
       assert.equal(reviewProgress({stage:'limit',round:5,maxRounds:6,path:'record.md',verdict:{verdict,findings:[{severity:'차단'},{severity:'권고'}]},outcome}),
         `검증 5/6회 · 횟수 소진 · 판정: ${label} · 꼭 고칠 점 1개\n기록 파일: record.md\n최종 결과: ${result}`);
+});
+
+// WAIT AC-1/5: saved server context determines waiting copy; execution stages win.
+test('WAIT: distinguish first plan, review start, off and incomplete settings', () => {
+  const ready = {enabled:true,stage:'ready'};
+  for (const [selection,hasPlan,label] of [
+    [undefined,false,'검증 설정 필요'], [{},true,'검증 설정 필요'],
+    [{enabled:null,stage:'ready'},false,'검증 설정 필요'],
+    [{enabled:true,stage:'model'},false,'검증 설정 필요'],
+    [{enabled:false},false,'검증 안 함'], [{enabled:false},true,'검증 안 함'],
+    [ready,false,'첫 계획 기다리는 중'], [ready,true,'검증 시작 대기'],
+  ]) {
+    const text = reviewProgress({stage:'waiting_choice'}, {selection,hasPlan});
+    assert.ok(text.startsWith(`검증 0/5회 · ${label} · 판정: 아직 없음`));
+    assert.equal(text.split('\n').length,3);
+    assert.equal(text.includes('검증 설정이 저장되었습니다. 계획 담당이 첫 계획을 제출하면 자동으로 검증합니다.'),label==='첫 계획 기다리는 중');
+  }
+  for (const stage of ['off','reviewing','revising','passed','limit','unverified_approved','done']) {
+    const review={stage,error:'전송 실패',outcome:'passed',verdict:{verdict:'APPROVED',findings:[]}};
+    assert.equal(reviewProgress(review,{selection:ready,hasPlan:false}),reviewProgress(review));
+  }
 });

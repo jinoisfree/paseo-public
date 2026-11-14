@@ -71,7 +71,7 @@ window.root=createRoot(document.getElementById('root'));window.root.render(<App/
     assert.notEqual(await bg(review.getByRole('button', { name: '검증 안 함', exact: true })), ACCENT);
     if (shots) await page.screenshot({ path: path.join(shots, `picker-${width}-unselected.png`), fullPage: true });
     await review.getByRole('button', { name: '검증 안 함', exact: true }).click();
-    await review.getByText('선택 완료', { exact: true }).waitFor();
+    await review.getByText('선택됨 · 저장 전', { exact: true }).waitFor();
     assert.equal(await bg(review.getByRole('button', { name: '✓ 검증 안 함', exact: true })), ACCENT);
     assert.equal(await primaryHint.innerText(), '먼저 고를 것: 다른 작업과 겹칠 때 방법');
     await page.getByRole('button', { name: '앞 작업이 끝나면 시작', exact: true }).click();
@@ -92,7 +92,7 @@ window.root=createRoot(document.getElementById('root'));window.root.render(<App/
     await page.evaluate(() => { window.w.planReview = { ...window.w.planReview, stage: 'reviewing', round: 1 }; window.update(); });
     await primaryHint.getByText('기다리는 중: 다른 AI가 계획을 검증하는 중', { exact: true }).waitFor();
     assert.equal(await primaryHint.getByText(/남은 선택/).count(), 0);
-    await review.getByText('선택 완료', { exact: true }).waitFor();
+    await review.getByText('선택됨 · 저장 전', { exact: true }).waitFor();
     assert.equal(await primary.isDisabled(), true);
 
     // c) held plan whose verification was never confirmed: the confirm step is named, then passing clears it.

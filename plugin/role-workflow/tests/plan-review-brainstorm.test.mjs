@@ -29,7 +29,9 @@ test('AC-22: finish enables review, posts one early card, saves drafts, then rev
  assert.equal((await f.engine.selectPlanReview(f.id,{...choice,enabled:true})).ok,true);
  assert.equal((await f.engine.selectExecutor(f.id,choice)).ok,true);w=await f.live();
  assert.equal(w.selectionDraft.stage,'ready');assert.equal(w.reviewSelection.stage,'ready');assert.equal(f.created.length,0);
+ await f.say("", "note");await f.engine.tick();
  await f.restart();await f.engine.tick();await f.settle();assert.equal(f.pickers.length,1);
+ assert.equal(f.created.length,0);assert.equal(f.sent.length,0);
  await f.say('','plan');w=await f.live();
  assert.equal(w.planReview.stage,'reviewing');assert.equal(w.planReview.round,1);assert.equal(w.status,'active');
  assert.deepEqual(f.created.map(c=>c.role),['reviewer']);assert.equal(f.sent.length,1);assert.equal(f.pickers.length,1);

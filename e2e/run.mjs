@@ -721,12 +721,12 @@ try {
     assert(JSON.stringify(state().settings)===JSON.stringify(legacySettings),"frozen rollback snapshot changed on restart");
   });
 
-  for (const blocked of [false, true]) await step(`AC-20: plan reviewer ${blocked ? "two blocked rounds and user override" : "approval before execution"}`, async () => {
+  for (const blocked of [false, true]) await step(`AC-20: plan reviewer ${blocked ? "five blocked rounds and user override" : "approval before execution"}`, async () => {
     const first = workflowBlock("plan", "docs/changes/review/handoff.md 구현");
     const decision = {status:"result",summary:"계획 검증",handoff:"읽기 전용 판정",next:"",checks:[],
       planReview:{planHash:"__PLAN_HASH__",verdict:blocked?"BLOCKED":"APPROVED",findings:blocked?[{id:"F1",severity:"차단",text:"시험 보완 필요",evidence:"설계 7절"}]:[]}};
     writeFileSync(control, JSON.stringify({mode:"role",scenario:`plan-review-${blocked}`, plan:blocked
-      ? [first,workflowBlock("plan","docs/changes/review/handoff.md 수정1"),workflowBlock("plan","docs/changes/review/handoff.md 수정2"),workflowBlock("input","검토 끝")]
+      ? [first,...Array.from({length:5},(_,i)=>workflowBlock("plan",`docs/changes/review/handoff.md 수정${i+1}`)),workflowBlock("input","검토 끝")]
       : [first,workflowBlock("note",""),workflowBlock("input","검토 끝")],
       reviewer:[`<paseo-workflow>${JSON.stringify(decision)}</paseo-workflow>`],execute:[workflowBlock("result","구현 완료")]}));
     try {
@@ -741,7 +741,7 @@ try {
       flow=await waitFor("review verdict and planner recording",async()=>state().workflows.find(w=>w.id===flow.id && w.planReview?.stage===(blocked?"limit":"passed")),120000);
       assert(!flow.execute,"executor created before review approval");
       assert(flow.cycles===0,"review consumed implementation cycles");
-      assert(flow.planReview.round===(blocked?2:1),"unexpected review rounds");
+      assert(flow.planReview.round===(blocked?5:1),"unexpected review rounds");
       const reviewer=JSON.parse(readFileSync(agentFile(flow.reviewer.id),"utf8"));
       assert(reviewer.currentModeId==="plan" || reviewer.config?.modeId==="plan" || reviewer.modeId==="plan","reviewer is not in plan mode");
       assert(reviewer.labels?.["role-workflow.role"] === "reviewer", "reviewer label missing");

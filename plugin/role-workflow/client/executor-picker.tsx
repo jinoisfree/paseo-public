@@ -21,7 +21,7 @@ type Workflow = Parameters<typeof picksExecutor>[0] & {
   reservedPlacement?: "worktree" | "wait" | null;
   heldApproval?: { id: number; decisionHash: string; summary: string; handoff: string } | null;
   selection?: { provider?: WorkflowProvider | null; model?: string; thinking?: string | null; error?: string } | null;
-  reviewSelection?: Pick<Partial<ReviewSelection>, "enabled" | "provider" | "model" | "thinking">;
+  reviewSelection?: Pick<Partial<ReviewSelection>, "enabled" | "provider" | "model" | "thinking" | "stage">;
   planReview?: Partial<PlanReview>;
   reviewerAgentId?: string | null;
 };
@@ -90,11 +90,11 @@ function usePickerOptions(theme: PluginHostProps["theme"], busy: boolean, focus:
     <View style={styles.line}><Text style={styles.label}>{label}</Text><View style={[styles.row, { flex: 1 }]}>{children}</View></View>
   );
   /** A numbered step box whose border and title text say whether its choice is made. */
-  const zone = (testID: string, title: string, done: boolean, children: ReactNode) => (
+  const zone = (testID: string, title: string, done: boolean, children: ReactNode, status?: string) => (
     <View testID={testID} style={{ gap: 8, padding: 10, borderRadius: 10, borderWidth: 1, borderColor: done ? colors.success : colors.warning }}>
       <View style={styles.line}>
         <Text style={styles.text}>{title}</Text>
-        <Text style={done ? { color: colors.success } : styles.todo}>{done ? "선택 완료" : "선택 필요"}</Text>
+        <Text style={done ? { color: colors.success } : styles.todo}>{status ?? (done ? "선택 완료" : "선택 필요")}</Text>
       </View>
       {children}
     </View>
@@ -261,6 +261,9 @@ function PlanReviewPicker({ workflow, approval, theme, onChanged, choice, onChoi
   const earlyDraft = (workflow.contract ?? 1) >= 7 && workflow.mode === "federated" && !approval;
   const pending = ["reviewing", "revising"].includes(review?.stage ?? "");
   const complete = enabled === false || !!(enabled && provider && selected && !selected.reason && thinking !== null);
+  const saved = workflow.reviewSelection;
+  const stored = complete && saved?.enabled === enabled &&
+    (enabled === false || (saved.stage === "ready" && saved.provider === provider && saved.model === model && saved.thinking === thinking));
   useEffect(() => onComplete(complete), [complete, onComplete]);
   const confirmDisabled = (!approval && !earlyDraft) || enabled === null || !!(enabled && (pending || !provider || !selected || !!selected.reason || thinking === null));
   useEffect(() => onButtons({ busy, confirm: !earlyDraft && !busy && !confirmDisabled }), [busy, earlyDraft, confirmDisabled, onButtons]);
@@ -286,12 +289,15 @@ function PlanReviewPicker({ workflow, approval, theme, onChanged, choice, onChoi
       {line("모델", models.map(m => option(`${m.label}${m.reason ? ` · ${m.reason}` : ""}`, model === m.id, () => {update({model:m.id,thinking:pickerDefaultThinking(m)});}, m.id, !!m.reason || pending, "review-model")))}
       {line("추론", selected && pickerThinking(selected).map(o => option(o.label, thinking === o.id, () => update({thinking:o.id}), o.id || "none", pending, "review-thinking")))}
     </>}
+    {complete && !stored && <Text style={styles.muted}>{earlyDraft
+      ? "선택한 설정은 아직 저장되지 않았습니다. 아래 ‘이 설정으로 자동 진행’을 누르세요."
+      : "선택한 설정은 아직 저장되지 않았습니다. 아래 검증 진행 버튼으로 적용하세요."}</Text>}
     {!earlyDraft && option(enabled === true ? "이 AI로 검증 시작" : "검증 없이 진행", false, () => void submit(), "confirm", confirmDisabled, "review-confirm")}
     {review?.stage === "limit" && option("검증 1회 더", false, () => void submit(true), "extra", !approval, "review-limit")}
-    {review && <Text selectable style={styles.muted}>{reviewProgress(review)}</Text>}
+    {review && <Text selectable style={styles.muted}>{reviewProgress(review, { selection: workflow.reviewSelection, hasPlan: !!workflow.heldApproval })}</Text>}
     {!!review?.error && <Text style={styles.muted}>{review.error}</Text>}
     {!!error && <Text style={styles.muted}>{error}</Text>}
-  </>);
+  </>, stored ? "설정 저장됨" : complete ? "선택됨 · 저장 전" : "선택 필요");
 }
 
 /** Loads the live workflow that `find` names and offers the picker while it is open. */

@@ -745,7 +745,8 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
                 () => navigation?.openAgent({ agentId: w.planAgentId! }),
               )}
             {w.reviewerAgentId && button("계획 검증 대화", () => navigation?.openAgent({agentId:w.reviewerAgentId!}))}
-            {w.mode === "federated" && (w.contract ?? 1) >= 7 && w.planReview && <Text selectable style={s.muted}>{reviewProgress(w.planReview)}</Text>}
+            {w.mode === "federated" && (w.contract ?? 1) >= 7 && w.planReview && <Text selectable style={s.muted}>{reviewProgress(w.planReview, { selection: w.reviewSelection, hasPlan: !!w.heldApproval })}</Text>}
+            {!!w.planReview?.error && <Text style={s.error}>{w.planReview.error}</Text>}
             {w.executeAgentId &&
               button(
                 `실행${w.executeGeneration > 1 ? w.executeGeneration : ""} 열기 · ${w.executeUsage === null ? "사용량 미제공" : Math.round(w.executeUsage * 100) + "%"}`,
