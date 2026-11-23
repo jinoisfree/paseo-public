@@ -62,7 +62,10 @@ export class Recovery {
 
   async retryQuota(w: Workflow) {
     const record = w.quotaPause;
-    if (!record || w.status !== "paused" || !capabilities(w).automatic) return;
+    // A sent quota retry can enter error after repeated history/inspect failures.
+    // Its durable reservation remains the authority; resume reconciles the existing
+    // delivery before the normal tick consumes it, without sending a second request.
+    if (!record || !["paused", "error"].includes(w.status) || !capabilities(w).automatic) return;
     const settings = await this.host.settings();
     if (!settings.autoResumeQuota) { w.quotaPause = null; return; }
     if (w.cycles >= settings.maxCycles || (w.turns >= settings.maxTurns && !recoveryCharged(record))) {

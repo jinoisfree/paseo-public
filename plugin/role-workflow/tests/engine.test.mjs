@@ -7153,3 +7153,102 @@ for (const kind of ['quota', 'transient']) test(`AUTOREC ${kind} tick recovery c
   await f.engine.tick();
   assert.equal(f.sent.length,count);
 });
+
+
+// V-1: a quota retry followed by repeated daemon reads must retain its recovery path.
+async function mixedQuotaOutage(t, lookup = "history") {
+  const f = await quotaFixture(t);
+  await f.fail("mixed-first", "You've hit your usage limit");
+  f.advance((await stored(f)).quotaPause.nextCheckAt - f.now());
+  await f.engine.tick();
+  f.agents.get(f.executor).status = "idle";
+  const original = f.port[lookup];
+  f.port[lookup] = async () => { throw new Error(`network error during ${lookup}`); };
+  for (let i = 0; i < 3; i++) {
+    const w = await stored(f);
+    if (w.recoveryCheck) f.advance(w.recoveryCheck.nextCheckAt - f.now());
+    await f.engine.tick();
+  }
+  const stopped = await stored(f);
+  assert.equal(stopped.status, "error");
+  assert.ok(stopped.quotaPause);
+  assert.equal(stopped.transientPause, null);
+  return {...f, stopped, restore: () => { f.port[lookup] = original; }};
+}
+for (const lookup of ["history", "inspect"]) for (const restart of [false, true]) for (const outcome of ["failure", "success"]) {
+  test(`AUTOREC V-1 ${lookup} ${outcome} restores after error, restart=${restart}`, async t => {
+    const f = await mixedQuotaOutage(t, lookup);
+    const pending = f.stopped.pending, record = f.stopped.quotaPause, sends = f.sent.length;
+    f.restore();
+    let engine = f.engine;
+    if (restart) {
+      await engine.close();
+      engine = new WorkflowEngine(f.file, f.port, undefined, null, f.now);
+      t.after(() => engine.close());
+    }
+    const text = outcome === "success" ? decision("result") : "";
+    f.histories.set(f.executor, {text, key:"mixed-restored", failed:outcome === "failure" ? "You've hit your usage limit" : null,
+      messageIds:[pending.id], turnId:"mixed-turn", messageTurns:{[pending.id]:"mixed-turn"}});
+    f.agents.get(f.executor).status = outcome === "failure" ? "error" : "idle";
+    f.advance(record.nextCheckAt - f.now() - 1);
+    await engine.tick();
+    assert.equal(f.sent.length, sends);
+    f.advance(1);
+    await engine.tick();
+    let after = await stored(f);
+    assert.ok(after.processed.includes("mixed-restored"));
+    assert.equal(after.transientPause, null);
+    if (outcome === "failure") {
+      assert.equal(f.sent.length, sends);
+      assert.equal(after.turns, f.stopped.turns);
+      for (const field of ["prompt","instruction","sourcePendingId","budgetCharged"])
+        assert.equal(after.quotaPause[field], record[field]);
+      f.advance(after.quotaPause.nextCheckAt - f.now());
+      await engine.tick();
+      after = await stored(f);
+      assert.equal(f.sent.length, sends + 1);
+      assert.equal(after.turns, f.stopped.turns);
+      assert.equal(after.pending.sourcePendingId, pending.sourcePendingId);
+    } else {
+      assert.equal(f.sent.length, sends + 1);
+      assert.equal(f.sent.at(-1).id, "planner");
+      assert.equal(after.quotaPause, null);
+      assert.equal(after.turns, f.stopped.turns + 1);
+      await engine.ended(f.executor,"mixed-restored",text,null);
+    }
+    await engine.tick(); await engine.tick();
+    assert.equal(f.sent.length, sends + 1);
+  });
+}
+test("AUTOREC V-1 continued history outage retains reservation with no sends", async t => {
+  const f = await mixedQuotaOutage(t);
+  const pending = f.stopped.pending, sends = f.sent.length;
+  for (let i=0;i<4;i++) {
+    const before = await stored(f);
+    const due = before.status === "active" ? before.recoveryCheck.nextCheckAt : before.quotaPause.nextCheckAt;
+    f.advance(due - f.now());
+    await f.engine.tick();
+    const after = await stored(f);
+    const next = after.status === "active" ? after.recoveryCheck.nextCheckAt : after.quotaPause.nextCheckAt;
+    assert.ok(next > f.now());
+    assert.equal(after.pending.id,pending.id);
+    assert.equal(after.turns,f.stopped.turns);
+    assert.equal(after.transientPause,null);
+    assert.equal(f.sent.length,sends);
+  }
+});
+for (const stop of ["pause","cancel","disabled","permission","archived","asker"]) {
+  test(`AUTOREC V-1 ${stop} still blocks an error quota reservation`, async t => {
+    const f = await mixedQuotaOutage(t);
+    f.restore();
+    const sends=f.sent.length;
+    if (stop === "pause" || stop === "cancel") await f.engine.control(f.id,stop);
+    else if (stop === "disabled") await f.engine.configure({...await f.engine.settings(),autoResumeQuota:false});
+    else if (stop === "asker") f.engine.database.workflows[0].asker="plan";
+    else f.agents.get(f.executor)[stop]=true;
+    f.advance(24*60*60_000);
+    await f.engine.tick();await f.engine.tick();
+    assert.equal(f.sent.length,sends);
+    assert.equal((await stored(f)).quotaPause,null);
+  });
+}
