@@ -3651,38 +3651,25 @@ async function quotaFixture(t, notify) {
     },
   };
 }
-test("quota failure records the role, account, original instruction and local retry time", async (t) => {
-  const events = [];
-  const f = await quotaFixture(t, async (event) => events.push(event));
+test("quota failure preserves instruction and respects the provider retry time", async t => {
+  const f = await quotaFixture(t);
+  const original = (await stored(f)).pending;
   await f.fail();
-  const w = await stored(f);
-  assert.equal(w.status, "paused");
-  assert.deepEqual(w.quotaPause, {
-    role: "execute",
-    provider: "codex",
-    stoppedAt: f.now(),
-    retryAt: new Date(2026, 9, 14, 21, 36).getTime(),
-    account: "account-a",
-    attempts: 0,
-    accountRetry: false,
-    nextCheckAt: f.now() + 60_000,
-    lastCheckedAt: null,
-    prompt: "next task",
-    phase: "execute",
-  });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(events.filter((e) => e.kind === "stopped").length, 1);
-  f.account("account-b");
-  f.advance(60_000);
-  await f.engine.tick();
-  f.advance(120_000);
-  await f.engine.tick();
-  assert.equal((await stored(f)).status, "active");
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(events.length, 1, "auto resume does not send its own notification");
+  const record = (await stored(f)).quotaPause;
+  assert.equal(record.role, "execute");
+  assert.equal(record.provider, "codex");
+  assert.equal(record.account, "account-a");
+  assert.equal(record.prompt, original.prompt);
+  assert.equal(record.instruction, original.instruction);
+  assert.equal(record.sourcePendingId, original.id);
+  assert.equal(record.nextCheckAt, new Date(2026, 9, 14, 21, 36).getTime());
+  f.account("b"); f.available(true);
+  f.advance(record.nextCheckAt - f.now() - 1);
+  await f.engine.tick(); assert.equal(f.sent.length, 1);
+  f.advance(1); await f.engine.tick(); assert.equal(f.sent.length, 2);
 });
 for (const reason of ["account", "usage", "time"]) {
-  test(`quota auto resume on ${reason} redelivers the original instruction`, async (t) => {
+  test(`quota scheduled retry preserves the instruction despite ${reason} signals`, async (t) => {
     const f = await quotaFixture(t);
     await f.fail();
     f.advance(60_000);
@@ -3694,10 +3681,14 @@ for (const reason of ["account", "usage", "time"]) {
       f.advance(120_000);
       await f.engine.tick();
     }
+    if (reason !== "time") {
+      assert.equal(f.sent.length, 1);
+      f.advance((await stored(f)).quotaPause.nextCheckAt - f.now());
+      await f.engine.tick();
+    }
     const w = await stored(f);
     assert.equal(w.status, "active");
     assert.equal(w.quotaPause.attempts, 1);
-    assert.match(w.detail, /사용 한도 자동 재개/);
     assert.equal(f.sent.length, 2);
     assert.equal(f.sent.at(-1).id, f.executor);
     assert.match(f.sent.at(-1).prompt, /이번 지시:\nnext task/);
@@ -3760,9 +3751,9 @@ for (const blocked of ["plan", "execute"]) {
       assert.equal(waiting.transientPause.firstAt, before.transientPause.firstAt);
       assert.equal(waiting.pending.id, before.pending.id);
       assert.ok(waiting.transientPause.nextCheckAt > f.now());
-      assert.match(waiting.detail, /자동 재개 1\/5 · 다음 시도/);
+      assert.match(waiting.detail, /재시도 0회.*다음 시도/);
       assert.equal(f.sent.length, 1);
-      f.advance(60_000);
+      f.advance(waiting.transientPause.nextCheckAt - f.now());
     }
     member.compaction = null;
     f.engine.compacting.delete(member.id);
@@ -3808,12 +3799,12 @@ test("AC-06 an uncertain sending retry stops with manual guidance and is never r
   f.advance(60_000);
   await f.engine.tick();
   const stopped = await stored(f);
-  assert.equal(stopped.status, "paused");
-  assert.equal(stopped.transientPause, null);
+  assert.equal(stopped.status, "error");
+  assert.ok(stopped.transientPause);
   assert.equal(stopped.pending.id, pendingId);
   assert.equal(stopped.pending.stage, "sending");
-  assert.doesNotMatch(stopped.detail, /자동 재개|다음 시도/);
-  assert.match(stopped.detail, /확인.*재개/);
+  assert.match(stopped.detail, /다음 확인/);
+  assert.match(stopped.detail, /확인|중단/);
   f.advance(120 * 60_000);
   await f.engine.tick();
   assert.equal(f.sent.length, 1);
@@ -3905,7 +3896,11 @@ for (const blocked of ["asker", "held", "quota", "not-automatic", "cycle-limit",
     };
     if (blocked === "not-automatic") w.mode = "undecided";
     if (blocked === "cycle-limit") w.cycles = (await f.engine.settings()).maxCycles;
-    if (blocked === "turn-limit") w.turns = (await f.engine.settings()).maxTurns;
+    if (blocked === "turn-limit") {
+      w.turns = (await f.engine.settings()).maxTurns;
+      w.transientPause.budgetCharged = false;
+      w.pending.budgetCharged = false;
+    }
     f.advance(60_000);
     await f.engine.tick();
     const stopped = await stored(f);
@@ -3927,6 +3922,7 @@ for (const limit of ["cycles", "turns"]) {
     const w = f.engine.database.workflows[0];
     const settings = await f.engine.settings();
     w[limit] = limit === "cycles" ? settings.maxCycles : settings.maxTurns;
+    if (limit === "turns") w.quotaPause.budgetCharged = false;
     const before = { cycles: w.cycles, turns: w.turns };
     f.available(true);
     f.advance(60_000);
@@ -3958,6 +3954,8 @@ test("a transient turn prepares one retry ID and resumes exactly once after one 
     attempts: 0,
     firstAt: f.now(),
     nextCheckAt: f.now() + 60_000,
+    checksFailed: 0, lastCheckedAt: null, prompt: "next task", instruction: true,
+    budgetCharged: true, sourcePendingId: delivered,
   });
   assert.equal(stopped.quotaPause, null);
   assert.equal(stopped.pending.stage, "queued");
@@ -3966,7 +3964,7 @@ test("a transient turn prepares one retry ID and resumes exactly once after one 
     delivered,
     "the failed turn already received the original ID",
   );
-  assert.match(stopped.detail, /자동 재개 1\/5 · 다음 시도 \d{2}:\d{2}$/);
+  assert.match(stopped.detail, /재시도 0회.*다음 시도/);
   f.advance(59_999);
   await f.engine.tick();
   assert.equal(f.sent.length, 1);
@@ -4012,40 +4010,25 @@ test("an advance transport error preserves the queued ID and recovers after reco
   assert.equal(f.sent.length, 1);
 });
 
-test("refused transient resumes back off five times, stop and notify only once on exhaustion", async (t) => {
+test("unavailable transient preflight keeps backing off with one stop notification", async t => {
   const events = [];
-  const f = await quotaFixture(t, async (event) => events.push(event));
+  const f = await quotaFixture(t, async event => events.push(event));
   await f.fail("capacity", capacityError);
   const inspect = f.port.inspect;
-  f.port.inspect = async () => {
-    throw new Error("ECONNREFUSED");
-  };
-  const delays = [1, 3, 10, 30, 60];
-  for (let attempt = 1; attempt <= 5; attempt++) {
-    f.advance(delays[attempt - 1] * 60_000);
+  f.port.inspect = async () => { throw Error("ECONNREFUSED"); };
+  for (let i=0; i<7; i++) {
+    f.advance((await stored(f)).transientPause.nextCheckAt - f.now());
     await f.engine.tick();
     const w = await stored(f);
-    assert.equal(w.status, "paused");
-    if (attempt < 5) {
-      assert.equal(w.transientPause.attempts, attempt);
-      assert.equal(w.transientPause.nextCheckAt, f.now() + delays[attempt] * 60_000);
-      const text = await readFile(f.file, "utf8");
-      await f.engine.tick();
-      assert.equal(await readFile(f.file, "utf8"), text);
-    }
+    assert.equal(w.status, "paused"); assert.equal(w.transientPause.attempts, 0);
+    assert.equal(w.transientPause.checksFailed, i+1);
+    assert.equal(f.sent.length, 1);
   }
-  const w = await stored(f);
-  assert.equal(w.transientPause, null);
-  assert.match(w.detail, /일시 오류 자동 재개 5회 실패: Selected model/);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(events.filter((e) => e.kind === "stopped").length, 2);
-  assert.match(events.at(-1).body, /자동 재개 5회 실패/);
-  const text = await readFile(f.file, "utf8");
-  f.advance(120 * 60_000);
-  await f.engine.tick();
-  assert.equal(await readFile(f.file, "utf8"), text);
-  assert.equal(f.sent.length, 1);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(events.filter(e => e.kind === "stopped").length, 1);
   f.port.inspect = inspect;
+  f.advance((await stored(f)).transientPause.nextCheckAt - f.now());
+  await f.engine.tick(); assert.equal(f.sent.length, 2);
 });
 
 test("five failed automated turns share one budget until a successful response", async (t) => {
@@ -4063,12 +4046,12 @@ test("five failed automated turns share one budget until a successful response",
       assert.equal((await stored(f)).transientPause.attempts, index + 1);
     }
   }
-  assert.equal((await stored(f)).transientPause, null);
-  assert.match((await f.view()).detail, /일시 오류 자동 재개 5회 실패/);
+  assert.equal((await stored(f)).transientPause.attempts, 5);
+  assert.equal((await stored(f)).turns, 1);
   assert.equal(f.sent.length, 6);
   f.advance(120 * 60_000);
   await f.engine.tick();
-  assert.equal(f.sent.length, 6);
+  assert.equal(f.sent.length, 7);
 });
 
 for (const action of ["pause", "resume", "general", "new-turn"]) {
@@ -4093,8 +4076,10 @@ for (const excluded of [
 ]) {
   test(`transient recovery excludes ${excluded}`, async (t) => {
     const f = await quotaFixture(t);
-    if (excluded === "turn-limit")
+    if (excluded === "turn-limit") {
       f.engine.database.workflows[0].turns = (await f.engine.settings()).maxTurns;
+      f.engine.database.workflows[0].pending.budgetCharged = false;
+    }
     if (excluded === "cycle-limit")
       f.engine.database.workflows[0].cycles = (await f.engine.settings()).maxCycles;
     if (excluded === "disabled")
@@ -4107,7 +4092,8 @@ for (const excluded of [
     f.advance(24 * 60 * 60_000);
     await f.engine.tick();
     assert.equal(f.sent.length, 1);
-    if (excluded !== "disabled") assert.equal((await stored(f)).transientPause, null);
+    if (excluded === "missing") assert.ok((await stored(f)).transientPause);
+    else if (excluded !== "disabled") assert.equal((await stored(f)).transientPause, null);
   });
 }
 
@@ -4133,7 +4119,7 @@ test("an uncertain send stays stopped instead of retrying a possibly delivered i
   await f.engine.tick();
   const w = await stored(f);
   assert.equal(w.status, "error");
-  assert.equal(w.transientPause, null);
+  assert.ok(w.transientPause);
   assert.equal(w.pending.stage, "sending");
   assert.equal(w.pending.id, pending.id);
   f.advance(120 * 60_000);
@@ -4190,14 +4176,17 @@ test("third consecutive tick transport failure records recovery while earlier re
     throw new Error("ETIMEDOUT");
   };
   await f.engine.tick();
+  f.advance(60_000);
   await f.engine.tick();
   assert.equal((await f.view()).status, "active");
   assert.equal((await stored(f)).transientPause, null);
+  f.advance(3 * 60_000);
   await f.engine.tick();
   const stopped = await stored(f);
   assert.equal(stopped.status, "error");
   assert.equal(stopped.transientPause.kind, "error");
   f.port.inspect = inspect;
+  f.agents.get(f.executor).status = "idle";
   f.advance(60_000);
   await f.engine.tick();
   assert.equal((await f.view()).status, "active");
@@ -4224,24 +4213,19 @@ test("transient retry history and pending ID survive a plugin reload without res
   assert.equal(f.sent.length, 3);
 });
 
-test("failed advance resumes keep the original error status and exhaust after five refusals", async (t) => {
+test("failed advance resumes retain the original error and reservation beyond five refusals", async t => {
   let time = 100_000;
   const f = await fixture(t, undefined, undefined, undefined, "claude", null, () => time);
-  f.port.create = async () => {
-    throw new Error("Codex app-server exited with code 127 and signal null");
-  };
+  f.port.create = async () => { throw Error("Codex app-server exited with code 127 and signal null"); };
   await f.finish("planner", "plan", "plan");
   const pending = (await stored(f)).pending;
-  for (const [index, minutes] of [1, 3, 10, 30, 60].entries()) {
-    time += minutes * 60_000;
+  for (let i=0; i<7; i++) {
+    time = (await stored(f)).transientPause.nextCheckAt;
     await f.engine.tick();
     const w = await stored(f);
-    assert.equal(w.status, "error");
-    assert.equal(w.pending.id, pending.id);
-    if (index < 4) assert.equal(w.transientPause.attempts, index + 1);
+    assert.equal(w.status, "error"); assert.equal(w.pending.id, pending.id);
+    assert.ok(w.transientPause); assert.equal(w.transientPause.attempts, i+1);
   }
-  assert.equal((await stored(f)).transientPause, null);
-  assert.match((await f.view()).detail, /일시 오류 자동 재개 5회 실패/);
   assert.equal(f.sent.length, 0);
 });
 
@@ -4268,7 +4252,7 @@ test("compaction timeout after an automatic resume clears recovery and requires 
 });
 
 for (const blocked of ["permission", "archived", "missing"]) {
-  test(`a known ${blocked} conversation prevents even recording transient recovery`, async (t) => {
+  test(`a known ${blocked} conversation blocks sending while missing remains retryable`, async (t) => {
     const f = await quotaFixture(t);
     if (blocked === "permission") f.agents.get(f.executor).permission = true;
     if (blocked === "archived") f.agents.get(f.executor).archived = true;
@@ -4277,64 +4261,35 @@ for (const blocked of ["permission", "archived", "missing"]) {
       f.port.inspect = async (id) => (id === f.executor ? null : inspect(id));
     }
     await f.fail("capacity", capacityError);
-    assert.equal((await stored(f)).transientPause, null);
+    if (blocked === "missing") assert.ok((await stored(f)).transientPause);
+    else assert.equal((await stored(f)).transientPause, null);
     f.advance(120 * 60_000);
     await f.engine.tick();
     assert.equal(f.sent.length, 1);
   });
 }
 
-test("quota probes run at most once a minute and unknown account or usage never resumes", async (t) => {
+test("unknown usage does not trigger early quota retry but the scheduled retry continues", async t => {
   const f = await quotaFixture(t);
-  await f.fail();
-  f.advance(60_000);
+  await f.fail("quota", "You've hit your usage limit");
   f.account(null);
-  await f.engine.tick();
-  const calls = { ...f.calls };
-  f.advance(59_999);
-  await f.engine.tick();
+  const calls = {...f.calls};
+  f.advance(299_999); await f.engine.tick(); assert.equal(f.sent.length, 1);
   assert.deepEqual(f.calls, calls);
-  f.advance(1);
-  await f.engine.tick();
-  assert.equal(f.calls.account, calls.account + 1);
-  assert.equal((await f.view()).status, "paused");
-  assert.equal(f.sent.length, 1);
+  f.advance(1); await f.engine.tick(); assert.equal(f.sent.length, 2);
+  assert.equal(f.calls.usage, 0);
 });
-test("quota retry backoff grows, caps at five and resets for a changed account", async (t) => {
+test("quota retry backoff caps at one hour without resetting attempts after account changes", async t => {
   const f = await quotaFixture(t);
-  await f.fail();
-  f.available(true);
-  f.advance(60_000);
-  const delays = [5, 15, 30, 60, 60];
-  for (let attempt = 1; attempt <= 5; attempt++) {
-    await f.engine.tick();
-    assert.equal((await stored(f)).quotaPause.attempts, attempt);
-    await f.fail(`again-${attempt}`);
-    const w = await stored(f);
-    assert.equal(w.quotaPause.nextCheckAt, f.now() + delays[attempt - 1] * 60_000);
-    f.advance(60_000);
-    await f.engine.tick();
-    assert.equal((await f.view()).status, "paused");
-    f.advance((delays[attempt - 1] - 1) * 60_000);
+  for (let attempt=0; attempt<8; attempt++) {
+    await f.fail(`failure-${attempt}`, "You've hit your usage limit");
+    const record = (await stored(f)).quotaPause;
+    assert.equal(record.attempts, attempt);
+    assert.equal(record.nextCheckAt - f.now(), [5,15,30,60,60,60,60,60][attempt] * 60_000);
+    f.account(`account-${attempt}`);
+    f.advance(record.nextCheckAt - f.now()); await f.engine.tick();
+    assert.equal(f.sent.length, attempt+2);
   }
-  await f.engine.tick();
-  assert.equal((await f.view()).status, "paused");
-  assert.equal(f.sent.length, 6);
-  f.account("account-b");
-  f.advance(60_000);
-  await f.engine.tick();
-  f.advance(120_000);
-  await f.engine.tick();
-  assert.equal((await f.view()).status, "active");
-  assert.equal((await stored(f)).quotaPause.attempts, 1);
-  await f.fail("again-b");
-  f.account("account-c");
-  f.advance(60_000);
-  await f.engine.tick();
-  f.advance(120_000);
-  await f.engine.tick();
-  assert.equal((await stored(f)).quotaPause.attempts, 1);
-  assert.equal((await f.view()).status, "active");
 });
 for (const action of ["pause", "resume"]) {
   test(`manual ${action} clears quota recovery`, async (t) => {
@@ -4350,12 +4305,12 @@ test("successful response clears quota retry history", async (t) => {
   f.account("b");
   f.advance(60_000);
   await f.engine.tick();
-  f.advance(120_000);
+  f.advance((await stored(f)).quotaPause.nextCheckAt - f.now());
   await f.engine.tick();
   await f.finish(f.executor, "ok", "result");
   assert.equal((await stored(f)).quotaPause, null);
 });
-for (const excluded of ["disabled", "expired", "old-state", "general", "completed"]) {
+for (const excluded of ["disabled", "old-state", "general", "completed"]) {
   test(`quota recovery excludes ${excluded}`, async (t) => {
     const f = await quotaFixture(t);
     await f.fail();
@@ -4364,7 +4319,6 @@ for (const excluded of ["disabled", "expired", "old-state", "general", "complete
     f.advance(60_000);
     if (excluded === "disabled")
       await f.engine.configure({ ...(await f.engine.settings()), autoResumeQuota: false });
-    if (excluded === "expired") f.advance(14 * 24 * 60 * 60_000);
     if (["old-state", "general", "completed"].includes(excluded)) {
       await f.engine.close();
       const db = JSON.parse(await readFile(f.file, "utf8"));
@@ -4397,20 +4351,14 @@ test("quota usage lookup failure is unknown and cannot restart a flow", async (t
   assert.equal((await f.view()).status, "paused");
   assert.equal(f.sent.length, 1);
 });
-test("refused quota recovery clears its record and preserves the stopped detail", async (t) => {
+test("archived quota conversation terminates recovery without sending", async t => {
   const f = await quotaFixture(t);
-  await f.fail();
-  const before = await stored(f);
-  f.agents.get(f.executor).archived = true;
-  f.account("b");
-  f.advance(60_000);
+  await f.fail(); f.agents.get(f.executor).archived = true;
+  f.advance((await stored(f)).quotaPause.nextCheckAt - f.now());
   await f.engine.tick();
-  f.advance(120_000);
-  await f.engine.tick();
-  const after = await stored(f);
-  assert.equal(after.status, "paused");
-  assert.equal(after.detail, before.detail);
-  assert.equal(after.quotaPause, null);
+  assert.equal((await stored(f)).status, "paused");
+  assert.equal((await stored(f)).quotaPause, null);
+  assert.match((await stored(f)).detail, /보관/);
   assert.equal(f.sent.length, 1);
 });
 
@@ -4425,126 +4373,68 @@ test("a direct Claude quota failure records only its observed extra-usage messag
 });
 test("quota recovery survives reload without resetting attempts or retry timing", async (t) => {
   const f = await quotaFixture(t);
-  await f.fail();
+  await f.fail("first", "You've hit your usage limit");
   f.available(true);
-  f.advance(60_000);
+  f.advance(5 * 60_000);
   await f.engine.tick();
-  await f.fail("again");
+  await f.fail("again", "You've hit your usage limit");
   const before = (await stored(f)).quotaPause;
   await f.engine.close();
   const restored = new WorkflowEngine(f.file, f.port, undefined, null, f.now);
   t.after(() => restored.close());
   await restored.tick();
-  assert.deepEqual((await stored(f)).quotaPause, { ...before, lastCheckedAt: f.now() });
+  assert.deepEqual((await stored(f)).quotaPause, before);
   assert.equal(f.sent.length, 2);
-  f.advance(5 * 60_000);
+  f.advance(15 * 60_000);
   await restored.tick();
   assert.equal(f.sent.length, 3);
   assert.equal((await stored(f)).quotaPause.attempts, 2);
 });
-test("a quota retry rejected by an agent error clears automatic recovery", async (t) => {
+test("a correlated quota failure retries an idle error conversation", async t => {
   const f = await quotaFixture(t);
-  await f.fail();
-  const before = await stored(f);
-  f.agents.get(f.executor).status = "error";
-  f.account("b");
-  f.advance(60_000);
+  await f.fail(); f.agents.get(f.executor).status = "error";
+  f.advance((await stored(f)).quotaPause.nextCheckAt - f.now());
   await f.engine.tick();
-  f.advance(120_000);
-  await f.engine.tick();
-  const after = await stored(f);
-  assert.equal(after.status, "paused");
-  assert.equal(after.quotaPause, null);
-  assert.equal(after.detail, before.detail);
-  assert.equal(f.sent.length, 1);
-});
-
-test("account-switch quota retry survives an old-login failure without new recovery evidence", async (t) => {
-  const f = await quotaFixture(t);
-  await f.fail();
-  f.account("account-b");
-  f.advance(60_000);
-  await f.engine.tick();
-  // Let both the old immediate implementation and the required grace period reach a retry.
-  f.advance(120_000);
-  await f.engine.tick();
-  assert.equal((await f.view()).status, "active");
-  await f.fail("old-login-limit");
-  assert.equal((await stored(f)).quotaPause.account, "account-b");
-  f.advance(5 * 60_000);
-  await f.engine.tick();
-  assert.equal(
-    (await f.view()).status,
-    "active",
-    "same account, unknown usage and future reset must not strand a switched-account retry",
-  );
-  assert.equal(f.sent.length, 3);
-});
-
-test("account switch waits 120 seconds even with available usage and resets on another switch", async (t) => {
-  const f = await quotaFixture(t);
-  await f.fail();
-  f.account("b");
-  f.available(true);
-  await f.engine.tick();
-  f.advance(60_000);
-  await f.engine.tick();
-  assert.equal(f.sent.length, 1);
-  f.account("c");
-  f.advance(60_000);
-  await f.engine.tick();
-  assert.equal((await stored(f)).quotaPause.nextCheckAt, f.now() + 120_000);
-  f.advance(60_000);
-  await f.engine.tick();
-  assert.equal(f.sent.length, 1);
-  f.advance(59_999);
-  await f.engine.tick();
-  assert.equal(f.sent.length, 1);
-  f.advance(1);
-  await f.engine.tick();
+  assert.equal((await stored(f)).status, "active");
+  assert.equal((await stored(f)).quotaPause.attempts, 1);
   assert.equal(f.sent.length, 2);
 });
 
-test("account-driven retries persist across restart and stop after five attempts", async (t) => {
-  const f = await quotaFixture(t);
-  await f.fail();
-  f.account("b");
-  await f.engine.tick();
-  await f.engine.close();
-  f.engine = new WorkflowEngine(f.file, f.port, undefined, null, f.now);
-  t.after(() => f.engine.close());
-  f.advance(60_000);
-  await f.engine.tick();
-  assert.equal(f.sent.length, 1);
-  f.advance(60_000);
-  await f.engine.tick();
-  for (let attempt = 1; attempt <= 5; attempt++) {
-    assert.equal((await stored(f)).quotaPause.attempts, attempt);
-    f.agents.get(f.executor).status = "idle";
-    await f.engine.ended(f.executor, `switched-${attempt}`, "", quotaError);
-    if (attempt === 1) {
-      await f.engine.close();
-      f.engine = new WorkflowEngine(f.file, f.port, undefined, null, f.now);
-      t.after(() => f.engine.close());
-    }
-    const delay = [5, 15, 30, 60, 60][attempt - 1] * 60_000;
-    f.advance(delay - 60_000);
-    await f.engine.tick();
-    assert.equal((await stored(f)).status, "paused");
-    f.advance(60_000);
-    await f.engine.tick();
+test("account changes do not bypass a future provider retry time", async t => {
+  const f = await quotaFixture(t); await f.fail();
+  const record = (await stored(f)).quotaPause;
+  f.account("b"); f.available(true); f.advance(180_000);
+  await f.engine.tick(); assert.equal(f.sent.length, 1);
+  assert.equal((await stored(f)).quotaPause.nextCheckAt, record.nextCheckAt);
+  f.advance(record.nextCheckAt - f.now()); await f.engine.tick();
+  assert.equal(f.sent.length, 2);
+});
+
+test("account churn does not reset or accelerate the quota schedule", async t => {
+  const f = await quotaFixture(t); await f.fail("quota", "You've hit your usage limit");
+  const next = (await stored(f)).quotaPause.nextCheckAt;
+  for (let i=0; i<4; i++) {
+    f.account(`account-${i}`); f.available(true); f.advance(60_000);
+    await f.engine.tick(); assert.equal(f.sent.length, 1);
+    assert.equal((await stored(f)).quotaPause.nextCheckAt, next);
   }
-  assert.equal((await stored(f)).status, "paused");
-  assert.equal(f.sent.length, 6);
-  f.account("c");
-  f.advance(60_000);
-  await f.engine.tick();
-  assert.equal((await stored(f)).quotaPause.attempts, 0);
-  assert.equal(f.sent.length, 6);
-  f.advance(120_000);
-  await f.engine.tick();
-  assert.equal(f.sent.length, 7);
-  assert.equal((await stored(f)).quotaPause.attempts, 1);
+  f.advance(60_000); await f.engine.tick(); assert.equal(f.sent.length, 2);
+});
+
+test("scheduled quota retries persist across restart beyond five attempts", async t => {
+  const f = await quotaFixture(t);
+  for (let attempt=0; attempt<7; attempt++) {
+    f.agents.get(f.executor).status = "idle";
+    await f.engine.ended(f.executor, `failure-${attempt}`, "", "You've hit your usage limit");
+    const before = (await stored(f)).quotaPause;
+    await f.engine.close();
+    f.engine = new WorkflowEngine(f.file, f.port, undefined, null, f.now);
+    t.after(() => f.engine.close());
+    await f.engine.tick(); assert.deepEqual((await stored(f)).quotaPause, before);
+    f.advance(before.nextCheckAt - f.now()); await f.engine.tick();
+    assert.equal((await stored(f)).quotaPause.attempts, attempt+1);
+    assert.equal(f.sent.length, attempt+2);
+  }
 });
 
 test("previous quota record format defaults to no account-driven retries", async (t) => {
@@ -6769,29 +6659,18 @@ test("a state file that fails to load is read again once it is repaired", async 
   assert.equal((await restarted.list()).workflows.length, 1);
 });
 
-test("a single failed daemon read in a tick is retried; a persistent one stops the flow", async (t) => {
-  const f = await fixture(t);
-  await f.finish("planner", "p1", "plan");
-  assert.equal((await f.view()).status, "active");
+test("daemon read failures are counted only at scheduled probes and success resets them", async t => {
+  const f = await quotaFixture(t);
   const inspect = f.port.inspect;
-  f.port.inspect = async () => {
-    throw new Error("daemon timeout");
-  };
-  await f.engine.tick();
-  await f.engine.tick();
-  assert.equal((await f.view()).status, "active", "two transient failures are retried");
-  f.port.inspect = inspect;
-  await f.engine.tick();
-  f.port.inspect = async () => {
-    throw new Error("daemon timeout");
-  };
-  await f.engine.tick();
-  await f.engine.tick();
-  assert.equal((await f.view()).status, "active", "a success resets the count");
-  await f.engine.tick();
-  assert.equal((await f.view()).status, "error");
-  assert.match((await f.view()).detail, /daemon timeout/);
-  f.port.inspect = inspect;
+  f.port.inspect = async () => { throw Error("daemon timeout"); };
+  await f.engine.tick(); await f.engine.tick();
+  assert.equal((await stored(f)).recoveryCheck.attempts, 1);
+  f.port.inspect = inspect; f.advance(60_000); await f.engine.tick();
+  assert.equal((await stored(f)).recoveryCheck, null);
+  f.port.inspect = async () => { throw Error("daemon timeout"); };
+  for (const delay of [0,60_000,180_000]) { f.advance(delay); await f.engine.tick(); }
+  assert.equal((await stored(f)).status, "error");
+  assert.match((await stored(f)).detail, /daemon timeout/);
 });
 
 test("a general switch stuck on an unreadable executor can be finished by asking again", async (t) => {
@@ -7010,7 +6889,7 @@ test("compression policy uses the actual snapshot provider rather than a model-n
 test("missing planner snapshot clears stale displayed usage and cannot compact",async t=>{
  const f=await fixture(t);await f.engine.configure({...await f.engine.settings(),threshold:0.7,claudeCompression:{threshold:0.55,oneMillionTokenLimit:500000}});
  await f.finish("planner","observation","plan");const inspect=f.port.inspect;f.port.inspect=async id=>id==="planner"?null:inspect(id);
- await f.engine.tick();assert.equal((await f.view()).status,"paused");assert.equal((await f.view()).planUsage,null);assert.equal(f.compacted.length,0);assert.match((await f.view()).planCompressionReason,/없거나 잘못/);
+ await f.engine.tick();assert.equal((await f.view()).status,"active");assert.equal((await f.view()).planUsage,null);assert.equal(f.compacted.length,0);assert.match((await f.view()).planCompressionReason,/없거나 잘못/);
 });
 
 for(const used of [700000,900000,1000000])test(`paired Codex native skips plugin compaction at ${used}/1M`,async t=>{
@@ -7022,4 +6901,255 @@ test("paired native compaction completion still records the turn context",async 
  const f=await fixture(t,undefined,undefined,undefined,"codex");await f.engine.configure({...await f.engine.settings(),codexCompression:"native"});
  await f.engine.ended("planner","native-with-plan",decision("plan"),null,"goal",true);
  assert.equal(JSON.parse(await readFile(f.file,"utf8")).workflows[0].plan.compactedForTurn,"native-with-plan");assert.equal(f.compacted.length,0);
+});
+
+// AC-01/06: tick consumes a correlated failed response without an assistant body.
+for (const failure of ["You've hit your usage limit", "HTTP 503"]) {
+  test(`AUTOREC tick preserves empty failed turn: ${failure}`, async t => {
+    const f = await quotaFixture(t);
+    const before = await stored(f);
+    f.agents.get(f.executor).status = "error";
+    f.histories.set(f.executor, {
+      text: "", key: "tick-failure", failed: failure,
+      messageIds: [before.pending.id], turnId: "failed-turn",
+      messageTurns: { [before.pending.id]: "failed-turn" },
+    });
+    await f.engine.tick();
+    const after = await stored(f);
+    assert.equal(after.status, "paused");
+    assert.ok(after.quotaPause || after.transientPause);
+    assert.ok(after.processed.includes("tick-failure"));
+  });
+}
+for (const variant of ["unknown", "old-turn", "authentication"]) {
+  test(`AUTOREC error snapshot does not authorize retry: ${variant}`, async t => {
+    const f = await quotaFixture(t);
+    const before = await stored(f);
+    f.agents.get(f.executor).status = "error";
+    f.histories.set(f.executor, {
+      text: "", key: "untrusted-failure",
+      failed: variant === "unknown" ? null : variant === "authentication" ? "HTTP 401 timeout" : "You've hit your usage limit",
+      messageIds: [before.pending.id], turnId: "latest",
+      messageTurns: { [before.pending.id]: variant === "old-turn" ? "old" : "latest" },
+    });
+    await f.engine.tick();
+    const after = await stored(f);
+    assert.equal(after.quotaPause, null);
+    assert.equal(after.transientPause, null);
+    assert.equal(f.sent.length, 1);
+  });
+}
+test("AUTOREC structured code reaches quota recovery without message text", async t => {
+  const f = await quotaFixture(t);
+  const before = await stored(f);
+  f.agents.get(f.executor).status = "idle";
+  await f.engine.ended(f.executor, "structured-failure", "", "", "", false, "", false,
+    [before.pending.id], undefined, "insufficient_quota");
+  assert.ok((await stored(f)).quotaPause);
+});
+
+// AC-01/05: an unreadable immediate failure survives reload and waits for exact correlation.
+test("AUTOREC deferred immediate failure survives reload without borrowing a previous turn", async t => {
+  const f = await quotaFixture(t);
+  const before = await stored(f);
+  await f.engine.deferredFailure(f.executor, "immediate", "", "insufficient_quota");
+  assert.equal((await stored(f)).inbox.failureTurnId, "immediate");
+  await f.engine.close();
+  f.engine = new WorkflowEngine(f.file, f.port, undefined, null, f.now);
+  t.after(() => f.engine.close());
+  f.agents.get(f.executor).status = "error";
+  f.histories.set(f.executor, { text: "older success", key: "old", failed: null,
+    messageIds: [before.pending.id], turnId: "old", messageTurns: { [before.pending.id]: "old" } });
+  await f.engine.tick();
+  assert.equal((await stored(f)).quotaPause, null);
+  assert.equal(f.sent.length, 1);
+  f.advance(60_000);
+  f.histories.set(f.executor, { text: "", key: "immediate-response", failed: null,
+    messageIds: [before.pending.id], turnId: "immediate", messageTurns: { [before.pending.id]: "immediate" } });
+  await f.engine.tick();
+  assert.ok((await stored(f)).quotaPause);
+  assert.equal((await stored(f)).inbox, null);
+  assert.equal(f.sent.length, 1);
+});
+
+for (const [kind, failure, delays] of [
+  ["quota", "You've hit your usage limit", [5, 15, 30, 60, 60, 60, 60, 60]],
+  ["transient", "HTTP 503", [1, 3, 10, 30, 60, 60, 60, 60]],
+]) {
+  test(`AUTOREC ${kind} retries beyond eight failures and fourteen days with one charged instruction`, async t => {
+    const f = await quotaFixture(t);
+    await f.engine.configure({ ...(await f.engine.settings()), maxTurns: 2 });
+    await f.finish(f.executor, "first-instruction-done", "continue");
+    const original = (await stored(f)).pending;
+    for (let index = 0; index < 8; index++) {
+      await f.fail(`failure-${index}`, failure);
+      f.agents.get(f.executor).status = "error";
+      const record = (await stored(f))[`${kind}Pause`];
+      assert.ok(record);
+      assert.equal(record.prompt, original.prompt);
+      assert.equal(record.instruction, original.instruction);
+      assert.equal(record.budgetCharged, true);
+      assert.equal(record.sourcePendingId, original.id);
+      assert.equal(record.nextCheckAt - f.now(), delays[index] * 60_000);
+      await f.engine.tick();
+      assert.equal(f.sent.length, index + 2);
+      f.advance(index === 7 ? 15 * 24 * 60 * 60_000 : delays[index] * 60_000);
+      await f.engine.tick();
+      assert.equal(f.sent.length, index + 3);
+      assert.equal((await stored(f)).turns, 2);
+    }
+    await f.finish(f.executor, "recovered-success", "result");
+    const done = await stored(f);
+    assert.equal(done[`${kind}Pause`], null);
+    assert.equal(done.turns, 2);
+    assert.equal(done.status, "paused", "a new instruction still obeys the exhausted budget");
+    assert.equal(f.sent.length, 10);
+  });
+  for (const outage of ["null", "throw", "running"]) {
+    test(`AUTOREC ${kind} keeps recovery during ${outage} preflight`, async t => {
+      const f = await quotaFixture(t);
+      await f.fail("failed", failure);
+      const inspect = f.port.inspect;
+      if (outage === "running") f.agents.get(f.executor).status = "running";
+      else f.port.inspect = async () => { if (outage === "throw") throw Error("offline"); return null; };
+      const before = (await stored(f))[`${kind}Pause`];
+      f.advance(before.nextCheckAt - f.now());
+      await f.engine.tick();
+      const waiting = (await stored(f))[`${kind}Pause`];
+      assert.ok(waiting);
+      assert.equal(f.sent.length, 1);
+      assert.ok(waiting.nextCheckAt > f.now());
+      f.port.inspect = inspect;
+      f.agents.get(f.executor).status = "idle";
+      f.advance(waiting.nextCheckAt - f.now());
+      await f.engine.tick();
+      assert.equal(f.sent.length, 2);
+    });
+  }
+}
+test("AUTOREC null observation is retried on schedule and is not archival", async t => {
+  const f = await quotaFixture(t);
+  const inspect = f.port.inspect;
+  let checks = 0;
+  f.port.inspect = async () => { checks++; return null; };
+  await f.engine.tick();
+  assert.equal((await stored(f)).status, "active");
+  const count = checks;
+  await f.engine.tick();
+  assert.equal(checks, count);
+  f.port.inspect = inspect;
+  f.advance(60_000);
+  await f.engine.tick();
+  assert.equal((await stored(f)).recoveryCheck, null);
+  assert.equal(f.sent.length, 1);
+});
+
+for (const failure of ["You've hit your usage limit", "HTTP 503"]) {
+  for (const isInstruction of [true, false]) {
+    test(`AUTOREC preserves instruction=${isInstruction} and budget across recovery reload: ${failure}`, async t => {
+      const f = await quotaFixture(t);
+      if (!isInstruction) await f.finish(f.executor, "continued", "continue");
+      const original = (await stored(f)).pending;
+      const budget = (await stored(f)).turns;
+      await f.fail("failed", failure);
+      const stopped = await stored(f);
+      const key = stopped.quotaPause ? "quotaPause" : "transientPause";
+      await f.engine.close();
+      const restored = new WorkflowEngine(f.file, f.port, undefined, null, f.now);
+      t.after(() => restored.close());
+      f.agents.get(f.executor).status = "error";
+      f.advance(stopped[key].nextCheckAt - f.now());
+      await restored.tick();
+      const after = await stored(f);
+      assert.equal(after.pending.prompt, original.prompt);
+      assert.equal(after.pending.instruction, isInstruction);
+      assert.equal(after.pending.sourcePendingId, original.id);
+      assert.equal(after.turns, budget);
+      const sent = f.sent.length;
+      await restored.tick();
+      assert.equal(f.sent.length, sent);
+    });
+  }
+}
+test("AUTOREC failed history checks back off without spending model retries", async t => {
+  const f = await quotaFixture(t);
+  await f.fail("failure", "HTTP 503");
+  f.port.inspect = async () => { throw Error("offline"); };
+  for (const [index, delay] of [3, 10, 30, 60, 60, 60].entries()) {
+    const record = (await stored(f)).transientPause;
+    f.advance(record.nextCheckAt - f.now());
+    await f.engine.tick();
+    const after = (await stored(f)).transientPause;
+    assert.equal(after.attempts, 0);
+    assert.equal(after.checksFailed, index + 1);
+    assert.equal(after.nextCheckAt - f.now(), delay * 60_000);
+    assert.equal(f.sent.length, 1);
+  }
+});
+
+test("AUTOREC repeated failed retries notify once until recovery", async t => {
+  const events = [];
+  const f = await quotaFixture(t, async event => events.push(event));
+  for (let i = 0; i < 4; i++) {
+    await f.fail(`failure-${i}`, "HTTP 503");
+    const record = (await stored(f)).transientPause;
+    f.advance(record.nextCheckAt - f.now());
+    await f.engine.tick();
+  }
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(events.filter(event => event.kind === "stopped").length, 1);
+  assert.equal(f.sent.length, 5);
+});
+
+
+test("AUTOREC quota uncertain send confirms the same message without resending", async t => {
+  const f = await quotaFixture(t);
+  await f.fail();
+  let calls = 0;
+  f.port.send = async () => { calls++; throw new Error("network error after sending"); };
+  f.advance((await stored(f)).quotaPause.nextCheckAt - f.now());
+  await f.engine.tick();
+  const waiting = await stored(f);
+  assert.equal(waiting.pending.stage, "sending");
+  assert.ok(waiting.quotaPause);
+  let checks = 0;
+  const history = f.port.history;
+  f.port.history = async (...args) => { checks++; return history(...args); };
+  f.advance(waiting.quotaPause.nextCheckAt - f.now());
+  await f.engine.tick();
+  assert.ok(checks > 0, "saved sending must query the existing delivery receipt");
+  assert.equal(calls, 1, "uncertain delivery must never be resent");
+  assert.equal((await stored(f)).pending.id, waiting.pending.id);
+  assert.ok((await stored(f)).quotaPause);
+});
+
+for (const kind of ['quota', 'transient']) test(`AUTOREC ${kind} tick recovery completes executor and planner error-state round trips once`, async t => {
+  const f = await quotaFixture(t);
+  for (const role of ['execute','plan']) {
+    const agentId = role === 'execute' ? f.executor : 'planner';
+    const before = await stored(f), pending = before.pending;
+    assert.equal(pending.role, role);
+    const failure = kind === 'transient' ? 'HTTP 503' : role === 'execute' ? "You've hit your usage limit" : 'Credit balance is too low';
+    f.agents.get(agentId).status = 'error';
+    f.histories.set(agentId, {key:`${role}-failure`,text:'',failed:failure,messageIds:[pending.id],turnId:`${role}-turn`,messageTurns:{[pending.id]:`${role}-turn`}});
+    await f.engine.tick();
+    const failed = await stored(f), record = failed.quotaPause ?? failed.transientPause;
+    assert.equal(record.role, role);
+    assert.equal(record.prompt, pending.prompt);
+    const sends = f.sent.length;
+    f.advance(record.nextCheckAt - f.now());
+    await f.engine.tick();
+    assert.equal(f.sent.length, sends + 1);
+    assert.equal((await stored(f)).turns, before.turns);
+    await f.engine.tick();
+    assert.equal(f.sent.length, sends + 1);
+    await f.finish(agentId,`${role}-recovered`,role === 'execute' ? 'result' : 'input');
+  }
+  const done = await stored(f);
+  assert.equal(done.status,'needs_input');
+  assert.equal(done.quotaPause,null);
+  assert.equal(done.transientPause,null);
+  const count = f.sent.length;
+  await f.engine.tick();
+  assert.equal(f.sent.length,count);
 });

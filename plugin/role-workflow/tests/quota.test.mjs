@@ -30,6 +30,9 @@ test("transient failures classify capacity, server, transport and app-server err
   for (const failure of [
     "Selected model is at capacity. Please try a different model.",
     "OVERLOADED",
+    "HTTP 429 rate limit",
+    "rate limit: overloaded",
+    "Too many requests: 503",
     "API error 529",
     "HTTP 500",
     "502 Bad Gateway",
@@ -57,9 +60,6 @@ test("transient failures classify capacity, server, transport and app-server err
     "HTTP 401",
     "HTTP 403",
     "HTTP 404",
-    "HTTP 429 rate limit",
-    "rate limit: overloaded",
-    "Too many requests: 503",
     "You've hit your usage limit: timeout",
     "You’re out of extra usage: network error",
     "자동 응답 횟수 한도에 도달했습니다.",
@@ -190,4 +190,19 @@ test("Codex quota lookup stays unknown without calling the usage API even when a
   }));
   assert.equal(await port.quotaAvailable("codex"), null);
   assert.equal(calls, 0);
+});
+
+// AC-01: structured failure codes and documented credit text, with exclusion precedence.
+test("credit and structured failures preserve quota precedence and permanent exclusions", () => {
+  for (const message of ["Credit balance is too low. Please top up", "Credit balance too low"])
+    assert.deepEqual(usageLimit("claude", message), { retryAt: null });
+  assert.equal(usageLimit("codex", "Credit balance too low"), null);
+  assert.equal(usageLimit("claude", "credit balance limit"), null);
+  assert.deepEqual(usageLimit("codex", "", "insufficient_quota"), { retryAt: null });
+  assert.equal(transientFailure("HTTP 429", "insufficient_quota"), false);
+  assert.equal(transientFailure("", "rate_limit_exceeded"), true);
+  for (const text of ["HTTP 401 timeout", "HTTP 403 overloaded", "permission denied: 503", "context window limit: timeout", "canceled: network error"]) {
+    assert.equal(transientFailure(text, "rate_limit_exceeded"), false, text);
+    assert.equal(usageLimit("claude", text, "insufficient_quota"), null, text);
+  }
 });

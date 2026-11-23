@@ -98,7 +98,9 @@ export function readTurn(
     if (item.type !== "user_message" || !turnId) return;
     for (const id of [item.clientMessageId, item.messageId]) if (id) messageTurns[id] = turnId;
   });
-  const turnId = turnIds?.at(-1);
+  // Some SDK failure messages have no turn metadata. The current request still
+  // identifies its turn; never borrow a turn ID from an earlier user request.
+  const turnId = turnIds?.slice(Math.max(0, lastUser)).findLast(id => !!id);
   const identity =
     user?.type === "user_message" ? (user.clientMessageId ?? user.messageId ?? user.text) : "";
   const first = items.find((item) => item.type === "user_message");
@@ -125,7 +127,9 @@ export function readTurn(
       // Preserve persisted turn identities across the message-boundary fix.
       .update(identity + "\n" + messages.join(""))
       .digest("hex"),
-    failed: null,
+    // Only errors after this request belong to this response. A success body containing
+    // an error phrase is not a failed outcome, nor is a tool's own error.
+    failed: turn.findLast((item) => item.type === "error")?.message ?? null,
     goal: first?.type === "user_message" ? first.text : "",
     request: user?.type === "user_message" ? user.text : "",
   };
@@ -136,11 +140,16 @@ export async function readCompletedTurn(
   items: readonly AgentTimelineItem[],
   cwd: string | undefined,
   history: () => Promise<History>,
+  failedTurnId?: string | null,
 ): Promise<ReturnType<typeof readTurn>> {
   // Paseo 0.13.0 ends turns with an empty timeline. Read the finished turn from history,
   // or every later turn would share the empty turn's key and be dropped as already seen.
   if (!items.length) {
     const saved: History & Partial<ReturnType<typeof readTurn>> = await history();
+    // Failed hooks have no timeline on current SDKs. Never attach an event's error to
+    // an older successful response just because it is the last visible history entry.
+    if (failedTurnId !== undefined && (!failedTurnId || saved.turnId !== failedTurnId))
+      throw new Error("실패 이벤트와 응답 이력의 턴 연결을 확인하지 못했습니다.");
     return {
       ...saved,
       evidence: saved.evidence ?? { report: saved.text, changed: false, pushes: [] },
@@ -520,6 +529,7 @@ export function createPort(
         cwd: agent.cwd,
         title: agent.title || workspace?.name || "작업",
         status: agent.status,
+        activeTurn: !!agent.activeTurn,
         archived: !!agent.archivedAt,
         archivedAt: agent.archivedAt ?? null,
         permission: agent.pendingPermissions.length > 0,

@@ -186,6 +186,7 @@ const assert = (ok, message) => {
 
 const results = [];
 async function step(name, fn) {
+  if (argv.includes("--autorec-only") && !/plugin installs|airport C26|AUTOREC:|the plugin logged/.test(name)) return;
   const started = Date.now();
   try {
     await fn();
@@ -863,6 +864,51 @@ try {
       writeFileSync(join(root,`auto-setup-${enabled}.json`),JSON.stringify({flow,blocker,setupHoldId,configurationRpcs:callsAfterSetup-callsBeforeSetup,workflowRpcsAfterSetup:rpcCount-callsAfterSetup},null,2));
       await rpc("workflow.control",{id:flow.id,action:"pause"});
     } finally {writeFileSync(control,JSON.stringify({mode:"text",text:"2"}));}
+  });
+
+  await step("AUTOREC: credit failure survives reload and resumes the same executor without a resume RPC", async () => {
+    writeFileSync(control, JSON.stringify({mode:"role", scenario:"autorec-credit",
+      plan:[workflowBlock("plan", "자동 복구 시험 지시"), workflowBlock("input", "자동 왕복 확인")],
+      execute:[workflowBlock("result", "복구 뒤 결과")], failRole:"execute"}));
+    const planner = await runAgent("연합개발로 진행해줘. autorec-credit");
+    let flow = await waitFor("recovery first held plan", async () => state().workflows.find(w => w.plan?.id === planner && w.heldApproval));
+    try {
+      const model = (await rpc("workflow.models", {provider:"claude"})).models[0];
+      assert(model, "Claude executor catalog unavailable");
+      const thinking = model.thinkingOptions.find(o=>o.isDefault)?.id ?? model.thinkingOptions[0]?.id ?? "";
+      const selected = await rpc("workflow.select-executor", {id:flow.id, holdId:flow.heldApproval.id,
+        provider:"claude", model:model.id, thinking, review:{enabled:false}, placement:"worktree"});
+      assert(selected.ok, selected.detail);
+      flow = await waitFor("persisted credit failure", async () => state().workflows.find(w => w.id === flow.id && w.quotaPause), 120000);
+      const record = structuredClone(flow.quotaPause), executor = flow.execute.id, turns = flow.turns;
+      const api = createPaseoApi(client);
+      const failedSnapshot = await api.agents.ref(executor).refresh();
+      assert(failedSnapshot.agent.status === "error", `expected real error state, got ${failedSnapshot.agent.status}`);
+      assert(record.prompt === "자동 복구 시험 지시" && record.instruction && record.budgetCharged, "failure lost instruction or budget ownership");
+      assert(record.nextCheckAt - record.stoppedAt >= 300000, "quota retry ran before five minutes");
+      writeFileSync(control, JSON.stringify({mode:"role", scenario:"autorec-recovered",
+        plan:[workflowBlock("input", "자동 왕복 확인")], execute:[workflowBlock("result", "복구 뒤 결과")]}));
+      const reloaded = await cli("plugin", "reload", "role-workflow");
+      assert(reloaded.code === 0, reloaded.stderr);
+      await waitFor("reloaded recovery reservation", async () => (await rpc("workflow.status",{})).workflows.some(w=>w.id===flow.id));
+      const preserved = state().workflows.find(w=>w.id===flow.id);
+      assert(preserved.quotaPause.nextCheckAt === record.nextCheckAt && preserved.execute.id === executor, "reload reset retry time or executor");
+      const rpcBeforeWait = rpcCount;
+      const recovered = await waitFor("automatic executor result and planner response", async () => state().workflows.find(w=>w.id===flow.id && w.status==="needs_input" && w.lastResult && !w.quotaPause), 420000);
+      assert(rpcCount === rpcBeforeWait, "a workflow RPC was used to resume");
+      assert(recovered.execute.id === executor && recovered.turns === turns + 1, "retry changed executor or charged its budget twice");
+      assert(recovered.cycles === flow.cycles, "retry changed cycle budget");
+      writeFileSync(join(root,"autorec-credit.json"), JSON.stringify({record, failedStatus:failedSnapshot.agent.status,
+        before:flow, after:recovered, workflowRpcsDuringWait:rpcCount-rpcBeforeWait}, null, 2));
+    } catch (error) {
+      const failed = state().workflows.find(w => w.id === flow.id);
+      const timeline = failed?.execute && await createPaseoApi(client).agents.ref(failed.execute.id).timeline.refetch({direction:"tail", limit:200}).catch(() => null);
+      writeFileSync(join(root,"autorec-failure.json"), JSON.stringify({error:String(error), workflow:failed, timeline}, null, 2));
+      throw error;
+    } finally {
+      await rpc("workflow.control", {id:flow.id, action:"pause"});
+      writeFileSync(control, JSON.stringify({mode:"text", text:"2"}));
+    }
   });
 
   await step("the plugin logged no errors", async () => {

@@ -1362,3 +1362,41 @@ test("AC-106/N-1: placement timeline ids keep the initial id and separate later 
   assert.deepEqual(cards.map(c => c.id), ["role-workflow-placement-picker:task", "role-workflow-placement-picker:task:2", "role-workflow-placement-picker:task:3"]);
   for (const card of cards) assert.deepEqual(card.data, { workflowId: "task", number: 7, title: "blocker" });
 });
+
+// AC-01/06: preserve the current failed response even when no assistant body was emitted.
+test("readTurn preserves only the current request's timeline failure", () => {
+  const request = { type: "user_message", text: "work", clientMessageId: "new" };
+  const error = { type: "error", message: "Credit balance is too low" };
+  const failed = readTurn([request, error], "/repo", ["turn-new", "turn-new"]);
+  assert.equal(failed.failed, error.message);
+  assert.equal(failed.text, "");
+  assert.equal(failed.messageTurns.new, failed.turnId);
+  assert.equal(readTurn([error, request]).failed, null);
+  assert.equal(readTurn([request, { type: "assistant_message", text: error.message }]).failed, null);
+});
+
+// AC-01: a failed lifecycle event must not relabel an older successful turn.
+test("failed empty lifecycle hooks require the exact provider turn", async () => {
+  const saved = readTurn([{ type: "user_message", text: "work", clientMessageId: "m" }], "/repo", ["t"]);
+  assert.equal((await readCompletedTurn([], "/repo", async () => saved, "t")).turnId, "t");
+  for (const id of ["other", null])
+    await assert.rejects(readCompletedTurn([], "/repo", async () => saved, id), /턴 연결/);
+});
+
+
+test("AUTOREC failed hook matches a request when the SDK error suffix omits turn metadata", async () => {
+  const items = [
+    {type:"user_message", text:"original instruction", clientMessageId:"pending-1"},
+    {type:"assistant_message", text:"[System Error] Credit balance is too low"},
+  ];
+  const history = readTurn(items, undefined, ["failed-turn", undefined]);
+  assert.equal(history.turnId, "failed-turn");
+  assert.equal(history.messageTurns["pending-1"], "failed-turn");
+  assert.equal(history.failed, null, "assistant text alone is not a failure channel");
+  const completed = await readCompletedTurn([], undefined, async () => history, "failed-turn");
+  assert.equal(completed.turnId, "failed-turn");
+  const later = readTurn([...items, {type:"user_message", text:"new request", clientMessageId:"pending-2"}],
+    undefined, ["failed-turn", undefined, undefined]);
+  assert.equal(later.turnId, undefined, "older request metadata cannot identify a new request");
+  await assert.rejects(readCompletedTurn([], undefined, async () => later, "failed-turn"), /턴 연결/);
+});

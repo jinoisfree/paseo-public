@@ -219,11 +219,16 @@ export default function contribute(server: PluginServerContext) {
       attach(context.paseo);
       const turn = await readCompletedTurn(eventItems(event), event.agent.cwd, () =>
         port.history(event.agent.id),
+        event.outcome.kind === "failed" ? event.turnId : undefined,
       ).catch((error: unknown) => {
         report(error);
         return null;
       });
-      if (!turn) return;
+      if (!turn) {
+        if (event.outcome.kind === "failed")
+          await engine.deferredFailure(event.agent.id, event.turnId ?? null, event.outcome.error.message, event.outcome.error.code).catch(report);
+        return;
+      }
       if (turn.maintenance) {
         await engine.maintenanceEnded(event.agent.id, turn.key, !!turn.compacted, turn.maintenanceId).catch(report);
         return;
@@ -245,6 +250,7 @@ export default function contribute(server: PluginServerContext) {
           event.outcome.kind === "canceled",
           turn.messageIds,
           turn.evidence,
+          event.outcome.kind === "failed" ? event.outcome.error.code : undefined,
         )
         .catch(report);
       void engine.auditPushes().catch(report);

@@ -219,13 +219,17 @@ test('AC-15: reviewer native compaction and quota/transient recovery reuse the c
   };
   await fail("You've hit your usage limit",'quota');w=await f.live();
   assert.equal(w.quotaPause.role,'reviewer');assert.equal(w.status,'paused');
-  const count=f.sent.length;f.port.quotaAvailable=async()=>true;f.agents.get(id).status='idle';now+=120000;
+  const count=f.sent.length;f.port.quotaAvailable=async()=>true;now=w.quotaPause.nextCheckAt;
   await f.engine.tick();w=await f.live();assert.equal(w.pending.role,'reviewer');assert.equal(f.sent.length,count+1);
   await fail('503 overloaded','transient');w=await f.live();assert.equal(w.transientPause.role,'reviewer');
-  f.agents.get(id).status='idle';now+=120000;await f.engine.tick();assert.equal(f.sent.length,count+2);
+  now=w.transientPause.nextCheckAt;await f.engine.tick();assert.equal(f.sent.length,count+2);
   w=await f.live();assert.equal(w.planReview.round,1);assert.equal(w.cycles,0);
   await f.engine.maintenanceEnded(id,'compact',true);w=await f.live();assert.equal(w.reviewer.compactedForTurn,w.reviewer.lastTurnKey);
   await f.engine.tick();assert.equal(f.sent.length,count+2);
+  await reply(f,'reviewer','result',{planReview:verdict(w.heldApproval.decisionHash)});
+  w=await f.live();assert.equal(w.pending.role,'plan');assert.equal(w.execute,null);
+  await reply(f,'plan','note');w=await f.live();assert.equal(w.planReview.stage,'passed');
+  assert.equal(w.execute,null,'recovery cannot approve implementation');
 });
 test('AC-15: reviewer context compression uses common prepareCompaction and continues once',async t=>{
   const f=await setup(t);await enable(f);const w=await f.live();const id=w.reviewer.id;

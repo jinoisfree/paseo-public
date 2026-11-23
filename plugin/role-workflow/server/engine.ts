@@ -67,8 +67,8 @@ import { resolvedFolder, pathsOverlap } from "./workspaces";
 import { WorktreeCleanup } from "./worktree-cleanup";
 import { placeExecutor, workFolder, worktreeContext } from "./worktree";
 import { quotaPauseSchema } from "./quota";
-import { transientPauseSchema } from "./transient";
-import { Recovery } from "./recovery";
+import { transientPauseSchema, transientDelay } from "./transient";
+import { Recovery, pendingCharged, recoveryCharged } from "./recovery";
 import { Compaction } from "./compaction";
 import { ExecutorChoice } from "./executor-choice";
 import { ManagedPushes } from "./managed-pushes";
@@ -100,6 +100,9 @@ const inboxSchema = z.object({
   agentId: z.string(),
   text: z.string(),
   failed: z.string().nullable(),
+  failureCode: z.string().optional(),
+  // A failed lifecycle event whose history was not yet readable. Null means no turn identity.
+  failureTurnId: z.string().nullable().optional(),
   compacted: z.boolean().default(false),
   canceled: z.boolean().default(false),
   reviewerViolation: z.string().default(""),
@@ -125,6 +128,8 @@ const pendingSchema = z.object({
   instruction: z.boolean().default(false),
   // A resend after the turn failed; its addressee already has the message.
   retry: z.boolean().optional(),
+  budgetCharged: z.boolean().optional(),
+  sourcePendingId: z.string().nullable().optional(),
 });
 const baselineSchema = z.object({
   head: z.string(),
@@ -275,6 +280,12 @@ const workflowSchema = z.object({
   repairs: z.number().int().nonnegative().default(0),
   quotaPause: quotaPauseSchema.nullable().default(null),
   transientPause: transientPauseSchema.nullable().default(null),
+  recoveryCheck: z.object({
+    attempts: z.number().int().nonnegative(),
+    lastCheckedAt: z.number(),
+    nextCheckAt: z.number(),
+    reason: z.string(),
+  }).nullable().optional(),
   baseline: baselineSchema.nullable().default(null),
   repositoryBaselines: z
     .array(z.object({ cwd: z.string(), snapshot: baselineSchema.nullable() }))
@@ -362,6 +373,7 @@ export interface Snapshot {
   cwd: string;
   title: string;
   status: string;
+  activeTurn?: boolean;
   archived: boolean;
   archivedAt?: string | null;
   permission: boolean;
@@ -391,6 +403,7 @@ export interface History {
   /** Provider turn of the newest timeline entry. */
   turnId?: string;
   failed: string | null;
+  failureCode?: string;
 }
 export interface WorkflowPort {
   reviewerModes?(provider: "codex" | "claude", cwd: string): Promise<{ enabled: boolean; modes: string[] }>;
@@ -788,7 +801,8 @@ export class WorkflowEngine {
       if (
         previous === "active" &&
         ["paused", "needs_input", "error"].includes(w.status) &&
-        db.settings.notifyStopped
+        db.settings.notifyStopped &&
+        !(w.quotaPause?.attempts || w.transientPause?.attempts)
       )
         kind = "stopped";
       else if (w.status === "completed" && w.cycles >= 1 && db.settings.notifyCompleted)
@@ -1030,6 +1044,7 @@ export class WorkflowEngine {
           if (w.transientPause && ["paused", "error"].includes(w.status))
             this.recovery.stopTransient(w, w.transientPause.failure);
       }
+      if (!db.settings.autoResumeQuota) for (const w of db.workflows) w.quotaPause = null;
       await this.save();
       return saved;
     });
@@ -1642,6 +1657,20 @@ export class WorkflowEngine {
       return w.id;
     });
   }
+  /** Keep an immediate failure in the existing inbox until its delivery can be proved. */
+  deferredFailure(agentId: string, turnId: string | null, failure: string, failureCode?: string) {
+    return this.serial(async () => {
+      const w = (await this.db()).workflows.find(candidate => memberRole(candidate, agentId) !== null);
+      if (!w || w.status !== "active" || w.inbox || !w.pending || w.pending.stage === "queued" ||
+          w[w.pending.role]?.id !== agentId) return;
+      const key = `failed-event:${turnId ?? w.pending.id}`;
+      if (w.processed.includes(key)) return;
+      w.inbox = { agentId, key, text: "", failed: failure, failureCode, failureTurnId: turnId,
+        compacted: false, canceled: false, reviewerViolation: "", resumed: false, answers: false };
+      this.touch(w, "실패 이벤트의 전달 내역을 확인하고 있습니다. 확인 전에는 자동 실행하지 않습니다.");
+      await this.save();
+    });
+  }
   ended(
     agentId: string,
     key: string,
@@ -1653,6 +1682,7 @@ export class WorkflowEngine {
     canceled = false,
     messageIds?: readonly string[],
     evidence?: TurnEvidence,
+    failureCode?: string,
   ) {
     return this.serial(async () => {
       const w = (await this.db()).workflows.find(
@@ -1678,6 +1708,7 @@ export class WorkflowEngine {
         key,
         text,
         failed,
+        ...(failureCode ? { failureCode } : {}),
         compacted,
         canceled,
         reviewerViolation: evidence?.changed || evidence?.pushes.length ? "검증 턴에서 파일 변경 또는 푸시가 관측됐습니다." : "",
@@ -1844,7 +1875,7 @@ export class WorkflowEngine {
         w.pending.role === role && failed === null && this.sideDecision(w, role, text))
       w.status = "active";
     if (!w.goal) w.goal = goal.slice(0, 32000);
-    w.inbox = { agentId, key, text, failed, compacted, canceled, reviewerViolation: evidence?.changed || evidence?.pushes.length ? "검증 턴에서 파일 변경 또는 푸시가 관측됐습니다." : "", resumed, answers };
+    w.inbox = { agentId, key, text, failed, ...(turn.failureCode ? { failureCode: turn.failureCode } : {}), compacted, canceled, reviewerViolation: evidence?.changed || evidence?.pushes.length ? "검증 턴에서 파일 변경 또는 푸시가 관측됐습니다." : "", resumed, answers };
     await this.save();
     await this.advance(w);
   }
@@ -3013,6 +3044,7 @@ export class WorkflowEngine {
   private async pause(w: Workflow) {
     w.quotaPause = null;
     w.transientPause = null;
+    w.recoveryCheck = null;
     w.status = "paused";
     w.notifiedStatus = "paused";
     this.touch(w, "일시정지: 현재 응답은 마무리하고 다음 자동 작업은 시작하지 않습니다.");
@@ -3027,10 +3059,14 @@ export class WorkflowEngine {
     await this.checkResume(w, message);
     await this.prepareResume(w, automatic);
     if (w.status !== "active") { await this.save(); return w.status; }
-    if (automatic && w.quotaPause && !w.pending && !w.inbox && !w.asker && !w.held)
-      this.queue(w, w.quotaPause.role, w.quotaPause.prompt ?? CONTINUE, w.quotaPause.phase);
-    if (automatic && w.transientPause && !w.pending && !w.inbox && !w.asker && !w.held)
-      this.queue(w, w.transientPause.role, CONTINUE, w.transientPause.phase);
+    const recovery = w.quotaPause ?? w.transientPause;
+    if (automatic && recovery) w.recoveryCheck = null;
+    if (automatic && recovery && !w.pending && !w.inbox && !w.asker && !w.held) {
+      this.queue(w, recovery.role, recovery.prompt ?? CONTINUE, recovery.phase, recovery.instruction);
+      w.pending!.retry = true;
+      w.pending!.budgetCharged = recoveryCharged(recovery);
+      w.pending!.sourcePendingId = recovery.sourcePendingId;
+    }
     if (message && !w.planIssue) this.redirect(w, message);
     this.touch(w, "자동 작업을 재개합니다.");
     await this.save();
@@ -3040,6 +3076,7 @@ export class WorkflowEngine {
   }
   private async prepareResume(w: Workflow, automatic: boolean) {
     if (!automatic) {
+      w.recoveryCheck = null;
       w.quotaPause = null;
       w.transientPause = null;
       w.planFingerprint = "";
@@ -3218,16 +3255,24 @@ export class WorkflowEngine {
     await this.recovery.retryTransient(w);
     return automates(w) && w.status === "active";
   }
+  private deferObservation(w: Workflow, reason: string) {
+    const attempts = (w.recoveryCheck?.attempts ?? 0) + 1;
+    w.recoveryCheck = { attempts, reason, lastCheckedAt: this.now(), nextCheckAt: this.now() + transientDelay(attempts - 1) };
+    this.touch(w, `${reason} · 다음 이력 확인 ${new Date(w.recoveryCheck.nextCheckAt).toISOString()}`);
+  }
   private async stepWorkflow(w: Workflow) {
+    if (w.recoveryCheck && this.now() < w.recoveryCheck.nextCheckAt) return;
     try {
       if ((await this.observe(w)) === false) return;
       await this.recover(w);
       await this.advance(w);
       this.tickFailures.delete(w.id);
+      if (w.recoveryCheck && w.recoveryCheck.nextCheckAt <= this.now()) w.recoveryCheck = null;
     } catch (error) {
       // A single failed daemon read is retried; a failure that persists stops the flow.
       const failures = (this.tickFailures.get(w.id) ?? 0) + 1;
       this.tickFailures.set(w.id, failures);
+      this.deferObservation(w, `대화 조회 실패: ${String(error)}`);
       if (failures < 3) return;
       this.tickFailures.delete(w.id);
       await this.recovery.recordTransient(w, w.pending?.role ?? this.floor(w), String(error), "error");
@@ -3249,8 +3294,16 @@ export class WorkflowEngine {
         if (member === w.execute) await this.worktreeCleanup.manuallyArchived(w);
         return false;
       }
-      if (!snapshot || snapshot.archived) {
+      if (!snapshot) {
         member.usage = null;
+        this.compressionReasons.set(member.id, compressionDecision(member.config.provider, await this.settings(), null).reason);
+        this.deferObservation(w, "연결된 대화를 일시적으로 조회하지 못했습니다. 다시 확인합니다.");
+        return false;
+      }
+      if (snapshot.archived) {
+        member.usage = null;
+        w.quotaPause = null;
+        w.transientPause = null;
         this.compressionReasons.set(member.id, compressionDecision(member.config.provider, await this.settings(), null).reason);
         w.status = "paused";
         this.touch(w, "연결된 대화가 보관되었거나 없어 자동 진행을 멈췄습니다.");
@@ -3288,7 +3341,7 @@ export class WorkflowEngine {
         w,
         "전달한 지시의 응답이 이미 끝나 다음 단계가 정해지지 않았습니다. 대화를 확인하고 재개하세요.",
       );
-    } else if (turn.history.text) {
+    } else if (turn.history.text || turn.failed !== null) {
       // The turn-ended event for this turn will now find it taken and skip its evidence,
       // so push receipts and reported artifacts are recorded here, as in a transition.
       if (turn.failed === null && w.pending!.role !== "reviewer")
@@ -3304,6 +3357,7 @@ export class WorkflowEngine {
         key: turn.history.key,
         text: turn.history.text,
         failed: turn.failed,
+        ...(turn.history.failureCode ? { failureCode: turn.history.failureCode } : {}),
         compacted: turn.history.compacted ?? false,
         canceled: false,
         reviewerViolation: turn.history.evidence?.changed || turn.history.evidence?.pushes.length ? "검증 턴에서 파일 변경 또는 푸시가 관측됐습니다." : "",
@@ -3318,19 +3372,25 @@ export class WorkflowEngine {
   private async lastTurn(w: Workflow, pending: Pending) {
     const member = w[pending.role];
     if (!member) return null;
+    if (w.recoveryCheck && this.now() < w.recoveryCheck.nextCheckAt) return null;
     const snapshot = await this.port.inspect(member.id);
     if (!snapshot || !this.quiet(snapshot)) return null;
     const history = await this.port.history(member.id, pending.id);
     if (!history.messageIds.includes(pending.id)) return null;
-    return {
-      agentId: member.id,
-      history,
-      failed: snapshot.status === "error" ? "담당 대화 오류" : history.failed,
-    };
+    // A page can contain the pending message and a later, unrelated failed turn.
+    if (history.failed !== null && (!history.turnId || history.messageTurns?.[pending.id] !== history.turnId)) {
+      this.deferObservation(w, "실패 이력이 전달한 지시와 같은 턴인지 확인하지 못했습니다. 대화 내역을 확인하세요.");
+      return null;
+    }
+    if (snapshot.status === "error" && history.failed === null) {
+      this.deferObservation(w, "실패 원인을 확인하지 못해 자동 실행하지 않습니다. 대화의 오류·전달 내역을 확인하고 원인 해결 후 재개하세요. 이력 확인은 계속합니다.");
+      return null;
+    }
+    return { agentId: member.id, history, failed: history.failed };
   }
   private quiet(snapshot: Snapshot): boolean {
     return (
-      snapshot.status !== "running" && snapshot.status !== "initializing" && !snapshot.permission
+      snapshot.status !== "running" && snapshot.status !== "initializing" && !snapshot.permission && !snapshot.activeTurn
     );
   }
   /**
@@ -3511,8 +3571,11 @@ export class WorkflowEngine {
     if (pending.role === "reviewer" && snapshot.config?.modeId && snapshot.config.modeId !== member.config.modeId)
       throw new Error("검증 대화의 실제 읽기 전용 모드가 바뀌었습니다.");
     if (pending.stage === "sending") return this.confirmDelivery(pending, member);
-    if (!this.receptive(snapshot)) return;
-    if (w.turns >= (await this.settings()).maxTurns) {
+    const recovery = w.quotaPause ?? w.transientPause;
+    const retryingFailure = !!pending.retry && recovery?.role === pending.role &&
+      recovery.sourcePendingId === (pending.sourcePendingId ?? null);
+    if (!this.receptive(snapshot, retryingFailure)) return;
+    if (w.turns >= (await this.settings()).maxTurns && !pendingCharged(pending)) {
       w.status = "paused";
       this.touch(w, this.limitDetail(w));
       await this.save();
@@ -3520,8 +3583,10 @@ export class WorkflowEngine {
     }
     if (pending.role === "execute" && !(await this.clearToExecute(w, pending))) return;
     pending.rememberedThrough = w.memorySequence;
+    if (!pendingCharged(pending)) w.turns++;
+    pending.budgetCharged = true;
+    pending.sourcePendingId ??= pending.id;
     pending.stage = "sending";
-    w.turns++;
     await this.save();
     await this.port.send(
       member.id,
@@ -3559,8 +3624,8 @@ export class WorkflowEngine {
       throw new Error("담당 대화가 아직 응답 중입니다. 응답이 끝난 뒤 다시 확인하세요.");
     const history = await this.port.history(member.id, pending.id);
     if (!history.messageIds.includes(pending.id)) {
+      pending.budgetCharged = pendingCharged(pending);
       pending.stage = "queued";
-      w.turns = Math.max(0, w.turns - 1);
     }
     await this.resume(w, "");
   }
@@ -3576,10 +3641,10 @@ export class WorkflowEngine {
     await this.save();
   }
   /** Whether the conversation can take a message now; throws when it needs the user first. */
-  private receptive(snapshot: Snapshot): boolean {
+  private receptive(snapshot: Snapshot, retryingFailure = false): boolean {
     if (!this.quiet(snapshot)) return false;
     // Sending with a message ID lets the daemon reload a closed conversation.
-    if (snapshot.status !== "idle" && snapshot.status !== "closed")
+    if (snapshot.status !== "idle" && snapshot.status !== "closed" && !(snapshot.status === "error" && retryingFailure))
       throw new Error("담당 대화에 오류가 있습니다. 대화를 확인한 뒤 재개하세요.");
     return true;
   }
@@ -3828,6 +3893,22 @@ export class WorkflowEngine {
     const inbox = w.inbox!;
     const role = memberRole(w, inbox.agentId);
     if (!role) { w.inbox = null; return; }
+    if (inbox.failureTurnId !== undefined) {
+      const pending = w.pending;
+      if (!pending || pending.role !== role || pending.stage === "queued") return;
+      const history = await this.port.history(inbox.agentId, pending.id);
+      if (!inbox.failureTurnId || history.turnId !== inbox.failureTurnId ||
+          history.messageTurns?.[pending.id] !== inbox.failureTurnId || !history.messageIds.includes(pending.id)) {
+        this.deferObservation(w, "실패 이벤트와 전달된 턴의 연결을 확인하지 못했습니다. 대화의 오류·전달 내역을 확인하세요.");
+        return;
+      }
+      // A delayed failure notification cannot replay a response already consumed.
+      if (w.processed.includes(history.key)) { w.inbox = null; await this.save(); return; }
+      this.seen(w, inbox.key);
+      inbox.key = history.key;
+      inbox.answers = true;
+      delete inbox.failureTurnId;
+    }
     if (role === "reviewer" && w.reviewSelection.enabled === false) {
       if (w.pending?.role === "reviewer") w.pending = null;
       this.seen(w, inbox.key); w.inbox = null; w.planReview.stage = "off";
@@ -3853,8 +3934,8 @@ export class WorkflowEngine {
     if (inbox.failed !== null) {
       this.seen(w, inbox.key);
       w.inbox = null;
-      if (!inbox.canceled) await this.recovery.recordTransient(w, role, inbox.failed, "turn");
-      if (w.transientPause && w.transientPause.attempts < 5) {
+      if (!inbox.canceled) await this.recovery.recordTransient(w, role, inbox.failed, "turn", inbox.failureCode, pending);
+      if (w.transientPause) {
         this.queue(
           w,
           role,
@@ -3863,6 +3944,8 @@ export class WorkflowEngine {
           pending?.instruction,
         );
         w.pending!.retry = true;
+        w.pending!.budgetCharged = recoveryCharged(w.transientPause);
+        w.pending!.sourcePendingId = w.transientPause.sourcePendingId;
       }
       // A turn the user stopped is picked up by their next message; a failure waits for a resume.
       w.status = inbox.canceled ? "needs_input" : "paused";
@@ -3873,6 +3956,7 @@ export class WorkflowEngine {
           : `응답 중단: ${inbox.failed}. 대화를 확인하고 재개하세요.`,
       );
       this.recovery.describeTransient(w);
+      this.recovery.describeQuota(w);
       return;
     }
     const d = this.read(w, role, inbox, true, decision => {
@@ -3896,11 +3980,15 @@ export class WorkflowEngine {
       await this.recovery.quotaFailure(w, role, inbox);
       this.seen(w, inbox.key);
       w.inbox = null;
-      await this.recovery.recordTransient(w, role, inbox.failed, "turn");
-      if (w.transientPause && w.transientPause.attempts < 5) this.queue(w, role, CONTINUE, w.phase);
+      await this.recovery.recordTransient(w, role, inbox.failed, "turn", inbox.failureCode);
+      if (w.transientPause) {
+        this.queue(w, role, w.transientPause.prompt ?? CONTINUE, w.phase, w.transientPause.instruction);
+        w.pending!.retry = true;
+      }
       w.status = "paused";
       this.touch(w, `응답 중단: ${inbox.failed}. 대화를 확인하고 재개하세요.`);
       this.recovery.describeTransient(w);
+      this.recovery.describeQuota(w);
       return;
     }
     // While the flow waits for the user, a turn that decides nothing leaves that wait as it is.

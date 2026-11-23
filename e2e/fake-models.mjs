@@ -156,6 +156,10 @@ createServer((req, res) => {
         callsTool,
       }) + "\n",
     );
+    if (settings.failRole === role && (parsed.tools ?? []).length) {
+      // Non-retryable at the SDK boundary: the workflow must own the later retry.
+      return json(400, { type: "error", error: { type: "invalid_request_error", message: "Credit balance is too low. Please top up your account." } });
+    }
     if (mode === "limit") {
       const reset = Math.floor(Date.now() / 1000) + 5400;
       return json(

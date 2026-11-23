@@ -318,7 +318,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
           [
             ["notifyPermission", "권한 요청 알림"],
             ["notifyStopped", "작업 중단 알림"],
-            ["autoResumeQuota", "사용 한도 해소 시 자동 재개"],
+            ["autoResumeQuota", "사용 한도 오류 주기적 재시도"],
             ["autoResumeTransient", "일시 오류 자동 재개"],
             ["shellPushGuard", "에이전트 셸 git push 차단"],
             ["notifyCompleted", "작업 완료 알림"],
@@ -401,12 +401,13 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
             : "Claude도 기본 압축 기준을 사용합니다. 별도 정책을 끈 상태입니다."}
           {" "}Claude 자동 압축은 연합개발·역할 분리 작업과 신규 일반개발 단일 대화에 적용됩니다. 유휴 상태의 같은 대화에서만 압축하고 역할 전달·자동 계속 메시지를 만들지 않습니다.
         </Text>
-        <Text style={s.text}>최대 계획·실행 반복 / 최대 자동 응답 수</Text>
+        <Text style={s.text}>최대 계획·실행 반복 / 최대 자동 지시 수</Text>
+        <Text style={s.muted}>같은 지시의 장애 재시도는 한 번만 계산합니다. 새 지시는 한도를 사용하며, 질문·승인·직접 정지는 자동으로 해제하지 않습니다.</Text>
         <View style={s.row}>
           {field("최대 반복 횟수", String(draft.maxCycles), (value) =>
             setDraft({ ...draft, maxCycles: Number(value) }),
           )}
-          {field("최대 자동 응답 수", String(draft.maxTurns), (value) =>
+          {field("최대 자동 지시 수", String(draft.maxTurns), (value) =>
             setDraft({ ...draft, maxTurns: Number(value) }),
           )}
         </View>
@@ -734,7 +735,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
           <ManagedPushPanel workflow={w} refresh={load} styles={s} />
           {(w.automatic || w.mode === "federated") && (
             <Text style={s.muted}>
-              반복 {w.cycles}회 · 자동 응답 {w.turns}회 · 압축 계획 {w.planCompactions}회 / 실행{" "}
+              반복 {w.cycles}회 · 자동 지시 {w.turns}회 · 압축 계획 {w.planCompactions}회 / 실행{" "}
               {w.executeCompactions}회
             </Text>
           )}
