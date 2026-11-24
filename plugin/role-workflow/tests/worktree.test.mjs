@@ -987,3 +987,32 @@ test("PLACE-WAIT V-2: invalid input repository still rejects without changing sc
   await assert.rejects(f.engine.setRepositories(f.id, [f.dir]), /Git 저장소를 확인할 수 없습니다/);
   assert.deepEqual((await f.state()).repositories, []);
 });
+
+test("registered external repositories use their own baseline and fail closed", async t => {
+  const f = await fixture(t);
+  const { w } = await readyWorktreePush(f);
+  const head = await git(f.other, "rev-parse", "HEAD");
+  await git(f.other, "remote", "add", "origin", f.other);
+  await git(f.other, "update-ref", "refs/remotes/origin/main", head);
+  const target = { repository: f.other, remote: "origin", branch: "main", commit: head };
+  const targets = [...w.pushTargets, target];
+  assert.equal((await checkWorktreeBase(w, f.probe, targets)).ok, false, "unregistered repository");
+  w.repositories = [f.other];
+  assert.equal((await checkWorktreeBase(w, f.probe, targets)).ok, true);
+  await writeFile(path.join(f.other, "unreviewed.txt"), "unreviewed");
+  assert.equal((await checkWorktreeBase(w, f.probe, targets)).ok, false, "dirty checkout");
+  await rm(path.join(f.other, "unreviewed.txt"));
+  assert.equal((await checkWorktreeBase(w, f.probe, [...w.pushTargets, { ...target, commit: f.base }])).ok, false, "wrong HEAD");
+  await git(f.other, "update-ref", "-d", "refs/remotes/origin/main");
+  assert.equal((await checkWorktreeBase(w, f.probe, targets)).ok, false, "missing tracking baseline");
+  await git(f.other, "update-ref", "refs/remotes/origin/main", head);
+  const ahead = await git(f.other, "commit-tree", `${head}^{tree}`, "-p", head, "-m", "new baseline");
+  await git(f.other, "update-ref", "refs/remotes/origin/main", ahead);
+  assert.equal((await checkWorktreeBase(w, f.probe, targets)).needsMerge, true, "tracking advanced");
+  await git(f.other, "update-ref", "refs/remotes/origin/main", head);
+  const originalRemoteTip = f.probe.remoteTip;
+  f.probe.remoteTip = async candidate => candidate.repository === f.other ? ahead : originalRemoteTip(candidate);
+  assert.equal((await checkWorktreeBase(w, f.probe, targets)).needsMerge, true, "actual remote advanced");
+  f.probe.remoteTip = originalRemoteTip;
+  assert.equal((await checkWorktreeBase(w, f.probe, targets)).ok, true);
+});

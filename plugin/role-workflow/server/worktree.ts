@@ -158,14 +158,25 @@ export async function checkWorktreeBase(w: Workflow, probe: RepoProbe | null, ta
     if (!origin || !baseBranch || !tree || tree.common !== origin.common) return unreadable;
     for (const target of targets) {
       const repository = await probe.identity(target.repository);
-      if (!repository || repository.common !== origin.common) return unreadable;
-      const tips = await probe.branchTips(w.cwd, baseBranch, target.remote);
+      if (!repository) return unreadable;
+      const external = repository.common !== origin.common;
+      if (external) {
+        // An additional repository has its own baseline; it cannot borrow the primary graph.
+        const registered = await Promise.all(w.repositories.map(folder => probe.identity!(folder)));
+        if (!registered.some(item => item?.root === repository.root && item.common === repository.common)) return unreadable;
+        const baseline = await probe.snapshot(target.repository);
+        if (repository.head !== target.commit || !baseline || baseline.head !== repository.head ||
+          baseline.dirty.length || baseline.incomplete || baseline.repositories?.length) return unreadable;
+      }
+      const baselineFolder = external ? target.repository : w.cwd;
+      const baselineBranch = external ? target.branch : baseBranch;
+      const tips = await probe.branchTips(baselineFolder, baselineBranch, target.remote);
       if (!tips?.head || !tips.tracking) return unreadable;
       for (const tip of [tips.head, tips.tracking]) {
-        const included = await probe.isAncestor(w.cwd, tip, target.commit);
+        const included = await probe.isAncestor(baselineFolder, tip, target.commit);
         if (included === null) return unreadable;
         if (!included)
-          return { ok: false, needsMerge: true, detail: `기준 브랜치 ${baseBranch}가 ${tip.slice(0, 12)}로 앞서 있어 먼저 합쳐야 합니다.` };
+          return { ok: false, needsMerge: true, detail: `기준 브랜치 ${baselineBranch}가 ${tip.slice(0, 12)}로 앞서 있어 먼저 합쳐야 합니다.` };
       }
       const remote = await probe.remoteTip(target);
       if (remote === null) return unreadable;
