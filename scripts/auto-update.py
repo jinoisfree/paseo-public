@@ -100,14 +100,21 @@ class Updater:
     def finish(self, result, reason, *, notify=False, **values):
         busy = result == 'skipped' and reason == 'busy'
         message = reason
-        if result == 'skipped' and reason == 'foreign-plugin':
-            # Tell once per distinct mismatch; the same registered path does not repeat the notification.
-            path = self.registered_path()
+        if result == 'skipped' and reason in ('foreign-plugin', 'branch', 'dirty'):
+            # Notify once per consecutive reason and, for a foreign plugin, registered path.
+            path = self.registered_path() if reason == 'foreign-plugin' else None
             mark = {'reason': reason, 'path': path}
             notify = self.state.get('notifiedSkip') != mark
             self.state['notifiedSkip'] = mark
-            message = (f'role-workflow가 이 저장소가 아닌 {path or "알 수 없는 경로"}에 등록돼 있어 자동 업데이트를 건너뜁니다. '
-                       '해결: ./install.sh --replace-registration --with-auto-update')
+            if reason == 'foreign-plugin':
+                message = (f'role-workflow가 이 저장소가 아닌 {path or "알 수 없는 경로"}에 등록돼 있어 자동 업데이트를 건너뜁니다. '
+                           '해결: ./install.sh --replace-registration --with-auto-update')
+            elif reason == 'branch':
+                message = (f'{self.root}의 현재 브랜치가 main이 아니어서 자동 업데이트를 건너뜁니다 (branch). '
+                           '해결: 진행 중인 작업을 보존한 뒤 이 저장소를 main 브랜치로 전환하세요.')
+            else:
+                message = (f'{self.root}에 커밋되지 않은 변경이 있어 자동 업데이트를 건너뜁니다 (dirty). '
+                           '해결: 변경을 보존하고 추적 파일의 작업 트리와 인덱스를 정리하세요.')
         else:
             self.state['notifiedSkip'] = None
         self.state['busyStreak'] = self.state['busyStreak'] + 1 if busy else 0
@@ -238,7 +245,7 @@ class Updater:
         self.state.update(previousCommit=previous, afterCommit=previous)
         reason = self.safety()
         if reason:
-            return self.finish('skipped', reason, notify=reason == 'foreign-plugin')
+            return self.finish('skipped', reason)
         try:
             fetched = self.git('fetch', '--no-tags', 'origin', 'refs/heads/main:refs/remotes/origin/main', check=False)
         except RuntimeError as error:
@@ -264,7 +271,7 @@ class Updater:
             sleep(BUSY_INTERVAL)
         reason = self.safety()
         if reason:
-            return self.finish('skipped', reason, notify=reason == 'foreign-plugin')
+            return self.finish('skipped', reason)
         if self.head() != previous or self.git('rev-parse', 'refs/remotes/origin/main').stdout.strip() != target:
             return self.finish('skipped', 'checkout-changed')
         self.state.update(result='applying', logDirectory=str(self.log))

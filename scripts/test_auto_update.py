@@ -159,8 +159,109 @@ class AutoUpdateTests(unittest.TestCase):
                 if condition in ('dirty','staged'):
                     self.assertEqual((self.root/'version.txt').read_text(),'local')
                     self.git(self.root,'restore','--staged','--worktree','version.txt')
-                self.assertEqual(len(self.notifications),1 if condition in ('diverged','foreign-plugin') else 0)
+                self.assertEqual(len(self.notifications),1 if condition in ('branch','dirty','diverged','foreign-plugin') else 0)
                 self.notifications.clear()
+
+    def assert_checkout_skip_notice(self, result, state, reason):
+        self.assertEqual((result, state['result'], state['reason']), (0, 'skipped', reason))
+        self.assertEqual(state['notifiedSkip'], {'reason': reason, 'path': None})
+        self.assertEqual(len(self.notifications), 1)
+        for value in (reason, str(self.root), '해결:'):
+            self.assertIn(value, self.notifications[0])
+        self.assertEqual(self.git(self.root, 'rev-parse', 'HEAD'), self.previous)
+        self.assertEqual(self.calls(), [])
+
+    def test_branch_skip_notifies_once_before_fetch(self):
+        self.git(self.root, 'checkout', '-b', 'topic')
+        result, state = self.execute()
+        self.assert_checkout_skip_notice(result, state, 'branch')
+        self.notifications.clear()
+        result, repeated = self.execute()
+        self.assertEqual((result, repeated['reason']), (0, 'branch'))
+        self.assertEqual(repeated['notifiedSkip'], state['notifiedSkip'])
+        self.assertEqual(self.notifications, [])
+
+    def test_dirty_skip_notifies_once_and_preserves_user_edit(self):
+        version = self.root/'version.txt'
+        version.write_text('user edit')
+        result, state = self.execute()
+        self.assert_checkout_skip_notice(result, state, 'dirty')
+        self.notifications.clear()
+        result, repeated = self.execute()
+        self.assertEqual((result, repeated['reason']), (0, 'dirty'))
+        self.assertEqual(repeated['notifiedSkip'], state['notifiedSkip'])
+        self.assertEqual(self.notifications, [])
+        self.assertEqual(version.read_text(), 'user edit')
+
+    def test_branch_and_dirty_transitions_notify_for_each_new_reason(self):
+        (self.root/'version.txt').write_text('user edit')
+        result, state = self.execute()
+        self.assert_checkout_skip_notice(result, state, 'dirty')
+        self.notifications.clear()
+        self.git(self.root, 'checkout', '-b', 'topic')
+        result, state = self.execute()
+        self.assert_checkout_skip_notice(result, state, 'branch')
+        self.notifications.clear()
+        self.git(self.root, 'checkout', 'main')
+        result, state = self.execute()
+        self.assert_checkout_skip_notice(result, state, 'dirty')
+
+    def test_success_clears_dirty_notice_for_the_next_edit(self):
+        version = self.root/'version.txt'
+        version.write_text('first edit')
+        self.assertEqual(self.execute()[1]['notifiedSkip'], {'reason': 'dirty', 'path': None})
+        self.assertEqual(len(self.notifications), 1)
+        self.git(self.root, 'restore', 'version.txt')
+        result, state = self.execute()
+        self.assertEqual((result, state['result']), (0, 'updated'))
+        self.assertIsNone(state['notifiedSkip'])
+        self.notifications.clear()
+        calls = self.calls()
+        version.write_text('second edit')
+        result, state = self.execute()
+        self.assertEqual((result, state['reason']), (0, 'dirty'))
+        self.assertEqual(state['notifiedSkip'], {'reason': 'dirty', 'path': None})
+        self.assertEqual(len(self.notifications), 1)
+        self.assertEqual(self.calls(), calls)
+
+    def test_quiet_skip_clears_dirty_notice_for_the_next_edit(self):
+        version = self.root/'version.txt'
+        version.write_text('first edit')
+        result, state = self.execute()
+        self.assert_checkout_skip_notice(result, state, 'dirty')
+        self.notifications.clear()
+        self.git(self.root, 'restore', 'version.txt')
+        (self.home/'.paseo/paseo.pid').unlink()
+        result, state = self.execute()
+        self.assertEqual((result, state['reason']), (0, 'daemon-stopped'))
+        self.assertIsNone(state['notifiedSkip'])
+        self.assertEqual(self.notifications, [])
+        version.write_text('second edit')
+        result, state = self.execute()
+        self.assert_checkout_skip_notice(result, state, 'dirty')
+
+    def test_dirty_replaces_foreign_plugin_notice(self):
+        self.write_account(foreign=True)
+        result, state = self.execute()
+        self.assertEqual((result, state['reason']), (0, 'foreign-plugin'))
+        self.assertEqual(state['notifiedSkip'], {'reason': 'foreign-plugin', 'path': str(self.root/'other')})
+        self.assertEqual(len(self.notifications), 1)
+        self.notifications.clear()
+        (self.root/'version.txt').write_text('user edit')
+        result, state = self.execute()
+        self.assert_checkout_skip_notice(result, state, 'dirty')
+
+    def test_dirty_skip_honors_a_saved_notice(self):
+        folder = auto.auto_update_data(self.config)
+        folder.mkdir(parents=True)
+        marker = {'reason': 'dirty', 'path': None}
+        (folder/'state.json').write_text(json.dumps({'notifiedSkip': marker}))
+        (self.root/'version.txt').write_text('user edit')
+        result, state = self.execute()
+        self.assertEqual((result, state['reason']), (0, 'dirty'))
+        self.assertEqual(state['notifiedSkip'], marker)
+        self.assertEqual(self.notifications, [])
+        self.assertEqual(self.calls(), [])
 
     def test_AC09_existing_dead_pid_is_skipped(self):
         (self.home/'.paseo/paseo.pid').write_text(json.dumps({'pid':99999999}))
@@ -228,6 +329,22 @@ class AutoUpdateTests(unittest.TestCase):
         self.assertEqual((result,state['reason']),(0,'dirty'))
         self.assertEqual((self.root/'version.txt').read_text(),'user edit')
         self.assertEqual(self.calls(),[])
+        self.assert_checkout_skip_notice(result, state, 'dirty')
+
+    def test_branch_change_during_wait_notifies_without_switching_back(self):
+        self.workflow.write_text(json.dumps({'workflows': [
+            {'status': 'active', 'number': 17, 'plan': {'compaction': 'busy'}},
+        ]}))
+
+        def change_branch(_):
+            self.workflow.write_bytes(self.workflow_before)
+            self.git(self.root, 'checkout', '-b', 'topic')
+
+        with mock.patch.object(auto, 'sleep', side_effect=change_branch) as sleep:
+            result, state = self.execute()
+        sleep.assert_called_once_with(600)
+        self.assert_checkout_skip_notice(result, state, 'branch')
+        self.assertEqual(self.git(self.root, 'branch', '--show-current'), 'topic')
 
     def test_AC10_malformed_workflow_state_fails_closed(self):
         self.workflow.write_text('{broken');self.workflow_before=self.workflow.read_bytes()
@@ -346,6 +463,24 @@ class AutoUpdateTests(unittest.TestCase):
         self.assertEqual((result,state['result']),(0,'updated'))
         self.assertIn('no GUI session',(Path(state['logDirectory'])/'events.jsonl').read_text())
 
+    def test_notification_failure_preserves_dirty_skip_and_saved_notice(self):
+        self.notify_patch.stop()
+        (self.root/'version.txt').write_text('user edit')
+        actual_run = subprocess.run
+
+        def run(command, **kwargs):
+            if str(command[0]) == '/usr/bin/osascript':
+                return subprocess.CompletedProcess(command, 1, stdout='', stderr='no GUI session')
+            return actual_run(command, **kwargs)
+
+        with mock.patch.object(auto.subprocess, 'run', side_effect=run):
+            result, state = self.execute()
+        self.assertEqual((result, state['result'], state['reason']), (0, 'skipped', 'dirty'))
+        self.assertEqual(state['notifiedSkip'], {'reason': 'dirty', 'path': None})
+        events = [json.loads(line) for line in (Path(state['logDirectory'])/'events.jsonl').read_text().splitlines()]
+        self.assertEqual([(row['notificationExitCode'], row['notificationError'])
+                          for row in events if 'notificationExitCode' in row], [(1, 'no GUI session')])
+
     def test_AC14_check_reads_remote_without_fetch_install_logs_or_state(self):
         before={str(p.relative_to(self.root)):p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
         with contextlib.redirect_stdout(io.StringIO()) as output, mock.patch.object(auto,'ROOT',self.root), mock.patch.object(auto,'load_config',return_value=self.config):
@@ -363,6 +498,21 @@ class AutoUpdateTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()) as output, mock.patch.object(auto,'ROOT',self.root), mock.patch.object(auto,'load_config',return_value=self.config):
             self.assertEqual(auto.main(['--check']),0)
         return json.loads(output.getvalue())
+
+    def test_check_reports_branch_and_dirty_without_notifying_or_writing(self):
+        self.git(self.root, 'checkout', '-b', 'topic')
+        for reason in ('branch', 'dirty'):
+            with self.subTest(reason=reason):
+                if reason == 'dirty':
+                    self.git(self.root, 'checkout', 'main')
+                    (self.root/'version.txt').write_text('user edit')
+                before = {path: path.read_bytes() for path in self.root.rglob('*') if path.is_file()}
+                self.assertEqual(self.check_output()['skipReason'], reason)
+                self.assertEqual({path: path.read_bytes() for path in self.root.rglob('*') if path.is_file()}, before)
+                self.assertEqual(self.notifications, [])
+                self.assertEqual(self.calls(), [])
+                self.assertFalse((self.base/'data').exists())
+                self.assertFalse((self.base/'logs').exists())
 
     def test_check_reports_registration_agent_and_skip_reason_without_writing(self):
         self.write_account(foreign=True)
