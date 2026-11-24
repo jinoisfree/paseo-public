@@ -8,6 +8,7 @@ import {
   type Verification,
 } from "../shared/artifacts";
 import type { RepoProbe } from "./git";
+import { resolvedFolder } from "./workspaces";
 
 export const pushCheckSchema = z.object({
   checkedAt: z.string(),
@@ -30,6 +31,19 @@ export async function repositoryPaths(
     if (!roots.includes(root)) roots.push(root);
   }
   return roots;
+}
+
+/** Scope input only: the task's own repository is the default scope, not a push target. */
+export async function scopeRepositories(
+  probe: RepoProbe | null,
+  cwd: string,
+  paths: readonly string[],
+) {
+  const roots = await repositoryPaths(probe, cwd, paths);
+  if (roots.length !== 1) return roots;
+  const root = await probe!.repository!(cwd);
+  if (!root) throw new Error("작업 폴더의 Git 저장소를 확인할 수 없습니다.");
+  return await resolvedFolder(roots[0]) === await resolvedFolder(root) ? [] : roots;
 }
 
 export async function resolvedPushTargets(

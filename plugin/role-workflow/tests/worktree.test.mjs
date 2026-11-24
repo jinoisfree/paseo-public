@@ -2,12 +2,13 @@ import { gitTestEnvironment } from "./git-test-environment.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { WorkflowEngine } from "../server/engine.ts";
 import { createRepoProbe } from "../server/git.ts";
+import { managedPushSchema } from "../shared/managed-push.ts";
 import { settingsSchema } from "../shared/contracts.ts";
 import { checkWorktreeBase, integrateWorktree, worktreeContext } from "../server/worktree.ts";
 import { ManagedPushRunner, REMOTE_ADVANCED_ERROR, REMOTE_ADVANCED_NOTICE } from "../server/managed-push.ts";
@@ -96,13 +97,12 @@ async function fixture(t, { placement = "worktree", overlap = true, foreign = fa
     return engine.database.workflows.find(w => w.id === otherId);
   };
   const blocker = overlap ? await addBlocker() : null;
-  if (unavailable === "repositories") await engine.setRepositories(id, [repo]);
   let sequence = 0;
   const state = async () => JSON.parse(await readFile(file, "utf8")).workflows[0];
-  const finish = async (agentId, status, extra = {}) => {
+  const finish = async (agentId, status, extra = {}, prose = "") => {
     const key = `turn-${++sequence}`;
     const delivery = sent.findLast((x) => x.id === agentId);
-    const text = block(status, extra);
+    const text = prose + block(status, extra);
     agents.get(agentId).status = "idle";
     const h = { key, text, failed: null, messageIds: delivery ? [delivery.messageId] : [] };
     histories.set(agentId, h);
@@ -329,7 +329,7 @@ test("AC-04/AC-05: automatic wait recomputes all unfinished blockers at every ti
   assert.equal(f.created.length, 1);
 });
 
-for (const unavailable of ["unsupported", "detached", "subfolder", "non-git", "repositories"])
+for (const unavailable of ["unsupported", "detached", "subfolder", "non-git"])
 test(`AC-06: ${unavailable} automatically waits with an explanation`, async t => {
   const f = await fixture(t, { placement: "ask", unavailable });
   await f.start();
@@ -775,4 +775,152 @@ test("AC-203 N-1: creation records capture title, selected config and workspace 
   assert.equal(created.w.title, "Task");
   assert.equal(created.m.config.provider, "codex/builder");
   assert.equal(created.w.worktree.workspaceId, "wks_worktree");
+});
+
+
+// PLACE-WAIT AT-1..7: expected behavior comes from handoff v2 AC-1..5.
+for (const alias of [false, true]) test(`PLACE-WAIT AT-1: own scope starts one worktree (alias=${alias})`, async t => {
+  const f = await fixture(t);
+  const input = alias ? path.join(f.dir, "alias") : f.repo;
+  if (alias) await symlink(f.repo, input);
+  assert.deepEqual(await f.engine.setRepositories(f.id, [input]), { repositories: [] });
+  await f.start();
+  const w = await f.state();
+  assert.deepEqual(w.repositories, []);
+  assert.equal(f.worktrees.length, 1);
+  assert.equal(f.created.length, 1);
+  assert.equal(w.placement, null);
+  assert.equal(w.pending.stage, "sent");
+});
+
+for (const multiple of [false, true]) test(`PLACE-WAIT AT-2: foreign scope waits (multiple=${multiple})`, async t => {
+  const f = await fixture(t);
+  await f.engine.setRepositories(f.id, multiple ? [f.repo, f.other] : [f.other]);
+  await f.engine.setRepositories(f.blocker.id, [f.other]);
+  await f.start();
+  const w = await f.state();
+  assert.equal(w.placement.reason, multiple
+    ? "여러 저장소를 지정한 작업은 따로 작업 공간을 만들 수 없어 기다립니다."
+    : "작업 폴더와 다른 저장소를 지정한 작업은 따로 작업 공간을 만들 수 없어 기다립니다.");
+  assert.equal(w.placement.requested, "worktree");
+  assert.equal(f.worktrees.length, 0);
+  assert.equal(f.created.length, 0);
+});
+
+for (const reserved of [true, false]) test(`PLACE-WAIT AT-3: persisted legacy wait (reserved=${reserved})`, async t => {
+  const f = await fixture(t, { placement: "wait" });
+  await f.start();
+  await f.engine.close();
+  const db = JSON.parse(await readFile(f.file, "utf8"));
+  const old = db.workflows[0];
+  old.repositories = [f.repo];
+  old.reservedPlacement = reserved ? "worktree" : null;
+  old.placement.reason = "여러 저장소를 지정한 작업은 따로 작업 공간을 만들 수 없어 기다립니다.";
+  delete old.placement.requested;
+  await writeFile(f.file, JSON.stringify(db));
+  await f.restart();
+  const w = await f.state();
+  assert.deepEqual(w.repositories, reserved ? [] : [f.repo]);
+  assert.equal(w.isolation, reserved ? "worktree" : "shared");
+  assert.equal(f.created.length, reserved ? 1 : 0);
+  assert.equal(f.worktrees.length, reserved ? 1 : 0);
+  if (reserved) assert.equal(w.pending.stage, "sent");
+  else assert.equal(w.placement.requested, null);
+});
+
+test("PLACE-WAIT AT-4: an existing shared executor never migrates", async t => {
+  const f = await fixture(t, { overlap: false });
+  await f.start();
+  const w = f.engine.database.workflows[0];
+  w.repositories = [f.repo];
+  w.placement = { stage: "waiting", reason: "old reason", requested: "worktree", number: 0, title: "", cardPosted: false };
+  await f.engine.tick();
+  assert.equal(w.isolation, "shared");
+  assert.deepEqual(w.repositories, [f.repo]);
+  assert.equal(f.worktrees.length, 0);
+});
+
+for (const failure of ["repository", "identity-null", "identity-throw"]) test(`PLACE-WAIT AT-5: Git failure retains forced wait (${failure})`, async t => {
+  const f = await fixture(t, { unavailable: "non-git" });
+  await f.start();
+  const w = f.engine.database.workflows[0];
+  w.repositories = [f.repo];
+  if (failure === "repository") f.probe.repository = async () => { throw new Error("offline"); };
+  if (failure === "identity-throw") f.probe.identity = async () => { throw new Error("offline"); };
+  const before = structuredClone(w.placement);
+  await f.engine.tick();
+  assert.deepEqual(w.repositories, [f.repo]);
+  assert.deepEqual(w.placement, before);
+  assert.ok(w.detail.includes(before.reason));
+  assert.notEqual(w.status, "error");
+  assert.equal(f.created.length, 0);
+});
+
+for (const requested of ["wait", "worktree", "ask"]) for (const overlap of requested === "ask" ? [true, false] : [true])
+test(`PLACE-WAIT AT-7: requested ${requested} survives failure and recovery (overlap=${overlap})`, async t => {
+  const f = await fixture(t, { placement: "ask" });
+  await f.start();
+  assert.equal((await f.state()).placement.stage, "choice");
+  const identity = f.probe.identity;
+  f.probe.identity = async () => null;
+  if (requested === "ask") {
+    // A pending ask can become unavailable before a decision is made.
+    await f.engine.tick();
+  } else await f.engine.selectPlacement(f.id, requested);
+  let w = await f.state();
+  assert.equal(w.placement.requested, requested);
+  assert.ok(w.placement.reason);
+  const forcedWait = structuredClone(w.placement);
+  f.probe.identity = identity;
+  // Saved request, not a later setting change, controls forced-wait reevaluation.
+  await f.engine.configure({ ...await f.engine.settings(), executorPlacement: "wait" });
+  if (!overlap) f.blocker.progress = "done";
+  await f.engine.tick();
+  w = await f.state();
+  if (requested === "wait") {
+    assert.deepEqual(w.placement, forcedWait);
+    assert.equal(w.placement.stage, "waiting");
+    assert.equal(f.created.length, 0);
+  } else if (requested === "ask" && overlap) {
+    assert.equal(w.placement.stage, "choice");
+    assert.equal(f.created.length, 0);
+  } else {
+    assert.equal(w.isolation, requested === "worktree" ? "worktree" : "shared");
+    assert.equal(w.placement, null);
+    assert.equal(f.created.length, 1);
+  }
+  assert.equal(f.worktrees.length, requested === "worktree" ? 1 : 0);
+});
+
+for (const source of ["rpc", "block"]) test(`PLACE-WAIT AT-6: equivalent scope preserves push evidence (${source})`, async t => {
+  const f = await fixture(t, { overlap: false });
+  const w = f.engine.database.workflows[0];
+  w.pushTargets = [{ repository: f.repo, remote: "origin", branch: "main", commit: f.base }];
+  w.pushReceipt = { key: "receipt", agentId: "A", turnKey: "turn", calls: ["call"] };
+  w.managedPush = managedPushSchema.parse({
+    state: "prepared", id: "a3d94718-8ec3-4231-87e0-825d88578de8", workflowId: w.id,
+    epoch: w.pushEpoch, createdAt: "2026-11-24T00:00:00Z", updatedAt: "2026-11-24T00:00:00Z",
+    targets: w.pushTargets.map(target => ({ ...target, remoteUrl: "https://example.invalid/repo.git" })),
+  });
+  w.verification = [{ command: "check", cwd: f.repo, commit: f.base, exitCode: 0, logPath: "check.log" }];
+  const evidence = () => structuredClone(Object.fromEntries(["pushEpoch", "managedPush", "pushReceipt", "pushTargets", "verification", "artifactNotice"].map(k => [k, w[k]])));
+  const before = evidence();
+  for (let i = 0; i < 2; i++) {
+    if (source === "rpc") await f.engine.setRepositories(f.id, [f.repo]);
+    else await f.finish("A", "note", { repositories: [f.repo] });
+    assert.deepEqual(evidence(), before);
+  }
+  if (source === "rpc") await f.engine.setRepositories(f.id, [f.other]);
+  else await f.finish("A", "note", { repositories: [f.other] });
+  assert.equal(w.pushReceipt, null);
+  assert.deepEqual(w.pushTargets, []);
+  assert.ok(w.artifactNotice);
+});
+
+test("PLACE-WAIT AT-6/R4: active progress still invalidates equivalent-scope push evidence", async t => {
+  const f = await fixture(t, { overlap: false });
+  const w = f.engine.database.workflows[0];
+  w.pushReceipt = { key: "receipt", agentId: "A", turnKey: "turn", calls: ["call"] };
+  await f.finish("A", "note", { repositories: [f.repo] }, "작업상태: 진행\n");
+  assert.equal(w.pushReceipt, null);
 });

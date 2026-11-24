@@ -414,6 +414,54 @@ try {
     }
   });
 
+  for (const legacy of [false, true]) await step(`PLACE-WAIT: ${legacy ? "legacy forced wait resumes after daemon restart" : "own repository scope uses reserved worktree"}`, async () => {
+    writeFileSync(control, JSON.stringify({ mode: "text", text: "placement blocker" }));
+    const blocker = await runAgent("일반개발로 진행해줘. 배치 겹침 검사용 작업");
+    const plan = `<paseo-workflow>${JSON.stringify({ status: "plan", summary: "배치 검증", next: "구현 시작 확인", handoff: "격리 시험", checks: [], repositories: [work] })}</paseo-workflow>`;
+    writeFileSync(control, JSON.stringify({ mode: "role", scenario: `placement-wait-${legacy}`,
+      plan: [plan], execute: [workflowBlock("input", "배치 지시 전달 확인")] }));
+    let flow;
+    try {
+      const planner = await runAgent(`연합개발로 진행해줘. placement-wait-${legacy}`);
+      flow = await waitFor("placement held plan", async () => state().workflows.find(w => w.plan?.id === planner && w.heldApproval));
+      assert(state().workflows.some(w => w.plan?.id === blocker && w.cwd === flow.cwd), "same-folder blocker missing");
+      assert(flow.repositories.length === 0, "own scope was not normalized before approval");
+      const model = (await rpc("workflow.models", { provider: "claude" })).models[0];
+      const thinking = model.thinkingOptions.find(o => o.isDefault)?.id ?? model.thinkingOptions[0]?.id ?? "";
+      const selected = await rpc("workflow.select-executor", { id: flow.id, holdId: flow.heldApproval.id,
+        provider: "claude", model: model.id, thinking, review: { enabled: false }, placement: legacy ? "wait" : "worktree" });
+      assert(selected.ok, selected.detail);
+      if (legacy) {
+        await waitFor("isolated waiting fixture", async () => state().workflows.find(w => w.id === flow.id && w.placement?.stage === "waiting" && !w.execute?.workspaceId));
+        await client?.close().catch(() => {});
+        client = null;
+        await stop(daemon);
+        // Only the stopped temporary daemon's fixture is edited; never the user's state.
+        const db = state();
+        const old = db.workflows.find(w => w.id === flow.id);
+        old.repositories = [work];
+        old.reservedPlacement = "worktree";
+        old.isolation = "shared";
+        old.placement.reason = "여러 저장소를 지정한 작업은 따로 작업 공간을 만들 수 없어 기다립니다.";
+        delete old.placement.requested;
+        writeFileSync(join(home, "role-workflow", "state.json"), JSON.stringify(db));
+        await startDaemon();
+        await waitFor("placement plugin ready after restart", async () => (await readyCount()) >= 1);
+        // A read-only dashboard request attaches the operational API after restart.
+        await rpc("workflow.status", {});
+      }
+      flow = await waitFor("placement executor received instruction", async () => state().workflows.find(w => w.id === flow.id && w.execute?.workspaceId && w.status === "needs_input"), 120_000);
+      assert(flow.repositories.length === 0 && flow.isolation === "worktree" && !flow.placement, "placement did not normalize and create worktree");
+      const file = await waitFor("placement executor file", async () => agentFile(flow.execute.id));
+      assert(JSON.parse(readFileSync(file, "utf8")).cwd === flow.worktree.path, "executor cwd differs from worktree");
+      assert(flow.lastInstruction.includes("구현 시작 확인"), "implementation instruction lost");
+      writeFileSync(join(root, `placement-wait-${legacy}.json`), JSON.stringify(flow, null, 2));
+      await rpc("workflow.control", { id: flow.id, action: "pause" });
+    } finally {
+      writeFileSync(control, JSON.stringify({ mode: "text", text: "2" }));
+    }
+  });
+
   const fixtureGit = async (cwd, args) => {
     const result = await run("git", args, { cwd, env });
     assert(result.code === 0, result.stderr);

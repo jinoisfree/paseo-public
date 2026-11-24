@@ -32,20 +32,22 @@ export async function placeExecutor(
   }
   let reason = "";
   const origin = !w.repositories.length && port.createWorktree && probe?.identity
-    ? await probe.identity(w.cwd) : null;
-  if (w.repositories.length) reason = "여러 저장소를 지정한 작업은 따로 작업 공간을 만들 수 없어 기다립니다.";
+    ? await probe.identity(w.cwd).catch(() => null) : null;
+  if (w.repositories.length > 1) reason = "여러 저장소를 지정한 작업은 따로 작업 공간을 만들 수 없어 기다립니다.";
+  else if (w.repositories.length === 1) reason = "작업 폴더와 다른 저장소를 지정한 작업은 따로 작업 공간을 만들 수 없어 기다립니다.";
   else if (!port.createWorktree) reason = "현재 연결은 따로 작업 공간 만들기를 지원하지 않아 기다립니다.";
   else if (!origin) reason = "Git 저장소를 확인할 수 없어 기다립니다.";
   else if (!origin.branch) reason = "현재 Git 브랜치가 없어 기다립니다.";
   else if (origin.root !== await resolvedFolder(w.cwd)) reason = "저장소 안의 하위 폴더에서는 따로 작업 공간을 만들 수 없어 기다립니다.";
-  const decision = reason ? "wait" : choice ?? settings.executorPlacement;
+  const requested = choice ?? settings.executorPlacement;
+  const decision = reason ? "wait" : requested;
   if (decision === "ask") {
-    w.placement = { stage: "choice", number: blocker!.number, title: blocker!.title, reason: "", cardPosted: w.placement?.cardPosted ?? false };
+    w.placement = { stage: "choice", requested, number: blocker!.number, title: blocker!.title, reason: "", cardPosted: w.placement?.cardPosted ?? false };
     return true;
   }
   if (decision === "wait") {
     w.isolation = "shared";
-    w.placement = { stage: "waiting", number: blocker?.number ?? 0, title: blocker?.title ?? "", cardPosted: false, reason };
+    w.placement = { stage: "waiting", requested, number: blocker?.number ?? 0, title: blocker?.title ?? "", cardPosted: false, reason };
     return true;
   }
   const made = await port.createWorktree!(w, origin!.branch, settings.titleMarker);

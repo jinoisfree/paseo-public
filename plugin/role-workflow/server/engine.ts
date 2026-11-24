@@ -57,7 +57,7 @@ import {
   type PushTarget,
 } from "../shared/artifacts";
 import {
-  repositoryPaths,
+  scopeRepositories,
   resolvedPushTargets,
   pushCheckSchema,
   verificationRecordSchema,
@@ -175,6 +175,7 @@ const workflowSchema = z.object({
   /** Decided once, when the first executor is created; a replacement never moves its work. */
   isolation: z.enum(["undecided", "worktree", "shared"]).default("undecided"),
   placement: z.object({
+    requested: z.enum(["worktree", "ask", "wait"]).nullable().default(null),
     stage: z.enum(["choice", "waiting"]), number: z.number(), title: z.string(), reason: z.string(), cardPosted: z.boolean().default(false),
   }).nullable().default(null),
   worktree: z
@@ -1053,7 +1054,7 @@ export class WorkflowEngine {
     return this.serial(async () => {
       const w = (await this.db()).workflows.find((entry) => entry.id === id);
       if (!w) throw new Error("작업을 찾을 수 없습니다.");
-      const roots = await repositoryPaths(this.probe, w.cwd, repositoryPathsSchema.parse(paths));
+      const roots = await scopeRepositories(this.probe, w.cwd, repositoryPathsSchema.parse(paths));
       if (JSON.stringify(roots) !== JSON.stringify(w.repositories)) this.newPushPhase(w);
       this.assignRepositories(w, roots);
       await this.refreshConflicts();
@@ -1390,7 +1391,7 @@ export class WorkflowEngine {
       const targets = decision?.pushTargets ?? prose.pushTargets;
       const next = targets ? await resolvedPushTargets(this.probe, w.cwd, targets) : undefined;
       if (paths) {
-        const roots = await repositoryPaths(this.probe, w.cwd, paths);
+        const roots = await scopeRepositories(this.probe, w.cwd, paths);
         // Reviewers may include an extra checkout they inspected. That read-only scope
         // expansion must not discard the executor's receipt for the exact same targets.
         const preservePush = readOnlyReview && preservesReviewedPush(w, roots, next);
@@ -3508,9 +3509,30 @@ export class WorkflowEngine {
       }
       await this.ensureNumber(w);
       if (role === "execute") {
+        const waiting = w.placement;
+        // Old forced waits are attributable only when a worktree was reserved.
+        const requested = waiting?.requested ?? (w.reservedPlacement === "worktree" ? "worktree" : null);
+        const reevaluate = waiting?.stage === "waiting" && waiting.reason !== "" &&
+          (requested === "worktree" || requested === "ask");
+        if (reevaluate) {
+          try {
+            const roots = await scopeRepositories(this.probe, w.cwd, w.repositories);
+            if (!await this.probe?.identity?.(w.cwd)) return;
+            this.assignRepositories(w, roots);
+          } catch {
+            // A failed Git lookup must retain the saved wait and scope for the next tick.
+            return;
+          }
+          w.isolation = "undecided";
+          w.placement = null;
+        }
         const blocker = w.placement || (w.isolation === "undecided" && capabilities(w).executorSelection && (current.generation === 1 || w.worktreeHistory.length > 0))
           ? await this.placementBlocker(w) : null;
-        if (capabilities(w).planReview && w.reservedPlacement && blocker && w.isolation === "undecided") {
+        if (reevaluate) {
+          const settings = { ...await this.settings(), executorPlacement: requested! };
+          await placeExecutor(w, this.probe, this.port, settings, blocker);
+          await this.save();
+        } else if (capabilities(w).planReview && w.reservedPlacement && blocker && w.isolation === "undecided") {
           if (!(await this.applyPlacement(w, w.reservedPlacement)).ok) return;
         } else if (await placeExecutor(w, this.probe, this.port, await this.settings(), blocker)) await this.save();
         if (w.placement) {
