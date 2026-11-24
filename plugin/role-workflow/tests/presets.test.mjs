@@ -58,4 +58,5 @@ test('U10 one shared recommended profile list keeps both products and explicit m
   assert.equal(template.version,1);assert.equal(template.autoSelect,false);
   assert.equal('role' in template,false);
   assert.deepEqual(template.profiles.map(p=>p.provider),['claude','codex']);
+  assert.equal(template.profiles.find(p=>p.provider==='codex').model,'gpt-6.2-sol');
 });
