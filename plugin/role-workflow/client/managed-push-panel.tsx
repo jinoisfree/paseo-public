@@ -78,11 +78,16 @@ function PushTargets({
             브랜치: {target.branch}
           </Text>
           <Text selectable style={s.text}>
-            커밋: {target.commit}
+            {target.snapshot ? "공개 커밋" : "커밋"}: {target.commit}
           </Text>
+          {target.snapshot && <View style={s.spacing}>
+            <Text selectable style={s.text}>대응 개발 커밋: {target.snapshot.developmentCommit}</Text>
+            <Text selectable style={s.text}>동일 tree 검증: {target.snapshotTree}</Text>
+            <Text style={s.muted}>공개 스냅샷 · 개발 checkout·worktree·증거 유지 · ff-only/자동 정리 없음</Text>
+          </View>}
           {push.state !== "prepared" && (
             <Text style={s.muted}>
-              실행 종료: {target.exitCode ?? "확인 중"} · 원격 반영:{" "}
+              실행 종료: {target.exitCode ?? (target.alreadyIncluded ? "미실행" : "확인 중")} · 원격 반영:{" "}
               {target.alreadyIncluded ? "이미 원격에 포함됨" : remoteResult(target.verified)}
             </Text>
           )}

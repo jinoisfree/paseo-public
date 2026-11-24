@@ -85,12 +85,40 @@ export function worktreeContext(w: Workflow) {
     "기준 브랜치가 앞서 있으면 계획 담당은 구현 담당에게 최신 기준 브랜치를 worktree 브랜치에 merge하고 충돌을 정리한 뒤 전체 시험을 다시 실행하도록 보완 plan을 지시한다. " +
     "계획 담당이 재검증한 커밋을 pushTargets로 쓰며, 충돌에서 두 작업의 의도 판단이 필요하면 구현 담당은 멈추고 보고하고 계획 담당이 사용자에게 input으로 묻는다. " +
     "플러그인은 이 merge를 실행하지 않으며, rebase·force로 이력을 다시 쓰지 않는다. " +
-    "푸시가 끝나면 플러그인이 계획 담당 checkout을 그 커밋으로 빨리 감기(ff-only)한다.\n"
+    "일반 푸시 뒤 planner를 ff-only한다. 명시적 pushTargets의 snapshot:{developmentCommit:<전체 개발 해시>} 대상은 개발 HEAD/기준 포함과 공개 tree/단일 원격 부모를 각각 검증하고 개발 checkout·worktree·증거를 보존한다. 개발 이력과 공개 이력을 임의 병합하지 않는다.\n"
   );
 }
 
 /** Read-only approval gate: local, tracking and actual push-destination tips must be included. */
 export async function checkWorktreeBase(w: Workflow, probe: RepoProbe | null, targets: PushTarget[]) {
+  const snapshots = targets.filter(t => t.snapshot);
+  if (snapshots.length) {
+    const denied = { ok: false, detail: "공개 스냅샷의 개발 HEAD·기준·tree·원격 단일 부모를 확인하지 못했습니다. 새 후보와 승인을 준비하세요.", needsMerge: false };
+    try {
+      if (w.isolation !== "worktree" || w.mode !== "federated" || !w.worktree ||
+        !probe?.identity || !probe.branchTips || !probe.commitInfo || !probe.isAncestor || !probe.remoteTip) return denied;
+      const origin = await probe.identity(w.cwd), placed = await probe.identity(w.worktree.path);
+      if (!origin || !placed || origin.common !== placed.common || placed.branch !== w.worktree.branch) return denied;
+      const baseline = await probe.snapshot(w.worktree.path);
+      if (!baseline || baseline.dirty.length || baseline.incomplete || baseline.repositories?.length || baseline.head !== placed.head) return denied;
+      for (const target of snapshots) {
+        const repository = await probe.identity(target.repository), dev = target.snapshot!.developmentCommit;
+        if (!repository || repository.common !== placed.common || repository.root !== placed.root || placed.head !== dev) return denied;
+        const tips = await probe.branchTips(w.cwd, w.worktree.baseBranch ?? origin.branch, target.remote);
+        const [development, candidate, remote] = await Promise.all([
+          probe.commitInfo(target.repository, dev), probe.commitInfo(target.repository, target.commit), probe.remoteTip(target),
+        ]);
+        if (!tips || !development || !candidate || !remote || dev.length !== target.commit.length ||
+          development.tree !== candidate.tree || candidate.parents.length !== 1 ||
+          await probe.isAncestor(w.cwd, tips.head, dev) !== true ||
+          await probe.isAncestor(target.repository, tips.tracking, target.commit) !== true) return denied;
+        const included = await probe.isAncestor(target.repository, target.commit, remote);
+        if (included !== true && (included !== false || candidate.parents[0] !== remote)) return denied;
+      }
+    } catch { return denied; }
+    if (snapshots.length === targets.length) return { ok: true, detail: "공개 스냅샷 tree·부모 검증 완료. 개발 checkout과 증거를 보존합니다.", needsMerge: false };
+    targets = targets.filter(t => !t.snapshot);
+  }
   if (w.isolation !== "worktree" || w.mode !== "federated") return { ok: true, detail: "", needsMerge: false };
   const unreadable = { ok: false, needsMerge: false, detail: "기준 브랜치를 확인하지 못했습니다. 저장소와 기준 브랜치를 확인한 뒤 푸시 대상을 다시 준비하세요. 기준 브랜치가 원격에 없거나 추적 브랜치가 없으면 기준 브랜치를 원격에 한 번 푸시하거나 upstream을 설정하세요." };
   try {
@@ -131,6 +159,11 @@ export async function checkWorktreeBase(w: Workflow, probe: RepoProbe | null, ta
 /** After a verified push, the planner's checkout follows only as a fast-forward. */
 export async function integrateWorktree(w: Workflow, probe: RepoProbe | null, record: Pick<ManagedPush, "targets">) {
   if (w.isolation !== "worktree" || !w.worktree || !probe?.identity || !probe.fastForward) return;
+  if (record.targets.some(t => t.snapshot)) {
+    w.integration = { commit: record.targets.find(t => t.snapshot)!.snapshot!.developmentCommit, ok: false,
+      detail: "공개 스냅샷 반영 확인. 개발 checkout·브랜치·worktree·증거를 보존하며 ff-only와 자동 정리를 실행하지 않습니다." };
+    return;
+  }
   const origin = await probe.identity(w.cwd);
   const target = record.targets.find((t) => origin && t.branch.replace(/^refs\/heads\//, "") === origin.branch);
   if (!origin || !target) {

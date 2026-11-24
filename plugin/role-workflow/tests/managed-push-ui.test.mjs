@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import path from "node:path";
+import { mkdir } from "node:fs/promises";
 import { build } from "esbuild";
 import { chromium } from "playwright";
 
@@ -121,6 +122,42 @@ createRoot(document.getElementById('root')).render(<Dashboard theme={{colors}} h
       true,
       "missing verdict is nonblocking",
     );
+    // AT-PS-06: exercise the actual approval component at desktop and phone widths.
+    await page.evaluate(() => {
+      const target = window.__state.workflows[0].managedPush.targets[0];
+      window.__state.workflows[0].mode = "federated";
+      target.snapshot = { developmentCommit: "b".repeat(40) };
+      target.snapshotTree = "c".repeat(40);
+    });
+    await panel.getByText(`공개 커밋: ${"a".repeat(40)}`, { exact: true }).waitFor();
+    await panel.getByText(`대응 개발 커밋: ${"b".repeat(40)}`, { exact: true }).waitFor();
+    await panel.getByText(`동일 tree 검증: ${"c".repeat(40)}`, { exact: true }).waitFor();
+    const policy = panel.getByText("공개 스냅샷 · 개발 checkout·worktree·증거 유지 · ff-only/자동 정리 없음", { exact: true });
+    const screenshots = process.env.SNAPSHOT_UI_EVIDENCE;
+    if (screenshots) await mkdir(screenshots, { recursive: true });
+    for (const [label, width] of [["wide", 1280], ["narrow", 390]]) {
+      await page.setViewportSize({ width, height: 1000 });
+      await policy.scrollIntoViewIfNeeded();
+      assert.equal(await policy.isVisible(), true);
+      assert.equal(await panel.getByText(`대응 개발 커밋: ${"b".repeat(40)}`, { exact: true }).isVisible(), true);
+      if (screenshots) await page.screenshot({ path: path.join(screenshots, `approval-${label}.png`), fullPage: true });
+    }
+    await page.evaluate(() => {
+      window.__state.workflows[0].managedPush.state = "failed";
+      window.__state.workflows[0].managedPush.error = "스냅샷 tree 검증 실패. 새 후보와 승인을 준비하세요.";
+    });
+    await panel.getByText("스냅샷 tree 검증 실패. 새 후보와 승인을 준비하세요.", { exact: true }).waitFor();
+    assert.equal(await page.getByTestId("managed-push-execute-task").count(), 0);
+    if (screenshots) await page.screenshot({ path: path.join(screenshots, "approval-narrow-error.png"), fullPage: true });
+    await page.setViewportSize({ width: 1280, height: 1000 });
+    await page.evaluate(() => {
+      window.__state.workflows[0].mode = "general";
+      window.__state.workflows[0].managedPush.state = "prepared";
+      window.__state.workflows[0].managedPush.error = "";
+      delete window.__state.workflows[0].managedPush.targets[0].snapshot;
+      delete window.__state.workflows[0].managedPush.targets[0].snapshotTree;
+    });
+    await panel.getByText(`커밋: ${"a".repeat(40)}`, { exact: true }).waitFor();
     for (const status of ["부분 완료", "미완료", "판정 불일치", "완료"]) {
       await page.evaluate((judgement) => {
         window.__state.workflows[0].verdict = {

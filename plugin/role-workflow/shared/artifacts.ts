@@ -21,6 +21,9 @@ export const pushTargetSchema = z.object({
   remote: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$/),
   branch: z.string().trim().min(1).max(250),
   commit: z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/),
+  snapshot: z.object({
+    developmentCommit: z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/),
+  }).strict().optional(),
 });
 export const pushTargetsSchema = z.array(pushTargetSchema).max(8);
 export type PushTarget = z.infer<typeof pushTargetSchema>;

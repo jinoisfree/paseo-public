@@ -285,8 +285,10 @@ export class ManagedPushRunner {
       throw safeError(
         "Git URL 치환, 원격 URL 전용 설정 또는 저장소 전용 자격 증명·ssh 명령 설정 때문에 고정된 푸시 주소를 확인할 수 없습니다.",
       );
+    const snapshotTree = value.snapshot ? await this.snapshot(value, repository, remoteUrl) : undefined;
     return {
       ...value,
+      ...(snapshotTree ? { snapshotTree } : {}),
       repository,
       branch,
       remoteUrl,
@@ -297,6 +299,26 @@ export class ManagedPushRunner {
       finishedAt: null,
       error: "",
     };
+  }
+
+  private async snapshot(value: PushTarget, repository: string, remoteUrl: string) {
+    const dev = value.snapshot!.developmentCommit;
+    const fail = "공개 스냅샷의 HEAD·tree·단일 원격 부모가 달라졌습니다. 새 요청을 준비하세요.";
+    const head = await this.required(repository, ["rev-parse", "HEAD"], fail);
+    const source = await this.required(repository, ["show", "-s", "--format=%T", `${dev}^{commit}`], fail);
+    const [tree, ...parents] = (await this.required(repository, ["show", "-s", "--format=%T %P", `${value.commit}^{commit}`], fail)).split(/\s+/);
+    const dirty = await this.required(repository, ["-c", "core.fsmonitor=false", "status", "--porcelain"], fail);
+    if (dirty || head !== dev || source !== tree || dev.length !== value.commit.length || parents.length !== 1) throw safeError(fail);
+    const ref = `refs/heads/${value.branch.replace(/^refs\/heads\//, "")}`;
+    const advertised = await this.required(repository, [...GIT_REMOTE_READ_OPTIONS, "ls-remote", "--exit-code", "--", remoteUrl, ref], fail);
+    const rows = advertised.split(/\r?\n/).map(row => row.split(/\s+/)).filter(row => row[1] === ref);
+    if (rows.length !== 1 || !hashPattern.test(rows[0][0])) throw safeError(fail);
+    const remote = rows[0][0];
+    if (remote !== parents[0]) {
+      const included = await this.git(repository, ["merge-base", "--is-ancestor", value.commit, remote]);
+      if (included.exitCode !== 0) throw safeError(fail);
+    }
+    return tree;
   }
 
   async prepare(workflowId: string, epoch: number, targets: PushTarget[]): Promise<ManagedPush> {
@@ -445,7 +467,7 @@ export class ManagedPushRunner {
 
   private async current(target: Target) {
     const checked = await this.target(target);
-    if (checked.repository !== target.repository || checked.remoteUrl !== target.remoteUrl)
+    if (checked.repository !== target.repository || checked.remoteUrl !== target.remoteUrl || checked.snapshotTree !== target.snapshotTree)
       throw safeError(
         "승인 대기 중 저장소 또는 원격 주소가 변경되었습니다. 새 푸시 요청을 준비하세요.",
       );
@@ -485,6 +507,13 @@ export class ManagedPushRunner {
 
   private async push(record: ManagedPush, target: Target, index: number) {
     await this.current(target);
+    if (target.snapshot && await this.verify(target) === true) {
+      target.alreadyIncluded = true;
+      target.verified = true;
+      target.finishedAt = now();
+      await this.save(record);
+      return true; // Read-only settlement; exitCode stays null because no write was executed.
+    }
     record.state = "running";
     target.startedAt = now();
     await this.save(record);

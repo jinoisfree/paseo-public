@@ -108,7 +108,9 @@ export class ManagedPushes {
     if (!notify) return;
     const approval = detail === REMOTE_ADVANCED_ERROR
       ? "푸시 거절 뒤 합치기는 사용자 결정을 먼저 받아야 합니다. 승인되면 다음 절차를 진행하세요.\n" : "";
-    const instruction = w.isolation === "worktree" && w.mode === "federated"
+    const instruction = targets.some(t => t.snapshot)
+      ? `${detail}\n공개 스냅샷의 원격·tree·개발 커밋을 다시 검토해 새 후보와 승인을 준비하세요. 개발 이력을 공개 이력에 merge/rebase하거나 일반 모드로 바꾸어 우회하지 마세요.`
+      : w.isolation === "worktree" && w.mode === "federated"
       ? `${detail}\n${approval}구현 담당에게 최신 기준 브랜치를 worktree 브랜치에 merge하고 충돌을 정리한 뒤 전체 시험을 다시 실행하도록 보완 plan을 지시하세요. 결과를 재검증한 커밋으로 pushTargets를 갱신하세요. 두 작업의 의도 판단이 필요한 충돌은 사용자에게 input으로 묻고, rebase·force로 이력을 다시 쓰지 마세요. 플러그인은 merge를 실행하지 않습니다.`
       : REMOTE_ADVANCED_NOTICE;
     await this.host.port().send(w.plan!.id, `작업 ID: ${w.id}\n${instruction}`,
@@ -210,11 +212,12 @@ export class ManagedPushes {
   }
   async managedCompleted(w: Workflow, record: ManagedPush) {
     this.host.setPushUnverified(w, false);
-    w.pushTargets = record.targets.map(({ repository, remote, branch, commit }) => ({
+    w.pushTargets = record.targets.map(({ repository, remote, branch, commit, snapshot }) => ({
       repository,
       remote,
       branch,
       commit,
+      ...(snapshot ? { snapshot } : {}),
     }));
     w.invalidTargets = false;
     w.pushCheck = {
@@ -222,7 +225,8 @@ export class ManagedPushes {
       targets: w.pushTargets.map((target) => ({ ...target, result: "pushed" as const })),
     };
     w.progress = "pushed";
-    w.artifactNotice = "";
+    w.artifactNotice = record.targets.some(t => t.snapshot)
+      ? "공개 스냅샷 반영 확인. 개발 checkout·worktree·증거를 보존합니다." : "";
     await integrateWorktree(w, this.host.probe(), record);
     await this.host.cleanupWorktree(w);
     await this.host.queuePushReview(w);

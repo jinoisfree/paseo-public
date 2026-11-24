@@ -7,6 +7,8 @@ export function gitEnvironment(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     GIT_OPTIONAL_LOCKS: "0",
+    // Approval binds the real commit graph/tree, never agent-written refs/replace.
+    GIT_NO_REPLACE_OBJECTS: "1",
     GIT_TERMINAL_PROMPT: "0",
   };
   for (const key of Object.keys(env)) {

@@ -1,3 +1,4 @@
+import type { PushTarget } from "../shared/artifacts";
 import type { ArchiveCandidate } from "../shared/contracts";
 
 export interface ArchiveConversation {
@@ -32,7 +33,9 @@ export interface ArchiveFlow {
   progress: string;
   status: string;
   isolation?: string;
-  worktreeCleanup?: { stage: string } | null;
+  pushTargets?: PushTarget[];
+  managedPush?: { targets: PushTarget[] } | null;
+  worktreeCleanup?: { stage: string; preserveSnapshot?: boolean } | null;
   plan: { id: string; workspaceId: string | null; compaction?: string | null } | null;
   reviewer?: { id: string; workspaceId: string | null; compaction?: string | null } | null;
   execute: { id: string; workspaceId: string | null; compaction?: string | null } | null;
@@ -71,7 +74,9 @@ export function archiveMembersPresent(
   return members.every(member => conversations.some(a => a.id === member.id && a.workspaceId === member.workspaceId));
 }
 
-export function archiveBlockReason(w: Pick<ArchiveFlow, "isolation" | "worktreeCleanup" | "progress">): string | null {
+export function archiveBlockReason(w: Pick<ArchiveFlow, "isolation" | "worktreeCleanup" | "progress" | "pushTargets" | "managedPush">): string | null {
+  if (w.worktreeCleanup?.preserveSnapshot || w.pushTargets?.some(t => t.snapshot) || w.managedPush?.targets.some(t => t.snapshot))
+    return "공개 스냅샷의 개발 checkout·worktree·증거는 보존합니다. 자동/일괄 보관하지 않습니다.";
   if (w.isolation !== "worktree" || w.worktreeCleanup?.stage === "done") return null;
   return w.progress === "done" || w.progress === "no_push"
     ? "푸시 전 작업의 따로 작업 공간은 자동 정리하지 않습니다. 필요하면 커밋을 확인한 뒤 Paseo에서 직접 보관하세요(무시된 파일과 커밋하지 않은 파일은 지워집니다)."

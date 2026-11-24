@@ -40,6 +40,8 @@ export interface RepoProbe {
   remoteTip?(target: PushTarget): Promise<string | null>;
   /** null distinguishes an unreadable commit/graph from a known non-ancestor. */
   isAncestor?(cwd: string, ancestor: string, commit: string): Promise<boolean | null>;
+  /** Immutable commit tree/parents; null on missing objects or invalid object format. */
+  commitInfo?(cwd: string, commit: string): Promise<{ tree: string; parents: string[] } | null>;
   /** Extra read-only hazards before deleting a worktree directory. null means unreadable. */
   cleanupHazards?(cwd: string, integrated: string): Promise<string[] | null>;
   /** Moves the checked-out branch to `commit` only as a fast-forward. Never merges or resets. */
@@ -250,6 +252,15 @@ export function createRepoProbe(run: typeof git = git): RepoProbe {
       } catch {
         return null;
       }
+    },
+    async commitInfo(cwd, commit) {
+      const hash = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/;
+      if (!hash.test(commit)) return null;
+      try {
+        const [tree, ...parents] = (await run(cwd, ["show", "-s", "--format=%T %P", `${commit}^{commit}`])).trim().split(/\s+/);
+        return [tree, ...parents].every(value => hash.test(value) && value.length === commit.length)
+          ? { tree, parents } : null;
+      } catch { return null; }
     },
     async isAncestor(cwd, ancestor, commit) {
       if (![ancestor, commit].every(hash => /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(hash))) return null;

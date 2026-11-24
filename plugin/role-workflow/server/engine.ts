@@ -184,6 +184,7 @@ const workflowSchema = z.object({
     .default(null),
   worktreeHistory: z.array(z.object({ path: z.string(), branch: z.string(), base: z.string(), baseBranch: z.string().optional(), workspaceId: z.string() })).default([]),
   worktreeCleanup: z.object({
+    preserveSnapshot: z.boolean().optional(),
     stage: z.enum(["pending", "done", "skipped", "failed"]), attempts: z.number().int().nonnegative(),
     detail: z.string(), at: z.string(), evidenceFiles: z.number().int().nonnegative().nullable().default(null),
     permanentSince: z.number().nonnegative().nullable().default(null), permanentError: z.string().default(""), permanentErrors: z.number().int().nonnegative().default(0),

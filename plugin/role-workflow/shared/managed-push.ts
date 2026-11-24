@@ -12,12 +12,16 @@ export const managedPushStateSchema = z.enum([
 ]);
 export const managedPushTargetSchema = pushTargetSchema.extend({
   remoteUrl: z.string(),
+  snapshotTree: z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/).optional(),
   exitCode: z.number().int().nullable().default(null),
   verified: z.boolean().nullable().default(null),
   alreadyIncluded: z.boolean().default(false),
   startedAt: z.string().nullable().default(null),
   finishedAt: z.string().nullable().default(null),
   error: z.string().default(""),
+}).superRefine((target, ctx) => {
+  if (!!target.snapshot !== !!target.snapshotTree)
+    ctx.addIssue({ code: "custom", message: "스냅샷 검증 기록이 불완전합니다. 새 요청을 준비하세요." });
 });
 export const managedPushSchema = z.object({
   id: z.string().uuid(),
