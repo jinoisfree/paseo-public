@@ -5,6 +5,7 @@ import type { RepoProbe } from "./git";
 import type { ManagedPushRunner } from "./managed-push";
 import { REMOTE_ADVANCED_ERROR, REMOTE_ADVANCED_NOTICE } from "./managed-push";
 import { pushReviewKey } from "./push-review";
+import { parseDecision } from "./protocol";
 import { checkWorktreeBase, integrateWorktree } from "./worktree";
 
 /** What the approved (managed) push needs from the engine. State maps stay owned by the engine. */
@@ -45,7 +46,14 @@ export class ManagedPushes {
     return w;
   }
   async pushReady(w: Workflow) {
-    if (w.mode === "undecided" || w.generalTransition || w.pending || w.inbox)
+    // A paused planner may already have published the exact approval request. Keep its
+    // inbox for history; explicit prepare/approve must not restart implementation to read it.
+    const inbox = w.inbox;
+    const decision = inbox && inbox.agentId === w.plan?.id && inbox.failed === null &&
+      !inbox.canceled && !inbox.compacted && !inbox.answers ? parseDecision(inbox.text) : null;
+    const approvalRequest = w.progress === "done" && decision?.status === "input" &&
+      !!decision.pushTargets?.length && pushReviewKey(decision.pushTargets) === pushReviewKey(w.pushTargets);
+    if (w.mode === "undecided" || w.generalTransition || w.pending || (inbox && !approvalRequest))
       throw new Error("현재 작업 전달이 끝난 뒤 푸시 대상을 확인하세요.");
     for (const member of [w.plan, w.execute, w.reviewer]) {
       if (!member) continue;

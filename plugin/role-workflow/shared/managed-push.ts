@@ -20,6 +20,8 @@ export const managedPushTargetSchema = pushTargetSchema.extend({
   finishedAt: z.string().nullable().default(null),
   error: z.string().default(""),
 }).superRefine((target, ctx) => {
+  if (target.snapshot && target.publicIntegration)
+    ctx.addIssue({ code: "custom", message: "공개 모드를 함께 지정할 수 없습니다." });
   if (!!target.snapshot !== !!target.snapshotTree)
     ctx.addIssue({ code: "custom", message: "스냅샷 검증 기록이 불완전합니다. 새 요청을 준비하세요." });
 });

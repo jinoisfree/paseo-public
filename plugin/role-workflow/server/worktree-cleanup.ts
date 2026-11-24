@@ -123,9 +123,9 @@ export class WorktreeCleanup {
     return true;
   }
   private async preserveSnapshot(w: Workflow): Promise<boolean> {
-    if (!w.worktreeCleanup?.preserveSnapshot && !w.pushTargets.some(t => t.snapshot) && !w.managedPush?.targets.some(t => t.snapshot)) return false;
+    if (!w.worktreeCleanup?.preserveSnapshot && !w.pushTargets.some(t => t.snapshot || t.publicIntegration) && !w.managedPush?.targets.some(t => t.snapshot || t.publicIntegration)) return false;
     w.worktreeCleanup = { preserveSnapshot: true, stage: "skipped", attempts: 0,
-      detail: "공개 스냅샷 보존 정책에 따라 개발 worktree·증거의 자동 정리/보관을 건너뜁니다. 수동 보관된 자료의 보존 여부는 확인하지 않습니다.",
+      detail: "공개 이력 분리 보존 정책에 따라 개발 worktree·증거의 자동 정리/보관을 건너뜁니다. 수동 보관된 자료의 보존 여부는 확인하지 않습니다.",
       at: new Date(this.host.now()).toISOString(), evidenceFiles: null, permanentSince: null, permanentError: "", permanentErrors: 0 };
     this.host.touch(w, w.worktreeCleanup.detail);
     await this.host.save();

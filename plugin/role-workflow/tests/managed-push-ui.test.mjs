@@ -158,6 +158,19 @@ createRoot(document.getElementById('root')).render(<Dashboard theme={{colors}} h
       delete window.__state.workflows[0].managedPush.targets[0].snapshotTree;
     });
     await panel.getByText(`커밋: ${"a".repeat(40)}`, { exact: true }).waitFor();
+    await page.evaluate(() => {
+      window.__state.workflows[0].managedPush.targets[0].publicIntegration = {
+        developmentCommit: "d".repeat(40), publicBase: "e".repeat(40),
+      };
+    });
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 1000 });
+      await panel.getByText(`공개 기준 커밋: ${"e".repeat(40)}`, { exact: true }).waitFor();
+      await panel.getByText(`대응 개발 커밋: ${"d".repeat(40)}`, { exact: true }).waitFor();
+      await panel.getByText("공개판에 검토한 변경만 통합 · 개발 tree와 다름 · 개발 checkout·worktree·증거 유지 · ff-only/자동 정리 없음", { exact: true }).waitFor();
+    }
+    await page.evaluate(() => { delete window.__state.workflows[0].managedPush.targets[0].publicIntegration; });
+    await page.setViewportSize({ width: 1280, height: 1000 });
     for (const status of ["부분 완료", "미완료", "판정 불일치", "완료"]) {
       await page.evaluate((judgement) => {
         window.__state.workflows[0].verdict = {

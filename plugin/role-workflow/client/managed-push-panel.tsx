@@ -78,8 +78,13 @@ function PushTargets({
             브랜치: {target.branch}
           </Text>
           <Text selectable style={s.text}>
-            {target.snapshot ? "공개 커밋" : "커밋"}: {target.commit}
+            {target.snapshot || target.publicIntegration ? "공개 커밋" : "커밋"}: {target.commit}
           </Text>
+          {target.publicIntegration && <View style={s.spacing}>
+            <Text selectable style={s.text}>대응 개발 커밋: {target.publicIntegration.developmentCommit}</Text>
+            <Text selectable style={s.text}>공개 기준 커밋: {target.publicIntegration.publicBase}</Text>
+            <Text style={s.muted}>공개판에 검토한 변경만 통합 · 개발 tree와 다름 · 개발 checkout·worktree·증거 유지 · ff-only/자동 정리 없음</Text>
+          </View>}
           {target.snapshot && <View style={s.spacing}>
             <Text selectable style={s.text}>대응 개발 커밋: {target.snapshot.developmentCommit}</Text>
             <Text selectable style={s.text}>동일 tree 검증: {target.snapshotTree}</Text>

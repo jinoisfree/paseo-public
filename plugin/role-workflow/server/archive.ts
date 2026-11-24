@@ -75,7 +75,7 @@ export function archiveMembersPresent(
 }
 
 export function archiveBlockReason(w: Pick<ArchiveFlow, "isolation" | "worktreeCleanup" | "progress" | "pushTargets" | "managedPush">): string | null {
-  if (w.worktreeCleanup?.preserveSnapshot || w.pushTargets?.some(t => t.snapshot) || w.managedPush?.targets.some(t => t.snapshot))
+  if (w.worktreeCleanup?.preserveSnapshot || w.pushTargets?.some(t => t.snapshot || t.publicIntegration) || w.managedPush?.targets.some(t => t.snapshot || t.publicIntegration))
     return "공개 스냅샷의 개발 checkout·worktree·증거는 보존합니다. 자동/일괄 보관하지 않습니다.";
   if (w.isolation !== "worktree" || w.worktreeCleanup?.stage === "done") return null;
   return w.progress === "done" || w.progress === "no_push"

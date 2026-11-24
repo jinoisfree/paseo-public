@@ -91,6 +91,35 @@ export function worktreeContext(w: Workflow) {
 
 /** Read-only approval gate: local, tracking and actual push-destination tips must be included. */
 export async function checkWorktreeBase(w: Workflow, probe: RepoProbe | null, targets: PushTarget[]) {
+  const integrations = targets.filter(t => t.publicIntegration);
+  if (integrations.length) {
+    const denied = { ok: false, detail: "공개 통합의 개발 HEAD·기준·공개 HEAD·원격 기준을 확인하지 못했습니다. 새 후보를 검토하세요.", needsMerge: false };
+    try {
+      if (w.isolation !== "worktree" || w.mode !== "federated" || !w.worktree ||
+        !probe?.identity || !probe.branchTips || !probe.isAncestor || !probe.remoteTip) return denied;
+      const origin = await probe.identity(w.cwd), placed = await probe.identity(w.worktree.path);
+      const development = await probe.snapshot(w.worktree.path);
+      if (!origin || !placed || origin.common !== placed.common || placed.branch !== w.worktree.branch ||
+        !development || development.head !== placed.head || development.dirty.length || development.incomplete || development.repositories?.length) return denied;
+      for (const target of integrations) {
+        if (target.snapshot) return denied;
+        const integration = target.publicIntegration!;
+        const repository = await probe.identity(target.repository), baseline = await probe.snapshot(target.repository);
+        const tips = await probe.branchTips(w.cwd, w.worktree.baseBranch ?? origin.branch, target.remote);
+        if (!repository || repository.common !== placed.common || repository.root === placed.root ||
+          repository.head !== target.commit || placed.head !== integration.developmentCommit ||
+          !baseline || baseline.head !== repository.head || baseline.dirty.length || baseline.incomplete || baseline.repositories?.length || !tips ||
+          await probe.isAncestor(w.cwd, tips.head, placed.head) !== true ||
+          await probe.isAncestor(target.repository, tips.tracking, target.commit) !== true ||
+          await probe.isAncestor(target.repository, integration.publicBase, target.commit) !== true) return denied;
+        const remote = await probe.remoteTip(target);
+        if (!remote || (remote !== integration.publicBase &&
+          await probe.isAncestor(target.repository, target.commit, remote) !== true)) return denied;
+      }
+    } catch { return denied; }
+    if (integrations.length === targets.length) return { ok: true, detail: "공개 통합 기준 검증 완료. 개발 checkout과 증거를 보존합니다.", needsMerge: false };
+    targets = targets.filter(t => !t.publicIntegration);
+  }
   const snapshots = targets.filter(t => t.snapshot);
   if (snapshots.length) {
     const denied = { ok: false, detail: "공개 스냅샷의 개발 HEAD·기준·tree·원격 단일 부모를 확인하지 못했습니다. 새 후보와 승인을 준비하세요.", needsMerge: false };
@@ -159,6 +188,11 @@ export async function checkWorktreeBase(w: Workflow, probe: RepoProbe | null, ta
 /** After a verified push, the planner's checkout follows only as a fast-forward. */
 export async function integrateWorktree(w: Workflow, probe: RepoProbe | null, record: Pick<ManagedPush, "targets">) {
   if (w.isolation !== "worktree" || !w.worktree || !probe?.identity || !probe.fastForward) return;
+  if (record.targets.some(t => t.publicIntegration)) {
+    w.integration = { commit: record.targets.find(t => t.publicIntegration)!.publicIntegration!.developmentCommit, ok: false,
+      detail: "공개 통합 반영 확인. 개발 checkout·브랜치·worktree·증거를 보존하며 ff-only와 자동 정리를 실행하지 않습니다." };
+    return;
+  }
   if (record.targets.some(t => t.snapshot)) {
     w.integration = { commit: record.targets.find(t => t.snapshot)!.snapshot!.developmentCommit, ok: false,
       detail: "공개 스냅샷 반영 확인. 개발 checkout·브랜치·worktree·증거를 보존하며 ff-only와 자동 정리를 실행하지 않습니다." };

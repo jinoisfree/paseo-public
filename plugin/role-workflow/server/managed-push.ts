@@ -285,6 +285,8 @@ export class ManagedPushRunner {
       throw safeError(
         "Git URL 치환, 원격 URL 전용 설정 또는 저장소 전용 자격 증명·ssh 명령 설정 때문에 고정된 푸시 주소를 확인할 수 없습니다.",
       );
+    if (value.snapshot && value.publicIntegration) throw safeError("공개 모드를 함께 지정할 수 없습니다.");
+    if (value.publicIntegration) await this.publicIntegration(value, repository, remoteUrl);
     const snapshotTree = value.snapshot ? await this.snapshot(value, repository, remoteUrl) : undefined;
     return {
       ...value,
@@ -299,6 +301,19 @@ export class ManagedPushRunner {
       finishedAt: null,
       error: "",
     };
+  }
+
+  private async publicIntegration(value: PushTarget, repository: string, remoteUrl: string) {
+    const fail = "공개 통합의 HEAD·작업 트리·원격 기준이 달라졌습니다. 새 요청을 준비하세요.";
+    const head = await this.required(repository, ["rev-parse", "HEAD"], fail);
+    const dirty = await this.required(repository, ["-c", "core.fsmonitor=false", "status", "--porcelain"], fail);
+    const base = value.publicIntegration!.publicBase;
+    if (dirty || head !== value.commit || (await this.git(repository, ["merge-base", "--is-ancestor", base, value.commit])).exitCode !== 0) throw safeError(fail);
+    const ref = `refs/heads/${value.branch.replace(/^refs\/heads\//, "")}`;
+    const advertised = await this.required(repository, [...GIT_REMOTE_READ_OPTIONS, "ls-remote", "--exit-code", "--", remoteUrl, ref], fail);
+    const rows = advertised.split(/\r?\n/).map(row => row.split(/\s+/)).filter(row => row[1] === ref);
+    if (rows.length !== 1 || !hashPattern.test(rows[0][0])) throw safeError(fail);
+    if (rows[0][0] !== base && (await this.git(repository, ["merge-base", "--is-ancestor", value.commit, rows[0][0]])).exitCode !== 0) throw safeError(fail);
   }
 
   private async snapshot(value: PushTarget, repository: string, remoteUrl: string) {
@@ -507,7 +522,7 @@ export class ManagedPushRunner {
 
   private async push(record: ManagedPush, target: Target, index: number) {
     await this.current(target);
-    if (target.snapshot && await this.verify(target) === true) {
+    if ((target.snapshot || target.publicIntegration) && await this.verify(target) === true) {
       target.alreadyIncluded = true;
       target.verified = true;
       target.finishedAt = now();

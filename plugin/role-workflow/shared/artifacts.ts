@@ -21,11 +21,18 @@ export const pushTargetSchema = z.object({
   remote: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$/),
   branch: z.string().trim().min(1).max(250),
   commit: z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/),
+  publicIntegration: z.object({
+    developmentCommit: z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/),
+    publicBase: z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/),
+  }).strict().optional(),
   snapshot: z.object({
     developmentCommit: z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/),
   }).strict().optional(),
 });
-export const pushTargetsSchema = z.array(pushTargetSchema).max(8);
+export const pushTargetsSchema = z.array(pushTargetSchema).max(8).refine(
+  targets => targets.every(t => !(t.snapshot && t.publicIntegration)),
+  "공개 스냅샷과 공개 통합은 함께 지정할 수 없습니다.",
+);
 export type PushTarget = z.infer<typeof pushTargetSchema>;
 export const verificationSchema = z.object({
   command: z.string().min(1).max(4000),

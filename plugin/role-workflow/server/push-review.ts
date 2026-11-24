@@ -22,7 +22,7 @@ export interface PushReviewPort {
 
 export function pushReviewKey(targets: readonly PushTarget[]) {
   return createHash("sha256")
-    .update(JSON.stringify(targets.map((t) => [t.repository, t.remote, t.branch, t.commit, ...(t.snapshot ? [t.snapshot.developmentCommit] : [])]).sort()))
+    .update(JSON.stringify(targets.map((t) => [t.repository, t.remote, t.branch, t.commit, ...(t.snapshot ? [t.snapshot.developmentCommit] : []), ...(t.publicIntegration ? ["public-integration", t.publicIntegration.developmentCommit, t.publicIntegration.publicBase] : [])]).sort()))
     .digest("hex");
 }
 
