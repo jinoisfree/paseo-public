@@ -2,7 +2,7 @@ import { gitTestEnvironment } from "./git-test-environment.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -21,7 +21,7 @@ const block = (status, extra = {}) =>
   `<paseo-workflow>${JSON.stringify({ status, summary: status, next: "구현 지시", handoff: "인계", checks: [], ...extra })}</paseo-workflow>`;
 const ALL = [{ id: "high", label: "High", isDefault: true }];
 
-async function fixture(t, { placement = "worktree", overlap = true, foreign = false, unavailable = "", driver } = {}) {
+async function fixture(t, { placement = "worktree", overlap = true, foreign = false, unavailable = "", driver, cwdKind = "root" } = {}) {
   const dir = await realpath(await mkdtemp(path.join(tmpdir(), "worktree-engine-")));
   const repo = path.join(dir, "repo");
   await run("git", ["init", "-q", "-b", "main", repo]);
@@ -30,10 +30,12 @@ async function fixture(t, { placement = "worktree", overlap = true, foreign = fa
   const other = path.join(dir, "other");
   await run("git", ["init", "-q", "-b", "main", other]);
   await git(other, "commit", "-q", "--allow-empty", "-m", "unrelated");
+  const cwd = cwdKind === "non-git" ? dir : cwdKind === "subfolder" ? path.join(repo, "sub") : repo;
+  if (cwdKind === "subfolder") await mkdir(cwd);
   const file = path.join(dir, "state.json");
   const original = { provider: "codex/planner", thinkingOptionId: "medium", modeId: "full-access" };
   const agents = new Map([
-    ["A", { id: "A", workspaceId: "ws", projectId: "project", cwd: repo, title: "Task", status: "idle", archived: false, permission: false, usage: 0, config: original }],
+    ["A", { id: "A", workspaceId: "ws", projectId: "project", cwd, title: "Task", status: "idle", archived: false, permission: false, usage: 0, config: original }],
   ]);
   const created = [], sent = [], worktrees = [], cards = [], histories = new Map();
   const port = {
@@ -57,7 +59,7 @@ async function fixture(t, { placement = "worktree", overlap = true, foreign = fa
     },
     create: async (w, role, m) => {
       created.push(structuredClone({ w, role, m }));
-      agents.set(m.id, { ...agents.get("A"), id: m.id, workspaceId: w.isolation === "worktree" ? w.worktree.workspaceId : "ws", status: "idle", config: m.config, cwd: w.isolation === "worktree" ? w.worktree.path : repo });
+      agents.set(m.id, { ...agents.get("A"), id: m.id, workspaceId: w.isolation === "worktree" ? w.worktree.workspaceId : "ws", status: "idle", config: m.config, cwd: w.isolation === "worktree" ? w.worktree.path : w.cwd });
       return w.isolation === "worktree" ? w.worktree.workspaceId : "ws";
     },
     send: async (id, prompt, messageId) => {
@@ -112,7 +114,7 @@ async function fixture(t, { placement = "worktree", overlap = true, foreign = fa
     await finish("A", "plan", { next: "기능 구현" });
     return engine.selectExecutor(id, { provider: "codex", model: "builder", thinking: "high" });
   };
-  return { dir, repo, other, base, id, file, port, get engine() { return engine; }, probe, agents, blocker, addBlocker, cards, created, sent, worktrees, state, finish, start,
+  return { dir, cwd, repo, other, base, id, file, port, get engine() { return engine; }, probe, agents, blocker, addBlocker, cards, created, sent, worktrees, state, finish, start,
     restart: async () => { await engine.close(); engine = makeEngine(); await engine.tick(); },
   };
 }
@@ -923,4 +925,65 @@ test("PLACE-WAIT AT-6/R4: active progress still invalidates equivalent-scope pus
   w.pushReceipt = { key: "receipt", agentId: "A", turnKey: "turn", calls: ["call"] };
   await f.finish("A", "note", { repositories: [f.repo] }, "작업상태: 진행\n");
   assert.equal(w.pushReceipt, null);
+});
+
+
+for (const placement of ["ask", "worktree"]) for (const failure of ["non-git", "identity-throw", "identity-unsupported", "probe-unsupported", "repository-throw"])
+test(`PLACE-WAIT V-1: ${placement}/${failure} releases shared work when overlap ends`, async t => {
+  const f = await fixture(t, { placement, cwdKind: failure === "non-git" ? "non-git" : "root", unavailable: "non-git" });
+  await f.start();
+  const w = f.engine.database.workflows[0];
+  if (failure === "repository-throw") {
+    w.repositories = [f.repo];
+    f.probe.repository = async () => { throw new Error("repository unavailable"); };
+    f.probe.identity = createRepoProbe().identity;
+  } else if (failure === "identity-throw") f.probe.identity = async () => { throw new Error("identity unavailable"); };
+  else if (failure === "identity-unsupported") delete f.probe.identity;
+  else if (failure === "probe-unsupported") f.engine.probe = null;
+  else f.probe.identity = createRepoProbe().identity;
+  const before = structuredClone({ placement: w.placement, isolation: w.isolation, repositories: w.repositories });
+  await f.engine.tick();
+  assert.deepEqual({ placement: w.placement, isolation: w.isolation, repositories: w.repositories }, before);
+  assert.ok(w.detail.includes(before.placement.reason));
+  assert.notEqual(w.status, "error");
+  assert.equal(f.created.length, 0);
+  f.blocker.progress = "done";
+  await f.engine.tick();
+  await f.engine.tick();
+  assert.equal(w.isolation, "shared");
+  assert.equal(w.placement, null);
+  assert.deepEqual(w.repositories, before.repositories);
+  assert.equal(f.created.length, 1);
+  assert.equal(f.worktrees.length, 0);
+  assert.equal(w.pending.stage, "sent");
+  assert.equal(f.sent.filter(s => s.id === w.execute.id).length, 1);
+});
+
+for (const source of ["rpc", "block"]) for (const cwdKind of ["non-git", "subfolder"])
+test(`PLACE-WAIT V-2/V-3: ${source} preserves explicit repository from ${cwdKind} cwd`, async t => {
+  const f = await fixture(t, { cwdKind, overlap: false });
+  if (source === "rpc") assert.deepEqual(await f.engine.setRepositories(f.id, [f.repo]), { repositories: [f.repo] });
+  else await f.finish("A", "note", { repositories: [f.repo] });
+  const w = await f.state();
+  assert.deepEqual(w.repositories, [f.repo]);
+  assert.notEqual(w.status, "error");
+  assert.doesNotMatch(w.artifactNotice, /확인할 수 없/);
+});
+
+for (const source of ["rpc", "block"]) test(`PLACE-WAIT V-2: ${source} preserves roots when only cwd lookup throws`, async t => {
+  const f = await fixture(t, { overlap: false });
+  const repository = f.probe.repository;
+  f.probe.repository = async cwd => {
+    if (cwd === f.cwd) throw new Error("cwd lookup unavailable");
+    return repository(cwd);
+  };
+  if (source === "rpc") assert.deepEqual(await f.engine.setRepositories(f.id, [f.other]), { repositories: [f.other] });
+  else await f.finish("A", "note", { repositories: [f.other] });
+  assert.deepEqual((await f.state()).repositories, [f.other]);
+});
+
+test("PLACE-WAIT V-2: invalid input repository still rejects without changing scope", async t => {
+  const f = await fixture(t, { overlap: false });
+  await assert.rejects(f.engine.setRepositories(f.id, [f.dir]), /Git 저장소를 확인할 수 없습니다/);
+  assert.deepEqual((await f.state()).repositories, []);
 });

@@ -3512,19 +3512,21 @@ export class WorkflowEngine {
         const waiting = w.placement;
         // Old forced waits are attributable only when a worktree was reserved.
         const requested = waiting?.requested ?? (w.reservedPlacement === "worktree" ? "worktree" : null);
-        const reevaluate = waiting?.stage === "waiting" && waiting.reason !== "" &&
+        let reevaluate = waiting?.stage === "waiting" && waiting.reason !== "" &&
           (requested === "worktree" || requested === "ask");
         if (reevaluate) {
           try {
             const roots = await scopeRepositories(this.probe, w.cwd, w.repositories);
-            if (!await this.probe?.identity?.(w.cwd)) return;
-            this.assignRepositories(w, roots);
+            if (await this.probe?.identity?.(w.cwd)) this.assignRepositories(w, roots);
+            else reevaluate = false;
           } catch {
-            // A failed Git lookup must retain the saved wait and scope for the next tick.
-            return;
+            // Keep the saved placement, but still let an ended blocker release shared work.
+            reevaluate = false;
           }
-          w.isolation = "undecided";
-          w.placement = null;
+          if (reevaluate) {
+            w.isolation = "undecided";
+            w.placement = null;
+          }
         }
         const blocker = w.placement || (w.isolation === "undecided" && capabilities(w).executorSelection && (current.generation === 1 || w.worktreeHistory.length > 0))
           ? await this.placementBlocker(w) : null;

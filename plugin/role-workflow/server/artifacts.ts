@@ -41,9 +41,10 @@ export async function scopeRepositories(
 ) {
   const roots = await repositoryPaths(probe, cwd, paths);
   if (roots.length !== 1) return roots;
-  const root = await probe!.repository!(cwd);
-  if (!root) throw new Error("작업 폴더의 Git 저장소를 확인할 수 없습니다.");
-  return await resolvedFolder(roots[0]) === await resolvedFolder(root) ? [] : roots;
+  const root = await probe!.repository!(cwd).catch(() => null);
+  if (!root) return roots;
+  const folder = await resolvedFolder(cwd);
+  return folder === await resolvedFolder(root) && folder === await resolvedFolder(roots[0]) ? [] : roots;
 }
 
 export async function resolvedPushTargets(
