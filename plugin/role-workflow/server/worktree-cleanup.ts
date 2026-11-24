@@ -32,13 +32,7 @@ export class WorktreeCleanup {
   constructor(private readonly host: WorktreeCleanupHost) {}
   async run(w: Workflow): Promise<void> {
     if (w.mode !== "federated" || w.isolation !== "worktree" || !w.worktree) return;
-    if (w.worktreeCleanup?.preserveSnapshot || w.pushTargets.some(t => t.snapshot) || w.managedPush?.targets.some(t => t.snapshot)) {
-      w.worktreeCleanup = { preserveSnapshot: true, stage: "skipped", attempts: 0, detail: "공개 스냅샷: 개발 worktree와 증거를 보존하며 자동 정리를 건너뜁니다.",
-        at: new Date(this.host.now()).toISOString(), evidenceFiles: null, permanentSince: null, permanentError: "", permanentErrors: 0 };
-      this.host.touch(w, w.worktreeCleanup.detail);
-      await this.host.save();
-      return;
-    }
+    if (await this.preserveSnapshot(w)) return;
     if (isFinished(w) && await this.manuallyArchived(w)) return;
     if (w.progress !== "pushed") return;
     if (w.worktreeCleanup && ["done", "skipped"].includes(w.worktreeCleanup.stage)) return;
@@ -110,6 +104,8 @@ export class WorktreeCleanup {
       ? this.releaseOwnedPin(w, checked.ownedPinAt) : checked;
   }
   async manuallyArchived(w: Workflow): Promise<boolean> {
+    // observe() also calls this directly, without run()'s retention check.
+    if (await this.preserveSnapshot(w)) return false;
     if (w.isolation !== "worktree" || !w.worktree || !w.execute) return false;
     if (w.worktreeCleanup?.stage === "done") return true;
     const snapshot = await this.host.port().inspect(w.execute.id).catch(() => null);
@@ -122,6 +118,15 @@ export class WorktreeCleanup {
     for (const row of [...w.startPin?.workspaces ?? [], ...w.pushReview?.workspaces ?? []]) {
       if (row.id === w.worktree.workspaceId) { row.phase = "acknowledged"; row.ownedPinAt = null; }
     }
+    this.host.touch(w, w.worktreeCleanup.detail);
+    await this.host.save();
+    return true;
+  }
+  private async preserveSnapshot(w: Workflow): Promise<boolean> {
+    if (!w.worktreeCleanup?.preserveSnapshot && !w.pushTargets.some(t => t.snapshot) && !w.managedPush?.targets.some(t => t.snapshot)) return false;
+    w.worktreeCleanup = { preserveSnapshot: true, stage: "skipped", attempts: 0,
+      detail: "공개 스냅샷 보존 정책에 따라 개발 worktree·증거의 자동 정리/보관을 건너뜁니다. 수동 보관된 자료의 보존 여부는 확인하지 않습니다.",
+      at: new Date(this.host.now()).toISOString(), evidenceFiles: null, permanentSince: null, permanentError: "", permanentErrors: 0 };
     this.host.touch(w, w.worktreeCleanup.detail);
     await this.host.save();
     return true;

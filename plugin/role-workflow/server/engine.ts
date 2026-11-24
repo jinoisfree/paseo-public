@@ -4390,8 +4390,8 @@ export class WorkflowEngine {
         w.placement = null;
         w.integration = null;
       }
-      // Every new implementation cycle gets a fresh cleanup budget/checkpoint.
-      w.worktreeCleanup = null;
+      // Reset the cleanup budget, but snapshot retention outlives targets/receipts and cycles.
+      if (!w.worktreeCleanup?.preserveSnapshot) w.worktreeCleanup = null;
       if (!w.execute) {
         const defaults = executorDefaults(settings, this.executorChoice.executorProvider(w));
         const selected = this.executorChoice.selectedExecutor(w);

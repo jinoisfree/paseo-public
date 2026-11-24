@@ -12,6 +12,7 @@ import { createRepoProbe } from "../server/git.ts";
 import { managedPushSchema } from "../shared/managed-push.ts";
 import { withCallBudgets, createPort } from "../server/paseo-port.ts";
 import { CLEANUP_RETRY_MS, preserveEvidence } from "../server/worktree-cleanup.ts";
+import { archiveBlockReason } from "../server/archive.ts";
 
 const exec = promisify(execFile);
 const execute = (file, args, options = {}) => exec(file, args, { ...options, env: gitTestEnvironment() });
@@ -279,6 +280,83 @@ test("AC-102: disabling cleanup during inspection is rechecked immediately befor
 
 
 const newPlan = f => f.engine.ended("P", "new-plan", `<paseo-workflow>${JSON.stringify({ status: "plan", summary: "new plan", next: "new implementation", handoff: "next", checks: [] })}</paseo-workflow>`, null, "next goal", false, "새 구현을 시작해줘");
+
+// Manual archive observation must never release a snapshot's durable retention policy.
+for (const source of ["marker", "target", "receipt"])
+for (const stage of ["skipped", "done"])
+test(`V-PS-01: direct manuallyArchived preserves ${source} retention with old ${stage} cleanup`, async t => {
+  const f = await fixture(t);
+  f.w.worktreeCleanup = { stage, attempts: 2, detail: "old", at: new Date().toISOString(), evidenceFiles: null,
+    ...(source === "marker" ? { preserveSnapshot: true } : {}) };
+  if (source === "target") f.w.pushTargets[0].snapshot = { developmentCommit: f.commit };
+  else f.w.pushTargets = [];
+  if (source === "receipt") {
+    f.w.managedPush.targets[0].snapshot = { developmentCommit: f.commit };
+    f.w.managedPush.targets[0].snapshotTree = await git(f.tree, "rev-parse", "HEAD^{tree}");
+  } else f.w.managedPush = null;
+  f.agents.get("E").archived = true;
+  f.spaces.delete("tree");
+  await rm(f.tree, { recursive: true });
+  assert.equal(await f.engine.worktreeCleanup.manuallyArchived(f.w), false, "retention is not successful cleanup");
+  assert.equal(f.w.worktreeCleanup.preserveSnapshot, true);
+  assert.equal(f.w.worktreeCleanup.stage, "skipped");
+  assert.equal(f.w.worktreeCleanup.evidenceFiles, null, "manual removal does not prove evidence preservation");
+  f.w.pushTargets = []; f.w.managedPush = null;
+  await f.restart();
+  assert.match(archiveBlockReason(f.w), /보존/);
+  assert.equal(f.w.worktreeCleanup.preserveSnapshot, true);
+  assert.deepEqual(f.calls, []);
+});
+
+for (const progress of ["done", "pushed", "no_push"])
+test(`V-PS-01: observe and saved recovery keep marker-only ${progress} work blocked from automatic and batch archive`, async t => {
+  const f = await fixture(t);
+  await f.engine.configure({ ...await f.engine.settings(), autoArchivePushed: true, archiveAfterDays: 0 });
+  f.w.progress = progress;
+  f.w.pushTargets = []; f.w.managedPush = null;
+  f.w.worktreeCleanup = { preserveSnapshot: true, stage: "skipped", attempts: 0, detail: "retain", at: new Date().toISOString(), evidenceFiles: null };
+  f.agents.get("E").archived = true;
+  f.spaces.delete("tree");
+  await rm(f.tree, { recursive: true });
+  // Exercise observe's direct call before tick can reach run's existing guard.
+  assert.equal(await f.engine.observe(f.w), false);
+  assert.equal(f.w.worktreeCleanup.preserveSnapshot, true);
+  for (let i = 0; i < 2; i++) {
+    await f.restart();
+    assert.equal(f.w.worktreeCleanup.preserveSnapshot, true);
+    assert.equal(f.w.worktreeCleanup.stage, "skipped");
+    assert.match(archiveBlockReason(f.w), /보존/);
+    await f.engine.archives.checkArchives();
+    const stale = [{ id: f.id, workspaceIds: ["plan", "tree"] }];
+    for (const kind of ["done", "pushed"])
+      assert.deepEqual((await f.engine.archives.applyArchive(stale, kind)).archivedIds, []);
+    const batch = await f.engine.archiveFinished(true, [f.id]);
+    assert.deepEqual(batch.archivedIds, []);
+    assert.match(batch.blocked[0].reason, /보존/);
+    assert.deepEqual(f.calls, []);
+    assert.equal(f.agents.get("P").archived, false);
+    f.advance(10 * 60_000 + 1);
+  }
+});
+
+for (const missing of [false, true])
+test(`V-PS-01: a new implementation cycle retains snapshot policy with ${missing ? "missing" : "existing"} executor directory`, async t => {
+  const f = await fixture(t);
+  f.w.pushTargets = []; f.w.managedPush = null;
+  f.w.worktreeCleanup = { preserveSnapshot: true, stage: "done", attempts: 1, detail: "legacy manual observation", at: new Date().toISOString(), evidenceFiles: null };
+  f.agents.get("E").archived = true;
+  if (missing) await rm(f.tree, { recursive: true });
+  await newPlan(f);
+  assert.equal(f.w.worktreeCleanup.preserveSnapshot, true);
+  assert.equal(f.w.worktreeCleanup.stage, "skipped");
+  assert.equal(f.w.execute.id, "E");
+  assert.equal(f.w.worktree.path, f.tree);
+  assert.deepEqual(f.w.worktreeHistory, []);
+  assert.match(archiveBlockReason(f.w), /보존/);
+  await f.restart();
+  assert.equal(f.w.worktreeCleanup.preserveSnapshot, true);
+  assert.deepEqual(f.calls, []);
+});
 
 test("AC-107/B-1: dirty skipped worktrees cannot bypass cleanup through automatic or manual archive", async t => {
   const f = await fixture(t);
