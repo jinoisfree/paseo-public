@@ -110,7 +110,16 @@ test('paused exact planner approval request does not require resuming implementa
  await assert.rejects(engine.prepareManagedPush(f.w.id),/작업 전달/);
  f.w.inbox.text=text('input');const before=structuredClone(f.w.inbox);
  const prepared=await engine.prepareManagedPush(f.w.id);assert.equal(prepared.state,'prepared');
- assert.deepEqual(f.w.inbox,before);assert.equal(f.calls.some(x=>x.args.includes('push')),false);
+ assert.deepEqual(f.w.inbox,before);
+ // A completed compaction earlier in the same turn does not invalidate its final approval request.
+ f.w.inbox.compacted=true;
+ const compactedBefore=structuredClone(f.w.inbox);
+ assert.equal((await engine.prepareManagedPush(f.w.id)).state,'prepared');
+ assert.deepEqual(f.w.inbox,compactedBefore);
+ f.w.plan.compaction={};await assert.rejects(engine.prepareManagedPush(f.w.id),/실행 중인 대화/);
+ f.w.plan.compaction=null;
+ f.w.inbox.canceled=true;await assert.rejects(engine.prepareManagedPush(f.w.id),/작업 전달/);
+ f.w.inbox.canceled=false;assert.equal(f.calls.some(x=>x.args.includes('push')),false);
  f.w.inbox.agentId='executor';await assert.rejects(engine.prepareManagedPush(f.w.id),/작업 전달/);
  f.w.inbox.agentId='planner';f.w.inbox.failed='failed';await assert.rejects(engine.prepareManagedPush(f.w.id),/작업 전달/);
  f.w.inbox.failed=null;f.w.pushTargets=[{...f.target,commit:f.old}];await assert.rejects(engine.prepareManagedPush(f.w.id),/작업 전달/);

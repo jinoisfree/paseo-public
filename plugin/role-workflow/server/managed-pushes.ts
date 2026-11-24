@@ -48,9 +48,11 @@ export class ManagedPushes {
   async pushReady(w: Workflow) {
     // A paused planner may already have published the exact approval request. Keep its
     // inbox for history; explicit prepare/approve must not restart implementation to read it.
+    // compacted records an earlier completed compaction, not failure of the final response.
+    // Active compaction remains blocked by the member/snapshot checks below.
     const inbox = w.inbox;
     const decision = inbox && inbox.agentId === w.plan?.id && inbox.failed === null &&
-      !inbox.canceled && !inbox.compacted && !inbox.answers ? parseDecision(inbox.text) : null;
+      !inbox.canceled && !inbox.answers ? parseDecision(inbox.text) : null;
     const approvalRequest = w.progress === "done" && decision?.status === "input" &&
       !!decision.pushTargets?.length && pushReviewKey(decision.pushTargets) === pushReviewKey(w.pushTargets);
     if (w.mode === "undecided" || w.generalTransition || w.pending || (inbox && !approvalRequest))
