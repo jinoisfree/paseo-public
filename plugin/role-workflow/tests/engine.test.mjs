@@ -596,6 +596,40 @@ test("archived preserves federated planner, executor and handoff", async (t) => 
   assert.equal(await readFile(handoff, "utf8"), artifact);
   assert.equal(events.length, 0);
 });
+
+test("AT-RG-07: only the handoff records the derived execution start stage", async (t) => {
+  const f = await fixture(t);
+  const flow = f.engine.database.workflows[0];
+  const handoff = path.join(path.dirname(f.file), "handoffs", `${f.id}.json`);
+  const selection = { stage: "ready" };
+  const blocker = { number: 38, title: "Other task" };
+  const reason = "여러 저장소를 지정한 작업은 따로 작업 공간을 만들 수 없어 기다립니다.";
+  const pending = { id: "instruction", role: "execute", prompt: "실행 지시", phase: "execute", stage: "queued", instruction: true };
+  const execute = { ...flow.plan, id: "executor", workspaceId: null };
+  const scenarios = [
+    ["selecting", { phase: "plan", selection: { stage: "provider" } }],
+    ["planReview", { phase: "plan", planReview: { ...flow.planReview, stage: "reviewing" } }],
+    ["waiting", { phase: "execute", placement: { stage: "waiting", ...blocker, reason } }],
+    ["choosing", { phase: "execute", placement: { stage: "choice", ...blocker, reason: "" } }],
+    ["starting", { phase: "execute", pending, execute }],
+    ["running", { phase: "execute", pending: { ...pending, stage: "sent" }, execute: { ...execute, workspaceId: "workspace" } }],
+    ["notStarted", { phase: "plan" }],
+  ];
+  const planReview = flow.planReview;
+  for (const [stage, scenario] of scenarios) {
+    Object.assign(flow, { selection, planReview, placement: null, pending: null, execute: null }, scenario);
+    await f.engine.saveHandoff(flow);
+    const { executionStart } = JSON.parse(await readFile(handoff, "utf8"));
+    assert.equal(executionStart.stage, stage);
+    assert.equal(executionStart.executorSelected, flow.selection.stage === "ready");
+    assert.deepEqual(executionStart.blocker, scenario.placement ? blocker : null);
+    assert.equal(executionStart.reason, stage === "waiting" ? reason : "");
+    assert.equal(Boolean(executionStart.userAction), stage === "selecting" || stage === "choosing");
+  }
+  assert.equal(Object.hasOwn(flow, "executionStart"), false);
+  assert.equal(Object.hasOwn(JSON.parse(await readFile(f.file, "utf8")).workflows[0], "executionStart"), false);
+});
+
 test("first tick only removes confirmed archived undecided and never repeats lookup", async (t) => {
   const events = [];
   const f = await fixture(t, async (e) => events.push(e), "undecided");

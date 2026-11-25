@@ -316,6 +316,20 @@ test(`AC-04: wait keeps instructions queued until the blocker is ${release}`, as
   assert.equal(f.worktrees.length, 0);
 });
 
+test("AT-RG-09: waiting starts with the reason, or keeps the original overlap message", async t => {
+  const f = await fixture(t, { placement: "wait" });
+  await f.start();
+  const flow = f.engine.database.workflows[0];
+  const original = `같은 폴더의 #${f.blocker.number} ${f.blocker.title} 작업이 끝나면 #${flow.number} 구현을 자동으로 시작합니다. 그 작업을 완료 표시하거나 보관하면 바로 시작합니다.`;
+  assert.equal((await f.state()).detail, original);
+  const reason = "여러 저장소를 지정한 작업은 따로 작업 공간을 만들 수 없어 기다립니다.";
+  flow.placement.reason = reason;
+  await f.engine.tick();
+  const detail = (await f.state()).detail;
+  assert.ok(detail.startsWith(reason));
+  assert.ok(!detail.includes("같은 폴더의 #"));
+});
+
 test("AC-04/AC-05: automatic wait recomputes all unfinished blockers at every tick", async t => {
   const f = await fixture(t, { placement: "wait" });
   await f.start();

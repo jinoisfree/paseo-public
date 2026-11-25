@@ -14,6 +14,7 @@ test("generated rules exactly match their sorted LF sources and content version"
   );
   assert.deepEqual(Object.keys(RULES), names, "npm run rules:sync 필요");
   assert.deepEqual(RULES, expected, "npm run rules:sync 필요");
+  assert.match(RULES["40-paseo-role-workflow.md"], /계획 담당은 진행·대기 질문에 인계 기록의 `executionStart`를 근거로 답한다.*executorSelected=true.*stage=waiting.*reason/);
   assert.ok(
     Object.values(RULES).every((body) => !body.includes("\r")),
     "LF sources required",

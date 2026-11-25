@@ -305,6 +305,29 @@ const workflowSchema = z.object({
 });
 export type Workflow = z.infer<typeof workflowSchema>;
 
+function describeExecutionStart(w: Workflow) {
+  const placement = w.placement;
+  const executorSelected = w.selection?.stage === "ready";
+  const blocker = placement?.number ? { number: placement.number, title: placement.title } : null;
+  const pending = w.pending?.role === "execute" ? w.pending : null;
+  const stage =
+    w.planReview.stage === "reviewing" || w.planReview.stage === "revising" ? "planReview"
+      : placement?.stage === "waiting" ? "waiting"
+      : placement?.stage === "choice" ? "choosing"
+      : w.execute?.workspaceId && (pending?.stage === "sent" || (w.phase === "execute" && w.status === "active" && !w.pending)) ? "running"
+      : !w.execute?.workspaceId && pending?.stage === "queued" ? "starting"
+      : w.mode === "federated" && w.selection && !executorSelected ? "selecting"
+      : "notStarted";
+  return {
+    stage,
+    executorSelected,
+    blocker,
+    reason: placement?.reason ?? "",
+    userAction: stage === "selecting" ? "Paseo에서 구현 담당을 선택하세요."
+      : stage === "choosing" ? "Paseo에서 구현 시작 방법을 선택하세요." : "",
+  };
+}
+
 /** Contract 3 keeps the original planner and shares the automatic role engine. */
 function splitGeneral(w: Workflow): boolean {
   return capabilities(w).splitGeneral;
@@ -936,6 +959,7 @@ export class WorkflowEngine {
       planConflict: w.planConflict,
       planIssue: w.planIssue,
       selection: w.selection,
+      executionStart: describeExecutionStart(w),
       goal: w.goal,
       cwd: w.cwd,
       status: w.status,
@@ -3544,9 +3568,10 @@ export class WorkflowEngine {
             w.placement.title = blocker.title;
             const detail = w.placement.stage === "choice"
               ? `구현 시작 방법 선택을 기다립니다: 같은 폴더에서 #${blocker.number} 작업이 진행 중입니다.`
-              : `같은 폴더의 #${blocker.number} ${blocker.title} 작업이 끝나면 #${w.number} 구현을 자동으로 시작합니다.`;
-            const explained = detail + (w.placement.reason ? ` ${w.placement.reason}` : "") +
-              " 그 작업을 완료 표시하거나 보관하면 바로 시작합니다.";
+              : w.placement.reason
+                ? `${w.placement.reason} #${blocker.number} ${blocker.title} 작업이 끝나면 #${w.number} 구현을 자동으로 시작합니다.`
+                : `같은 폴더의 #${blocker.number} ${blocker.title} 작업이 끝나면 #${w.number} 구현을 자동으로 시작합니다.`;
+            const explained = detail + " 그 작업을 완료 표시하거나 보관하면 바로 시작합니다.";
             if (w.detail !== explained) this.touch(w, explained);
             await this.save();
             if (w.placement.stage === "choice" && w.plan && !w.placement.cardPosted && this.port.placementPicker) {
