@@ -7,6 +7,14 @@ import { executorDefaults } from '../shared/assignment.ts';
 
 const json = async name => JSON.parse(await readFile(new URL(`../shared/presets/${name}`, import.meta.url), 'utf8'));
 
+test('AT-RG-06: the airport assigns the run guard to generated facilities', async () => {
+  const ownership = await json('ownership.json');
+  assert.equal(ownership.locations['$PASEO_HOME/role-workflow/run-guard/'], 'facility-generated');
+  const architecture = await readFile(new URL('../../../docs/ARCHITECTURE.md', import.meta.url), 'utf8');
+  assert.match(architecture, /^7\..*에이전트 셸의 운영 사본 로컬 ref 변경 거부/m);
+  assert.match(architecture, /^11\..*공식 자동 업데이트와 사장만.*개발 원본.*푸시.*공식 자동 업데이트.*대시보드에 경고/m);
+});
+
 test('U2 public recommendations supply missing settings and null assignment from one validated source', () => {
   const settings = settingsSchema.parse({});
   assert.equal(settings.archiveAfterDays, 2);
