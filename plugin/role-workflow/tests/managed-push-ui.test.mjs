@@ -21,7 +21,8 @@ import contribute from './index.client';
 import { settingsSchema, workflowViewSchema } from './shared/contracts';
 const target={repository:'/example/repo',remote:'origin',remoteUrl:'https://example.com/repo.git',branch:'main',commit:'a'.repeat(40),exitCode:null,verified:null,startedAt:null,finishedAt:null,error:''};
 const flow=workflowViewSchema.parse({id:'task',number:1,title:'승인 대기 작업',cwd:'/example/repo',mode:'general',status:'active',phase:'plan',cycles:0,turns:0,updatedAt:'2026-10-15',progress:'done',planAgentId:'planner',executeAgentId:null,planGeneration:1,executeGeneration:0,planCompactions:0,executeCompactions:0,planUsage:null,executeUsage:null,detail:'구현과 검증 완료',artifactNotice:'푸시 결과를 확인하지 못했습니다.',verification:[{command:'npm test',cwd:'/example/repo',commit:'a'.repeat(40),exitCode:0,logPath:'/private/test.log',criterion:'관련 회귀 검사 통과',checkedAt:'2026-10-15',state:'matched',detail:'검증 대상 일치'}]});
-const state={settings:settingsSchema.parse({}),projects:{},workflows:[flow],archives:[],error:null,devices:0};
+const state={settings:settingsSchema.parse({}),projects:{},workflows:[flow],archives:[],error:null,devices:0,
+ runtimeCopy:{state:'drift',root:'/example/runtime',branch:'topic',dirty:1,ahead:2,worktrees:1,reasons:['branch','dirty','ahead','worktrees']}};
 window.__calls=[];window.__slash={};window.__failure=false;window.__state=state;
 window.__rpc={
  'workflow.status':async()=>structuredClone(state),
@@ -92,6 +93,23 @@ createRoot(document.getElementById('root')).render(<Dashboard theme={{colors}} h
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(`http://127.0.0.1:${server.address().port}`);
+    await t.test("AT-RG-05: only drift displays the runtime path, causes and recovery", async () => {
+      const warning = page.getByTestId("runtime-copy-warning");
+      await warning.waitFor();
+      const displayed = await warning.textContent();
+      for (const text of ["/example/runtime", "topic 브랜치", "추적 파일 1개", "origin/main에 없는 커밋 2개",
+        "연결 worktree 1개", "개발 원본에서 수정해 푸시", "공식 자동 업데이트", "남은 변경은 되돌리세요"])
+        assert.ok(displayed.includes(text), text);
+      for (const next of ["ok", "unknown"]) {
+        await page.evaluate((value) => { window.__state.runtimeCopy.state = value; }, next);
+        await warning.waitFor({ state: "detached" });
+        assert.equal(await warning.count(), 0);
+        if (next === "ok") {
+          await page.evaluate(() => { window.__state.runtimeCopy.state = "drift"; });
+          await warning.waitFor();
+        }
+      }
+    });
     await page.getByTestId("workflow-archive-preview").click();
     await page.getByText("푸시 전 작업의 따로 작업 공간은 자동 정리하지 않습니다. 필요하면 커밋을 확인한 뒤 Paseo에서 직접 보관하세요(무시된 파일과 커밋하지 않은 파일은 지워집니다).", { exact: true }).waitFor();
     await page.getByText("#7 미정리 작업", { exact: true }).waitFor();

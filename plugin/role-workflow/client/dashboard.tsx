@@ -18,6 +18,7 @@ import {
   setProgress,
   testNotification,
   models,
+  type RuntimeCopyStatus,
   type Settings,
 } from "../shared/contracts";
 
@@ -36,6 +37,15 @@ import {
 const modeNames = { federated: "연합개발", general: "일반개발", undecided: "방식 미선택" };
 const selectedState = { selected: true };
 const unselectedState = { selected: false };
+
+function runtimeCopyReason(copy: RuntimeCopyStatus, reason: RuntimeCopyStatus["reasons"][number]) {
+  switch (reason) {
+    case "branch": return copy.branch ? `main 대신 ${copy.branch} 브랜치 사용 중` : "브랜치에 연결되지 않은 HEAD";
+    case "dirty": return `추적 파일 ${copy.dirty}개 수정`;
+    case "ahead": return `origin/main에 없는 커밋 ${copy.ahead}개`;
+    case "worktrees": return `연결 worktree ${copy.worktrees}개`;
+  }
+}
 
 export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
   const read = useRpc(status),
@@ -684,6 +694,14 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
       </Text>
       {pending && <Text style={s.text}>처리 중…</Text>}
       {!!data?.federation?.reason && <Text style={s.muted}>{data.federation.reason}</Text>}
+      {data?.runtimeCopy?.state === "drift" && (
+        <View accessibilityRole="alert" testID="runtime-copy-warning" style={s.card}>
+          <Text style={s.error}>운영 사본이 기준에서 벗어났습니다.</Text>
+          <Text style={s.text}>{data.runtimeCopy.root}</Text>
+          <Text style={s.text}>{data.runtimeCopy.reasons.map((reason) => runtimeCopyReason(data.runtimeCopy, reason)).join(" · ")}</Text>
+          <Text style={s.muted}>개발 원본에서 수정해 푸시하고 공식 자동 업데이트로 반영하세요. 운영 사본에 남은 변경은 되돌리세요.</Text>
+        </View>
+      )}
       {!!(error || loadError || data?.error) && (
         <View accessibilityRole="alert">
           <Text testID="workflow-error" style={s.error}>

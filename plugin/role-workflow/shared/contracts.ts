@@ -142,6 +142,17 @@ export const workflowViewSchema = z.object({
   generalTransition: z.boolean().default(false),
   deliveryUnconfirmed: z.boolean().default(false),
 });
+const runtimeCopyStatusSchema = z.object({
+  state: z.enum(["ok", "drift", "unknown"]),
+  root: z.string().nullable(),
+  branch: z.string().nullable(),
+  dirty: z.number().int().nonnegative(),
+  ahead: z.number().int().nonnegative(),
+  worktrees: z.number().int().nonnegative(),
+  reasons: z.array(z.enum(["branch", "dirty", "ahead", "worktrees"])),
+});
+export type RuntimeCopyStatus = z.infer<typeof runtimeCopyStatusSchema>;
+
 export const status = defineRpc({
   name: "workflow.status",
   input: z.object({}),
@@ -154,6 +165,7 @@ export const status = defineRpc({
     archives: z.array(archiveEntrySchema).default([]),
     error: z.string().nullable(),
     devices: z.number(),
+    runtimeCopy: runtimeCopyStatusSchema,
   }),
 });
 export const configure = defineRpc({

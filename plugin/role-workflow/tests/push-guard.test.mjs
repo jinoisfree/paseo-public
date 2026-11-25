@@ -3,12 +3,12 @@ import { gitTestEnvironment } from "./git-test-environment.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import contribute from "../index.server.ts";
-import { settingsSchema } from "../shared/contracts.ts";
+import { settingsSchema, status } from "../shared/contracts.ts";
 import {
   originalGlobalConfigs,
   permissionCommands,
@@ -96,11 +96,15 @@ test("a guarded shell cannot push to any remote while fetch and the user's confi
   assert.notEqual((await run("git", ["ls-remote", remote], { env: plain })).stdout, "", "the unguarded push still works");
 });
 
-async function hooks(t, settings) {
+async function hooks(t, settings, installationDirectory) {
   const dir = await directory(t, "push-guard-hook-");
   const previous = process.env.PASEO_ROLE_WORKFLOW_STATE_DIR;
   process.env.PASEO_ROLE_WORKFLOW_STATE_DIR = dir;
   isolateOwnerHome(t, dir);
+  await mkdir(process.env.PASEO_HOME, { recursive: true });
+  await writeFile(path.join(process.env.PASEO_HOME, "config.json"), JSON.stringify({
+    plugins: { "role-workflow": { source: "directory", path: installationDirectory ?? dir } },
+  }));
   const registered = new Map(),
     rpcs = new Map(),
     responses = [];
@@ -137,8 +141,117 @@ async function hooks(t, settings) {
       { agent: { id: "A" }, request: { id: "perm-1", kind: "tool", name: "Bash", input } },
       context,
     );
-  return { dir, open, permission, responses };
+  return { dir, open, permission, responses, status: () => rpcs.get(status.name)({}, context) };
 }
+
+test("AT-RG-01–02c: real Git blocks RUN ref changes and permits fetch and development writes", async (t) => {
+  const dir = await realpath(await directory(t));
+  const seed = path.join(dir, "seed");
+  const origin = path.join(dir, "origin.git");
+  const runtime = path.join(dir, "RUN [with space]");
+  const plain = gitTestEnvironment(process.env, {
+    GIT_AUTHOR_NAME: "Test", GIT_AUTHOR_EMAIL: "test@example.invalid",
+    GIT_COMMITTER_NAME: "Test", GIT_COMMITTER_EMAIL: "test@example.invalid",
+  });
+  const git = (cwd, args, env = plain) => run("git", args, { cwd, env });
+  await git(dir, ["init", "-q", "-b", "main", seed]);
+  await writeFile(path.join(seed, "tracked"), "first\n");
+  await git(seed, ["add", "tracked"]);
+  await git(seed, ["commit", "-qm", "first"]);
+  await git(seed, ["commit", "-q", "--allow-empty", "-m", "second"]);
+  await git(dir, ["clone", "-q", "--bare", seed, origin]);
+  await git(dir, ["clone", "-q", origin, runtime]);
+  await writeFile(path.join(seed, "tracked"), "upstream\n");
+  await git(seed, ["commit", "-qam", "upstream"]);
+  await git(origin, ["fetch", "-q", seed, "main:main"]);
+  const head = (await git(runtime, ["rev-parse", "HEAD"])).stdout.trim();
+  const upstream = (await git(seed, ["rev-parse", "HEAD"])).stdout.trim();
+  const guarded = { ...plain, ...await pushGuardEnv(path.join(dir, "state"), {}, plain, { runtimeRoot: runtime }) };
+  const denied = (cwd, args) => assert.rejects(git(cwd, args, guarded), (error) => {
+    assert.ok(Number.isInteger(error.code) && error.code !== 0);
+    assert.match(error.stderr, /운영 사본.*개발 원본.*자동 업데이트/);
+    return true;
+  });
+
+  await t.test("AT-RG-01b: fetch advances the tracking ref", async () => {
+    await git(runtime, ["fetch", "origin"], guarded);
+    assert.equal((await git(runtime, ["rev-parse", "refs/remotes/origin/main"])).stdout.trim(), upstream);
+  });
+  await t.test("AT-RG-01: all prescribed writes fail and leave refs unchanged", async () => {
+    const snapshot = () => git(runtime, ["show-ref", "--head"]).then(({ stdout }) => stdout);
+    const before = await snapshot();
+    for (const args of [
+      ["commit", "--allow-empty", "--no-verify", "-m", "blocked"],
+      ["merge", "--ff-only", "origin/main"],
+      ["reset", "--soft", "HEAD~1"],
+      ["branch", "x"],
+      ["worktree", "add", "-b", "y", path.join(dir, "blocked-tree")],
+      ["tag", "t"],
+      ["stash"],
+      ["update-ref", "refs/heads/z", "HEAD"],
+    ]) {
+      if (args[0] === "stash") await writeFile(path.join(runtime, "tracked"), "dirty\n");
+      await denied(runtime, args);
+      assert.equal(await snapshot(), before, args.join(" "));
+      // Some Git commands edit worktree files before attempting the ref transaction.
+      await git(runtime, ["reset", "--hard", head]);
+    }
+  });
+  await t.test("AT-RG-01c: attached and detached worktrees reject commits", async () => {
+    for (const [name, options] of [["attached", ["-b", "attached"]], ["detached", ["--detach"]]]) {
+      const tree = path.join(dir, name);
+      await git(runtime, ["worktree", "add", ...options, tree]);
+      await denied(tree, ["commit", "--allow-empty", "-m", "blocked"]);
+      assert.equal((await git(tree, ["rev-parse", "HEAD"])).stdout.trim(), head);
+    }
+  });
+  await t.test("AT-RG-02: development merge and commit succeed", async () => {
+    const dev = path.join(dir, "development");
+    await git(dir, ["clone", "-q", origin, dev]);
+    await git(dev, ["reset", "--hard", head]);
+    await git(dev, ["merge", "--ff-only", "origin/main"], guarded);
+    await git(dev, ["commit", "--allow-empty", "-m", "development"], guarded);
+  });
+  await t.test("AT-RG-02c: the symlink has the same guard", async () => {
+    const link = path.join(dir, "run-link");
+    await symlink(runtime, link);
+    await denied(dir, ["-C", link, "branch", "blocked-link"]);
+  });
+  await t.test("AT-RG-02b: the same RUN permits an unguarded commit", async () => {
+    const { GIT_CONFIG_GLOBAL: _config, ...unguarded } = plain;
+    await git(runtime, ["commit", "--allow-empty", "-m", "unguarded"], unguarded);
+  });
+});
+
+test("AT-RG-03: an actual Git installation gets the runtime guard independently of push", async (t) => {
+  const dir = await realpath(await directory(t));
+  await run("git", ["init", "-q", "-b", "main", dir], { env: gitTestEnvironment() });
+  const plugin = path.join(dir, "plugin", "role-workflow");
+  await mkdir(plugin, { recursive: true });
+  for (const shellPushGuard of [false, true]) {
+    const fixture = await hooks(t, { shellPushGuard }, plugin);
+    for (const provider of ["claude", "codex"]) {
+      const request = await fixture.open(provider);
+      const file = await readFile(request.env.GIT_CONFIG_GLOBAL, "utf8");
+      assert.equal(file.includes("pushInsteadOf"), shellPushGuard);
+      assert.ok(file.includes(`[includeIf "gitdir/i:${dir}/"]`));
+      const git = await run("git", ["config", "--get", "core.hooksPath"], {
+        cwd: dir, env: gitTestEnvironment(process.env, request.env),
+      });
+      assert.equal(git.stdout.trim(), path.join(fixture.dir, "run-guard", "hooks"));
+    }
+  }
+  const noGit = await hooks(t, {});
+  const request = await noGit.open("claude");
+  const file = await readFile(request.env.GIT_CONFIG_GLOBAL, "utf8");
+  assert.ok(file.includes("pushInsteadOf"));
+  assert.ok(!file.includes("includeIf"));
+  const installed = await hooks(t, {}, plugin);
+  assert.deepEqual((await installed.status()).runtimeCopy, {
+    state: "unknown", root: dir, branch: null, dirty: 0, ahead: 0, worktrees: 0, reasons: [],
+  });
+  assert.equal((await noGit.status()).runtimeCopy.root, null);
+});
 
 test("agent sessions open with the push guard by default and without it when the setting is off", async (t) => {
   const on = await hooks(t, {});

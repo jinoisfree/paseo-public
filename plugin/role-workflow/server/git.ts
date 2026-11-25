@@ -56,7 +56,7 @@ export interface RepoIdentity {
 }
 
 const execute = promisify(execFile);
-async function git(cwd: string, args: string[], options: { timeout?: number } = {}): Promise<string> {
+export async function git(cwd: string, args: string[], options: { timeout?: number } = {}): Promise<string> {
   // An agent-written core.fsmonitor would otherwise run as the daemon on every status probe.
   const { stdout } = await execute("git", ["-c", "core.fsmonitor=false", ...args], {
     cwd,

@@ -21,6 +21,7 @@ import { createWorkspaceAccess } from "./server/workspace-lifecycle";
 import { WorkflowEngine } from "./server/engine";
 import { permissionCommands, PUSH_DENIED_MESSAGE, pushGuardEnv, runsGitPush } from "./server/push-guard";
 import { createRepoProbe } from "./server/git";
+import { installedRuntimeRoot, runtimeCopyStatus } from "./server/runtime-copy";
 import { createPort, readCompletedTurn, withCallBudgets } from "./server/paseo-port";
 import {
   status,
@@ -53,13 +54,16 @@ export default function contribute(server: PluginServerContext) {
   let fatal: string | null = null;
   let settingsReadable = false;
   let settingsReadError: string | null = null;
-  const access = createWorkspaceAccess(paseoHome());
+  const home = paseoHome();
+  const access = createWorkspaceAccess(home);
   const port = withCallBudgets(createPort(access.api));
   const directory =
     process.env.PASEO_ROLE_WORKFLOW_STATE_DIR ??
-    path.join(paseoHome(), "role-workflow");
+    path.join(home, "role-workflow");
   const rulesReady = materializeRules(directory);
   const notifier = createNotifier();
+  let runtimeRoot: Promise<string | null> | undefined;
+  const readRuntimeRoot = () => runtimeRoot ??= installedRuntimeRoot(home);
   const engine = new WorkflowEngine(
     path.join(directory, "state.json"),
     port,
@@ -190,7 +194,14 @@ export default function contribute(server: PluginServerContext) {
       // Re-applied on every open, so resumed and reloaded sessions keep the guard too.
       const guarded = await engine
         .settings()
-        .then((settings) => (settings.shellPushGuard ? pushGuardEnv(directory, request.env) : null))
+        .then(async (settings) => {
+          const root = await readRuntimeRoot();
+          if (!settings.shellPushGuard && !root) return null;
+          return pushGuardEnv(directory, request.env, process.env, {
+            blockPush: settings.shellPushGuard,
+            runtimeRoot: root,
+          });
+        })
         .catch((error: unknown) => {
           report(error);
           return null;
@@ -289,13 +300,14 @@ export default function contribute(server: PluginServerContext) {
   ];
   server.handle(status, async (_input, context) => {
     attach(context.paseo);
+    const runtimeCopy = await runtimeCopyStatus(await readRuntimeRoot());
     try {
       const listed = await engine.list();
       if (settingsReadError && fatal === settingsReadError) fatal = null;
       settingsReadError = null;
       const error = listed.error ?? fatal;
       settingsReadable = !error;
-      return { ...listed, error, devices: await notifier.activeCount() };
+      return { ...listed, error, devices: await notifier.activeCount(), runtimeCopy };
     } catch (error) {
       report(error);
       settingsReadable = false;
@@ -308,6 +320,7 @@ export default function contribute(server: PluginServerContext) {
         archives: [],
         error: fatal,
         devices: 0,
+        runtimeCopy,
       };
     }
   });

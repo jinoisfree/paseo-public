@@ -8,7 +8,7 @@ import { gitTestEnvironment } from "../plugin/role-workflow/tests/git-test-envir
 import { createHash } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { appendFileSync, closeSync, existsSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -222,7 +222,9 @@ try {
     assert(installed.code === 0, `install failed: ${installed.stderr || installed.stdout}`);
     await waitFor("Plugin ready", async () => (await readyCount()) >= 1);
     assert(/role-workflow\s+running/.test((await cli("plugin", "ls")).stdout), "plugin is not running");
-    const { settings } = await rpc("workflow.status", {});
+    const { settings, runtimeCopy } = await rpc("workflow.status", {});
+    const checkout = await realpath(resolve(pluginDir, "../.."));
+    assert(runtimeCopy?.root === checkout, "runtime status did not resolve the installed Git checkout");
     defaultSettings = structuredClone(settings);
     assert(settings.autoPinStarted && settings.autoPinPushed && settings.autoArchivePushed, "automatic pin and archive defaults must remain enabled");
   });
