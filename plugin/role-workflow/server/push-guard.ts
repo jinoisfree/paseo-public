@@ -19,6 +19,7 @@ while read -r old new ref; do
     refs/remotes/*) ;;
     *)
       printf '%s\\n' 'role-workflow: 운영 사본의 로컬 ref는 변경할 수 없습니다. 개발 원본에서 수정하고 공식 자동 업데이트로 반영하세요.' >&2
+      printf '%s\\n' 'role-workflow: 운영 사본에서 원격 추적 ref를 갱신하려면 git fetch --no-tags를 사용하세요.' >&2
       exit 1
       ;;
   esac

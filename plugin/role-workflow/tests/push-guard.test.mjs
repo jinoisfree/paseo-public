@@ -167,6 +167,7 @@ test("AT-RG-01–02c: real Git blocks RUN ref changes and permits fetch and deve
   const head = (await git(runtime, ["rev-parse", "HEAD"])).stdout.trim();
   const upstream = (await git(seed, ["rev-parse", "HEAD"])).stdout.trim();
   const guarded = { ...plain, ...await pushGuardEnv(path.join(dir, "state"), {}, plain, { runtimeRoot: runtime }) };
+  const snapshot = () => git(runtime, ["show-ref", "--head"]).then(({ stdout }) => stdout);
   const denied = (cwd, args) => assert.rejects(git(cwd, args, guarded), (error) => {
     assert.ok(Number.isInteger(error.code) && error.code !== 0);
     assert.match(error.stderr, /운영 사본.*개발 원본.*자동 업데이트/);
@@ -177,8 +178,25 @@ test("AT-RG-01–02c: real Git blocks RUN ref changes and permits fetch and deve
     await git(runtime, ["fetch", "origin"], guarded);
     assert.equal((await git(runtime, ["rev-parse", "refs/remotes/origin/main"])).stdout.trim(), upstream);
   });
+  await t.test("AT-RG-01d: fetch with a new tag fails and explains how to fetch without tags", async () => {
+    await git(seed, ["commit", "--allow-empty", "-m", "release"]);
+    await git(origin, ["fetch", "-q", "--no-tags", seed, "main:main"]);
+    const release = (await git(origin, ["rev-parse", "main"])).stdout.trim();
+    await git(origin, ["tag", "v1", release]);
+    const before = await snapshot();
+
+    await assert.rejects(git(runtime, ["fetch", "origin"], guarded), (error) => {
+      assert.ok(Number.isInteger(error.code) && error.code !== 0);
+      assert.match(error.stderr, /git fetch --no-tags/);
+      return true;
+    });
+    assert.equal(await snapshot(), before);
+
+    await git(runtime, ["fetch", "--no-tags", "origin"], guarded);
+    assert.equal((await git(runtime, ["rev-parse", "refs/remotes/origin/main"])).stdout.trim(), release);
+    assert.equal((await git(runtime, ["for-each-ref", "refs/tags"])).stdout, "");
+  });
   await t.test("AT-RG-01: all prescribed writes fail and leave refs unchanged", async () => {
-    const snapshot = () => git(runtime, ["show-ref", "--head"]).then(({ stdout }) => stdout);
     const before = await snapshot();
     for (const args of [
       ["commit", "--allow-empty", "--no-verify", "-m", "blocked"],
