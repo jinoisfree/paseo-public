@@ -224,3 +224,12 @@ test("Claude reset clocks without a complete date need a failure observation", (
   assert.deepEqual(usageLimit("claude", "You've hit your limit · resets Nov 25, 2026, 11:59pm (UTC)"),
     { retryAt: Date.UTC(2026, 10, 25, 23, 59) });
 });
+
+test("Claude uses the later New York reset while either occurrence is still available", () => {
+  const failure = "You've hit your 5-hour limit · resets 1:30am (America/New_York)";
+  const later = Date.UTC(2026, 10, 1, 6, 30);
+  for (const observed of [Date.UTC(2026, 10, 1, 5, 10), Date.UTC(2026, 10, 1, 5, 50), later + 59_000])
+    assert.deepEqual(usageLimit("claude", failure, undefined, observed), { retryAt: later });
+  assert.deepEqual(usageLimit("claude", failure, undefined, later + 60_000),
+    { retryAt: Date.UTC(2026, 10, 2, 6, 30) });
+});

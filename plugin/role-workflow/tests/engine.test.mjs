@@ -3764,6 +3764,23 @@ const sameDayReset = Date.UTC(2026, 10, 25, 23, 59);
 const nextDayReset = Date.UTC(2026, 10, 26, 0, 20);
 const claudeLimitAt = clock => `You've hit your 5-hour limit · resets ${clock} (UTC)`;
 
+test("standalone Claude waits for the same-day New York reset after the clocks turn back", async t => {
+  const f = await standaloneQuotaFixture(t);
+  const reset = Date.UTC(2026, 10, 1, 6, 30);
+  f.at(Date.UTC(2026, 10, 1, 5, 50));
+  await f.fail("failed", "You've hit your 5-hour limit · resets 1:30am (America/New_York)");
+  const stopped = (await stored(f)).quotaPause;
+  assert.equal(stopped.retryAt, reset);
+  assert.equal(stopped.nextCheckAt, reset);
+  f.at(reset - 1);
+  await f.engine.tick();
+  assert.equal(f.sent.length, 0);
+  f.at(reset);
+  await f.engine.tick();
+  await f.engine.tick();
+  assert.deepEqual(f.sent.map(message => message.id), ["planner"]);
+});
+
 for (const { clock, retryAt, oldInbox } of [
   { clock:"11:59pm", retryAt:sameDayReset, oldInbox:false },
   { clock:"12:20am", retryAt:nextDayReset, oldInbox:false },

@@ -72,20 +72,26 @@ function claudeResetTime(text: string, failureObservedAt?: number): number | nul
   if (date < 0) return null;
   const calendarDay = day ? +day : localFailure!.getUTCDate();
   const calendarYear = year ? +year : localFailure!.getUTCFullYear();
-  let wall = Date.UTC(calendarYear, date, calendarDay, 0, clock);
+  const wall = Date.UTC(calendarYear, date, calendarDay, 0, clock);
   if (new Date(wall).getUTCDate() !== calendarDay) return null;
-  // A clock without a date denotes the next occurrence in the next 24 hours.
-  if (localFailure && wall < localFailure.getTime()) {
-    if (!month) wall += 86_400_000;
-    else if (!year && date < localFailure.getUTCMonth())
-      wall = Date.UTC(calendarYear + 1, date, calendarDay, 0, clock);
-  }
+  const dayMs = 86_400_000;
   // Check both offsets around a DST transition. Choose the later instant for a repeated clock.
-  const candidates = [-86_400_000, 86_400_000].map(delta => {
-    const sample = wall + delta;
-    return wall - (localTime(sample) - sample);
-  }).filter(candidate => localTime(candidate) === wall);
-  return candidates.length ? Math.max(...candidates) : null;
+  const latestInstant = (wallTime: number) => {
+    const candidates = [-dayMs, dayMs].map(delta => {
+      const sample = wallTime + delta;
+      return wallTime - (localTime(sample) - sample);
+    }).filter(candidate => localTime(candidate) === wallTime);
+    return candidates.length ? Math.max(...candidates) : null;
+  };
+  if (!month && failureObservedAt !== undefined) {
+    const sameDay = latestInstant(wall);
+    // The displayed clock has minute precision. Compare absolute minutes before rolling forward.
+    const observedMinute = Math.floor(failureObservedAt / 60_000) * 60_000;
+    return sameDay !== null && sameDay >= observedMinute ? sameDay : latestInstant(wall + dayMs);
+  }
+  if (!year && localFailure && wall < localFailure.getTime() && date < localFailure.getUTCMonth())
+    return latestInstant(Date.UTC(calendarYear + 1, date, calendarDay, 0, clock));
+  return latestInstant(wall);
 }
 
 function retryTime(text: string): number | null {
