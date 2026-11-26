@@ -227,6 +227,7 @@ export default function contribute(server: PluginServerContext) {
       report(new Error(`대화 ${agent.id}를 작업에 연결하지 못했습니다. 대화 상태를 확인하세요.`));
     }),
     server.addHook("agent.turn.after", async (event, context) => {
+      const failureObservedAt = event.outcome.kind === "failed" ? Date.now() : undefined;
       attach(context.paseo);
       const turn = await readCompletedTurn(eventItems(event), event.agent.cwd, () =>
         port.history(event.agent.id),
@@ -237,7 +238,7 @@ export default function contribute(server: PluginServerContext) {
       });
       if (!turn) {
         if (event.outcome.kind === "failed")
-          await engine.deferredFailure(event.agent.id, event.turnId ?? null, event.outcome.error.message, event.outcome.error.code).catch(report);
+          await engine.deferredFailure(event.agent.id, event.turnId ?? null, event.outcome.error.message, event.outcome.error.code, failureObservedAt).catch(report);
         return;
       }
       if (turn.maintenance) {
@@ -265,6 +266,7 @@ export default function contribute(server: PluginServerContext) {
           turn.evidence,
           event.outcome.kind === "failed" ? event.outcome.error.code : undefined,
           turn.turnId,
+          failureObservedAt,
         )
         .catch(report);
       void engine.auditPushes().catch(report);

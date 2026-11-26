@@ -3758,23 +3758,68 @@ for (const stop of ["manual", "pause", "new turn", "new history", "archived", "p
   });
 }
 
-test("standalone deferred quota failure waits for its exact turn history", async t => {
-  const f = await standaloneQuotaFixture(t);
-  await f.engine.deferredFailure("planner", "failed", f.error);
-  f.histories.set("planner", { key:"older", turnId:"older", failed:null, text:"old", messageIds:[] });
-  await f.engine.tick();
-  assert.equal((await stored(f)).quotaPause, null);
-  const waiting = (await stored(f)).recoveryCheck;
-  f.at(waiting.nextCheckAt);
-  f.histories.set("planner", { key:"failed", turnId:"failed", failed:f.error, text:"", messageIds:[] });
-  await f.engine.tick();
-  const stopped = await stored(f);
-  assert.equal(stopped.quotaPause.failedTurnId, "failed");
-  assert.equal(f.sent.length, 0);
-  f.at(stopped.quotaPause.nextCheckAt);
-  await f.engine.tick();
-  assert.equal(f.sent.length, 1);
-});
+const beforeMidnight = Date.UTC(2026, 10, 25, 23, 58, 59);
+const afterMidnight = Date.UTC(2026, 10, 26, 0, 0, 1);
+const sameDayReset = Date.UTC(2026, 10, 25, 23, 59);
+const nextDayReset = Date.UTC(2026, 10, 26, 0, 20);
+const claudeLimitAt = clock => `You've hit your 5-hour limit · resets ${clock} (UTC)`;
+
+for (const { clock, retryAt, oldInbox } of [
+  { clock:"11:59pm", retryAt:sameDayReset, oldInbox:false },
+  { clock:"12:20am", retryAt:nextDayReset, oldInbox:false },
+  { clock:"11:59pm", retryAt:null, oldInbox:true },
+]) {
+  test(`standalone Claude deferred reset across midnight: ${oldInbox ? "legacy inbox" : clock}`, async t => {
+    const f = await standaloneQuotaFixture(t);
+    const failure = claudeLimitAt(clock);
+    f.at(beforeMidnight);
+    await f.engine.deferredFailure("planner", "failed", failure);
+    f.histories.set("planner", { key:"older", turnId:"older", failed:null, text:"old", messageIds:[] });
+    await f.engine.tick();
+    assert.equal((await stored(f)).quotaPause, null);
+    assert.equal((await stored(f)).inbox.failureObservedAt, beforeMidnight);
+    await f.engine.close();
+    if (oldInbox) {
+      const persisted = JSON.parse(await readFile(f.file, "utf8"));
+      delete persisted.workflows[0].inbox.failureObservedAt;
+      await writeFile(f.file, JSON.stringify(persisted));
+    }
+    const engine = new WorkflowEngine(f.file, f.port, undefined, null, f.now);
+    t.after(() => engine.close());
+    f.at(afterMidnight);
+    f.agents.get("planner").status = "error";
+    f.histories.set("planner", { key:"failed", turnId:"failed", failed:failure, text:"", messageIds:[] });
+    await engine.tick();
+    const expectedDue = Math.max(afterMidnight + 300_000, retryAt ?? 0);
+    const stopped = (await stored(f)).quotaPause;
+    assert.equal(stopped.failedTurnId, "failed");
+    assert.equal(stopped.retryAt, retryAt);
+    assert.equal(stopped.nextCheckAt, expectedDue);
+    assert.equal(f.sent.length, 0);
+    f.at(expectedDue - 1);
+    await engine.tick();
+    assert.equal(f.sent.length, 0);
+    f.at(expectedDue);
+    await engine.tick();
+    await engine.tick();
+    assert.deepEqual(f.sent.map(message => message.id), ["planner"]);
+  });
+}
+
+for (const deferred of [false, true]) {
+  test(`standalone Claude completed history retains the first quota observation, deferred=${deferred}`, async t => {
+    const f = await standaloneQuotaFixture(t);
+    const failure = claudeLimitAt("11:59pm");
+    if (deferred) {
+      f.at(beforeMidnight);
+      await f.engine.deferredFailure("planner", "failed", failure);
+    }
+    f.at(afterMidnight);
+    await f.engine.ended("planner", "history-key", "", failure, "", false, "", false, [],
+      undefined, undefined, "failed", deferred ? afterMidnight : beforeMidnight);
+    assert.equal((await stored(f)).quotaPause.retryAt, sameDayReset);
+  });
+}
 
 test("explicit push approval blocks quota recovery even with an active progress marker", async t => {
   let now = Date.UTC(2026, 10, 26);

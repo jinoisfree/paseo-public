@@ -101,6 +101,7 @@ const inboxSchema = z.object({
   text: z.string(),
   failed: z.string().nullable(),
   failureCode: z.string().optional(),
+  failureObservedAt: z.number().optional(),
   // A failed lifecycle event whose history was not yet readable. Null means no turn identity.
   failureTurnId: z.string().nullable().optional(),
   turnId: z.string().optional(),
@@ -1695,7 +1696,9 @@ export class WorkflowEngine {
     });
   }
   /** Keep an immediate failure in the existing inbox until its delivery can be proved. */
-  deferredFailure(agentId: string, turnId: string | null, failure: string, failureCode?: string) {
+  deferredFailure(agentId: string, turnId: string | null, failure: string, failureCode?: string,
+    failureObservedAt = this.now(),
+  ) {
     return this.serial(async () => {
       const w = (await this.db()).workflows.find(candidate => memberRole(candidate, agentId) !== null);
       if (!w || w.status !== "active" || w.inbox) return;
@@ -1706,7 +1709,7 @@ export class WorkflowEngine {
           this.recovery.quotaBlocked(w, role) || !this.recovery.quotaLimit(w, role, failure, failureCode)) return;
       const key = `failed-event:${turnId ?? w.pending!.id}`;
       if (w.processed.includes(key)) return;
-      w.inbox = { agentId, key, text: "", failed: failure, failureCode, failureTurnId: turnId,
+      w.inbox = { agentId, key, text: "", failed: failure, failureCode, failureObservedAt, failureTurnId: turnId,
         compacted: false, canceled: false, reviewerViolation: "", resumed: false, answers: false };
       this.touch(w, "실패 이벤트의 전달 내역을 확인하고 있습니다. 확인 전에는 자동 실행하지 않습니다.");
       await this.save();
@@ -1725,6 +1728,7 @@ export class WorkflowEngine {
     evidence?: TurnEvidence,
     failureCode?: string,
     turnId?: string,
+    failureObservedAt = failed !== null && !canceled ? this.now() : undefined,
   ) {
     return this.serial(async () => {
       const w = (await this.db()).workflows.find(
@@ -1748,12 +1752,15 @@ export class WorkflowEngine {
       }
       if (memberRole(w, agentId) !== "reviewer" && !foreignReview) await this.recordTurnEvidence(w, text, failed, evidence, agentId, key);
       await this.refreshConflicts();
+      const sameDeferredFailure = failed !== null && turnId && w.inbox?.failureTurnId === turnId &&
+        w.inbox.agentId === agentId;
       const turn = {
         agentId,
         key,
         text,
         failed,
         ...(failureCode ? { failureCode } : {}),
+        failureObservedAt: sameDeferredFailure ? w.inbox?.failureObservedAt : failureObservedAt,
         turnId,
         compacted,
         canceled,

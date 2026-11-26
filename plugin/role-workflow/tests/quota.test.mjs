@@ -217,3 +217,10 @@ test("Claude reset clocks use the displayed zone and calendar date", () => {
   assert.equal(reset("You've hit your limit · resets Feb 30, 1pm (UTC)"), null);
   assert.equal(usageLimit("claude", "HTTP 429: too many requests"), null);
 });
+
+test("Claude reset clocks without a complete date need a failure observation", () => {
+  for (const reset of ["11:59pm", "Nov 25, 11:59pm"])
+    assert.deepEqual(usageLimit("claude", `You've hit your limit · resets ${reset} (UTC)`), { retryAt: null });
+  assert.deepEqual(usageLimit("claude", "You've hit your limit · resets Nov 25, 2026, 11:59pm (UTC)"),
+    { retryAt: Date.UTC(2026, 10, 25, 23, 59) });
+});

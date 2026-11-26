@@ -46,8 +46,8 @@ export class Recovery {
       (w.heldApproval && !reviewing));
   }
 
-  quotaLimit(w: Workflow, role: Role, failure: string, code?: string) {
-    return usageLimit(w[role]?.config.provider.split("/")[0] ?? "", failure, code, this.host.now());
+  quotaLimit(w: Workflow, role: Role, failure: string, code?: string, failureObservedAt?: number) {
+    return usageLimit(w[role]?.config.provider.split("/")[0] ?? "", failure, code, failureObservedAt);
   }
 
   stopQuota(w: Workflow) {
@@ -60,7 +60,7 @@ export class Recovery {
 
   async quotaFailure(w: Workflow, role: Role, inbox: NonNullable<Workflow["inbox"]>) {
     const provider = w[role]?.config.provider.split("/")[0];
-    const limit = this.quotaLimit(w, role, inbox.failed ?? "", inbox.failureCode);
+    const limit = this.quotaLimit(w, role, inbox.failed ?? "", inbox.failureCode, inbox.failureObservedAt);
     const previous = w.quotaPause;
     w.quotaPause = null;
     if (inbox.canceled || !limit || this.quotaBlocked(w, role) ||

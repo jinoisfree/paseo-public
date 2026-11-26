@@ -33,7 +33,7 @@ export function permanentFailure(text: string, code?: string): boolean {
 }
 
 /** Called only for a failed outcome, never for successful assistant text. */
-export function usageLimit(provider: string, failure: string, code?: string, now = Date.now()): { retryAt: number | null } | null {
+export function usageLimit(provider: string, failure: string, code?: string, failureObservedAt?: number): { retryAt: number | null } | null {
   if (permanentFailure(failure, code)) return null;
   if (provider !== "codex" && provider !== "claude") return null;
   const text = failure.replaceAll("’", "'");
@@ -42,17 +42,19 @@ export function usageLimit(provider: string, failure: string, code?: string, now
       ? /you've hit your usage limit\b/i.test(text)
       : /you're out of (?:extra usage|usage credits)\b|\bcredit balance (?:is )?too low\b|^spend limit reached(?:\s*·|$)|^you've hit your (?:(?:5-hour|session|weekly|Opus|Sonnet|Fable|usage credit|monthly spend) )?limit\b/i.test(text.trim()));
   if (!recognized) return null;
-  return { retryAt: provider === "codex" ? retryTime(text) : claudeResetTime(text, now) };
+  return { retryAt: provider === "codex" ? retryTime(text) : claudeResetTime(text, failureObservedAt) };
 }
 
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 
 /** Claude Code prints a local clock or month/day and clock, followed by its IANA zone. */
-function claudeResetTime(text: string, now: number): number | null {
+function claudeResetTime(text: string, failureObservedAt?: number): number | null {
   const match = /· resets (?:(\w{3}) (\d{1,2})(?:,? (\d{4}))?,? )?(\d{1,2})(?::(\d{2}))?([ap]m) \(([\w/+\-]+)\)/i.exec(text);
   if (!match) return null;
   const [, month, day, year, hour, minute = "0", meridiem, timeZone] = match;
   if (+hour < 1 || +hour > 12 || +minute > 59) return null;
+  // Old inboxes and history-only failures may have no observation to anchor a relative date.
+  if (!year && failureObservedAt === undefined) return null;
   let format: Intl.DateTimeFormat;
   try {
     format = new Intl.DateTimeFormat("en-US", {
@@ -64,17 +66,20 @@ function claudeResetTime(text: string, now: number): number | null {
     const parts = Object.fromEntries(format.formatToParts(epoch).map(({ type, value }) => [type, Number(value)]));
     return Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute);
   };
-  const localNow = new Date(localTime(now));
+  const localFailure = failureObservedAt === undefined ? null : new Date(localTime(failureObservedAt));
   const clock = (+hour % 12 + (meridiem.toLowerCase() === "pm" ? 12 : 0)) * 60 + +minute;
-  const date = month ? MONTHS.indexOf(month.toLowerCase()) : localNow.getUTCMonth();
+  const date = month ? MONTHS.indexOf(month.toLowerCase()) : localFailure!.getUTCMonth();
   if (date < 0) return null;
-  const calendarDay = day ? +day : localNow.getUTCDate();
-  let wall = Date.UTC(year ? +year : localNow.getUTCFullYear(), date, calendarDay, 0, clock);
+  const calendarDay = day ? +day : localFailure!.getUTCDate();
+  const calendarYear = year ? +year : localFailure!.getUTCFullYear();
+  let wall = Date.UTC(calendarYear, date, calendarDay, 0, clock);
   if (new Date(wall).getUTCDate() !== calendarDay) return null;
   // A clock without a date denotes the next occurrence in the next 24 hours.
-  if (!month && wall < localNow.getTime()) wall += 86_400_000;
-  if (month && !year && wall < localNow.getTime() && date < localNow.getUTCMonth())
-    wall = Date.UTC(localNow.getUTCFullYear() + 1, date, calendarDay, 0, clock);
+  if (localFailure && wall < localFailure.getTime()) {
+    if (!month) wall += 86_400_000;
+    else if (!year && date < localFailure.getUTCMonth())
+      wall = Date.UTC(calendarYear + 1, date, calendarDay, 0, clock);
+  }
   // Check both offsets around a DST transition. Choose the later instant for a repeated clock.
   const candidates = [-86_400_000, 86_400_000].map(delta => {
     const sample = wall + delta;
