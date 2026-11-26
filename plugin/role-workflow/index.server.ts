@@ -259,9 +259,12 @@ export default function contribute(server: PluginServerContext) {
           turn.compacted,
           turn.request,
           event.outcome.kind === "canceled",
-          turn.messageIds,
+          turn.turnId && turn.messageTurns
+            ? turn.messageIds.filter(id => turn.messageTurns?.[id] === turn.turnId)
+            : turn.messageIds,
           turn.evidence,
           event.outcome.kind === "failed" ? event.outcome.error.code : undefined,
+          turn.turnId,
         )
         .catch(report);
       void engine.auditPushes().catch(report);

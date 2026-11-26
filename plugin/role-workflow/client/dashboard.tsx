@@ -328,7 +328,7 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
           [
             ["notifyPermission", "권한 요청 알림"],
             ["notifyStopped", "작업 중단 알림"],
-            ["autoResumeQuota", "사용 한도 오류 주기적 재시도"],
+            ["autoResumeQuota", "일반·연합개발 사용 한도 자동 재개"],
             ["autoResumeTransient", "일시 오류 자동 재개"],
             ["shellPushGuard", "에이전트 셸 git push 차단"],
             ["notifyCompleted", "작업 완료 알림"],
@@ -795,8 +795,9 @@ export function Dashboard({ theme, navigation }: PluginSurfaceProps) {
           )}
           {capabilities(w).standalone && w.status !== "completed" && !["done", "pushed", "no_push"].includes(w.progress ?? "active") && <>
             {w.status === "active" && button("압축 유지보수 일시정지", () => void run(() => act({id:w.id,action:"pause",message:""}), "압축 유지보수를 일시정지했습니다."))}
-            {w.status === "paused" && button("압축 유지보수 재개", () => void run(() => act({id:w.id,action:"resume",message:""}), "압축 유지보수를 재개했습니다."))}
-            {w.status === "error" && !w.compactionRecovery && button("압축 유지보수 다시 확인", () => void run(() => act({id:w.id,action:"resume",message:""}), "압축 유지보수 상태를 확인했습니다."))}
+            {w.quotaWaiting && button("한도 자동 재개 취소", () => void run(() => act({id:w.id,action:"pause",message:""}), "자동 재개를 취소했습니다. 대화에서 직접 이어갈 수 있습니다."))}
+            {w.status === "paused" && !w.quotaWaiting && button("압축 유지보수 재개", () => void run(() => act({id:w.id,action:"resume",message:""}), "압축 유지보수를 재개했습니다."))}
+            {w.status === "error" && !w.quotaWaiting && !w.compactionRecovery && button("압축 유지보수 다시 확인", () => void run(() => act({id:w.id,action:"resume",message:""}), "압축 유지보수 상태를 확인했습니다."))}
             {w.status === "error" && w.compactionRecovery && <>
               {button("압축 복구·재시도", () => void run(() => act({id:w.id,action:"retry_compaction",message:""}), "압축 복구 상태를 확인했습니다."))}
               <Text style={s.muted}>완료 이력을 먼저 확인합니다. 정확한 요청의 실패가 확인될 때만 새 요청으로 재시도합니다. 확인이 어려우면 대화에서 직접 /compact를 실행한 뒤 복구하세요.</Text>

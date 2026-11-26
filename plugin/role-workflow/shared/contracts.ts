@@ -141,6 +141,7 @@ export const workflowViewSchema = z.object({
   verdict: verdictViewSchema.nullable().default(null),
   generalTransition: z.boolean().default(false),
   deliveryUnconfirmed: z.boolean().default(false),
+  quotaWaiting: z.boolean().default(false),
 });
 const runtimeCopyStatusSchema = z.object({
   state: z.enum(["ok", "drift", "unknown"]),

@@ -2,6 +2,7 @@ import type { Settings } from "../shared/contracts";
 import { capabilities } from "../shared/capabilities";
 import type { Workflow, WorkflowPort } from "./engine";
 import { recordQuotaFailure, usageLimit, quotaDelay, quotaCheckDue } from "./quota";
+import { isFinished } from "./archive";
 import { transientFailure, transientDelay } from "./transient";
 
 /** Legacy sent/sending entries were charged at their durable send boundary. */
@@ -21,7 +22,7 @@ type Role = "plan" | "execute" | "reviewer";
 
 /** What usage-limit and transient-error recovery needs from the engine. */
 export interface RecoveryHost {
-  port(): Pick<WorkflowPort, "quotaAccount" | "quotaAvailable" | "inspect">;
+  port(): Pick<WorkflowPort, "quotaAccount" | "inspect">;
   now(): number;
   settings(): Promise<Settings>;
   touch(w: Workflow, detail: string): void;
@@ -38,12 +39,32 @@ export interface RecoveryHost {
  */
 export class Recovery {
   constructor(private readonly host: RecoveryHost) {}
+  quotaBlocked(w: Workflow, role: Role): boolean {
+    const reviewing = (role === "reviewer" && w.planReview.stage === "reviewing") ||
+      (role === "plan" && w.planReview.stage === "revising");
+    return isFinished(w) || !!(w.asker || w.held || w.planIssue || w.generalTransition || w.pushApprovalPending ||
+      (w.heldApproval && !reviewing));
+  }
+
+  quotaLimit(w: Workflow, role: Role, failure: string, code?: string) {
+    return usageLimit(w[role]?.config.provider.split("/")[0] ?? "", failure, code, this.host.now());
+  }
+
+  stopQuota(w: Workflow) {
+    if (w.quotaPause && w.pending?.stage === "queued" && w.pending.retry &&
+        w.pending.role === w.quotaPause.role &&
+        (w.pending.sourcePendingId ?? null) === w.quotaPause.sourcePendingId)
+      w.pending = null;
+    w.quotaPause = null;
+  }
+
   async quotaFailure(w: Workflow, role: Role, inbox: NonNullable<Workflow["inbox"]>) {
     const provider = w[role]?.config.provider.split("/")[0];
-    const limit = usageLimit(provider ?? "", inbox.failed ?? "", inbox.failureCode);
+    const limit = this.quotaLimit(w, role, inbox.failed ?? "", inbox.failureCode);
     const previous = w.quotaPause;
     w.quotaPause = null;
-    if (inbox.canceled || !limit || (provider !== "codex" && provider !== "claude")) return;
+    if (inbox.canceled || !limit || this.quotaBlocked(w, role) ||
+        (provider !== "codex" && provider !== "claude") || !(await this.host.settings()).autoResumeQuota) return;
     const now = this.host.now();
     const account = await this.host.port().quotaAccount(provider).catch(() => null);
     w.quotaPause = recordQuotaFailure(
@@ -54,6 +75,7 @@ export class Recovery {
         retryAt: limit.retryAt,
         account,
         ...instruction(w.pending?.role === role ? w.pending : null),
+        failedTurnId: inbox.turnId,
         phase: w.pending?.role === role ? w.pending.phase : w.phase,
       },
       now,
@@ -65,11 +87,16 @@ export class Recovery {
     // A sent quota retry can enter error after repeated history/inspect failures.
     // Its durable reservation remains the authority; resume reconciles the existing
     // delivery before the normal tick consumes it, without sending a second request.
-    if (!record || !["paused", "error"].includes(w.status) || !capabilities(w).automatic) return;
+    const mode = capabilities(w);
+    if (!record || !["paused", "error"].includes(w.status) || !(mode.automatic || mode.standalone)) return;
     const settings = await this.host.settings();
-    if (!settings.autoResumeQuota) { w.quotaPause = null; return; }
-    if (w.cycles >= settings.maxCycles || (w.turns >= settings.maxTurns && !recoveryCharged(record))) {
-      w.quotaPause = null;
+    if (!settings.autoResumeQuota) { this.stopQuota(w); return; }
+    if (this.quotaBlocked(w, record.role) || w.inbox || (mode.standalone && w.plan?.compactionError)) {
+      this.stopQuota(w);
+      return;
+    }
+    if (mode.automatic && (w.cycles >= settings.maxCycles || (w.turns >= settings.maxTurns && !recoveryCharged(record)))) {
+      this.stopQuota(w);
       this.host.touch(w, `${this.host.limitDetail(w)} 한도를 확인하고 직접 재개하세요.`);
       return;
     }
@@ -79,8 +106,8 @@ export class Recovery {
     record.nextCheckAt = Math.max(now + quotaDelay(record.attempts + 1), record.retryAt ?? 0);
     try {
       const ready = await this.conversations(w);
-      if (ready === "permanent" || w.asker || w.held || w.generalTransition || w.inbox) {
-        w.quotaPause = null;
+      if (ready === "permanent") {
+        this.stopQuota(w);
         this.host.touch(w, "자동 복구를 멈췄습니다. 대화의 보관·질문·승인·전달 상태를 확인하세요.");
         return;
       }
@@ -94,8 +121,8 @@ export class Recovery {
       record.attempts++;
       record.nextCheckAt = now + quotaDelay(record.attempts + 1);
       const resumed = await this.host.resume(w, "", true);
-      if (resumed === "active") return;
-      if (resumed === "needs_input") { w.quotaPause = null; return; }
+      if (resumed === "active" || !w.quotaPause) return;
+      if (resumed === "needs_input") { this.stopQuota(w); return; }
     } catch {
       // Failed preflight/resume is not evidence that the outage has ended.
       record.checksFailed++;

@@ -46,6 +46,7 @@ async function fixture(
   probe = null,
   now = Date.now,
   managedRunner,
+  contract,
 ) {
   const dir = await mkdtemp(path.join(tmpdir(), "role-engine-"));
   t.after(async () => {
@@ -119,6 +120,7 @@ async function fixture(
     {},
     mode,
     titled,
+    contract,
   );
   const finish = async (agentId, key, status) => {
     agents.get(agentId).status = "idle";
@@ -3681,6 +3683,179 @@ for (const source of ["user", "response"]) {
 
 const quotaError =
   "You’ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Oct 14th, 2026 9:36 PM.";
+
+async function standaloneQuotaFixture(t, provider = "claude") {
+  let time = Date.UTC(2026, 10, 26, 10);
+  const f = await fixture(t, undefined, "general", undefined, provider, null, () => time, undefined, 7);
+  const error = provider === "claude" ? "You've hit your 5-hour limit · resets 8pm (Asia/Seoul)" : "You've hit your usage limit.";
+  const fail = async (key, failure = error, canceled = false) => {
+    f.agents.get("planner").status = "error";
+    f.histories.set("planner", { key, turnId:key, failed:failure, text:"", messageIds:[] });
+    await f.engine.ended("planner", key, "", failure, "", false, "original command", canceled, [], undefined, undefined, key);
+  };
+  return { ...f, fail, error, now: () => time, at: value => { time = value; } };
+}
+
+for (const provider of ["claude", "codex"]) {
+  test(`standalone ${provider} persists quota wait and continues the same agent exactly once`, async t => {
+    const f = await standaloneQuotaFixture(t, provider);
+    await f.fail("first");
+    const before = await stored(f);
+    assert.equal(before.status, "paused");
+    assert.equal(before.quotaPause.provider, provider);
+    assert.equal(before.quotaPause.retryAt, provider === "claude" ? Date.UTC(2026, 10, 26, 11) : null);
+    await f.fail("first");
+    await f.engine.close();
+    const engine = new WorkflowEngine(f.file, f.port, undefined, null, f.now);
+    t.after(() => engine.close());
+    f.at(before.quotaPause.nextCheckAt - 1);
+    await engine.tick();
+    assert.equal(f.sent.length, 0);
+    f.at(before.quotaPause.nextCheckAt);
+    await Promise.all([engine.tick(), engine.tick()]);
+    assert.equal(f.sent.length, 1);
+    assert.equal(f.sent[0].id, "planner");
+    assert.match(f.sent[0].prompt, /완료한 명령·변경·푸시를 반복하지/);
+    assert.doesNotMatch(f.sent[0].prompt, /original command|이번 지시/);
+    assert.equal(f.created.length, 0);
+    await engine.started("planner");
+    f.agents.get("planner").status = "idle";
+    await engine.ended("planner", "recovered", "finished", null);
+    await engine.ended("planner", "first", "", f.error);
+    await engine.tick();
+    const after = await stored(f);
+    assert.equal(after.quotaPause, null);
+    assert.equal(after.pending, null);
+    assert.equal(after.turns, before.turns);
+    assert.equal(after.cycles, before.cycles);
+    assert.equal(f.sent.length, 1);
+  });
+}
+
+for (const stop of ["manual", "pause", "new turn", "new history", "archived", "permission", "canceled", "auth", "429", "success", "push approval", "disabled"]) {
+  test(`standalone quota recovery sends nothing after ${stop}`, async t => {
+    const f = await standaloneQuotaFixture(t);
+    switch (stop) {
+      case "canceled": await f.fail("limit", f.error, true); break;
+      case "auth": await f.fail("limit", "HTTP 401: You've hit your limit"); break;
+      case "429": await f.fail("limit", "HTTP 429 rate limit"); break;
+      case "success": await f.engine.ended("planner", "success", f.error, null); break;
+      default:
+        if (stop === "push approval") await f.engine.setProgress((await stored(f)).number, "done");
+        if (stop === "disabled")
+          await f.engine.configure({ ...await f.engine.settings(), autoResumeQuota:false });
+        await f.fail("limit");
+        if (stop === "manual" || stop === "pause")
+          await f.engine.control(f.id, stop === "manual" ? "resume" : "pause");
+        else if (stop === "new turn") await f.engine.started("planner");
+        else if (stop === "new history") f.histories.set("planner", {key:"new", turnId:"new", text:"new", failed:null, messageIds:[]});
+        else if (stop === "archived" || stop === "permission") f.agents.get("planner")[stop] = true;
+    }
+    f.at(f.now() + 7_200_000);
+    await f.engine.tick();
+    assert.equal(f.sent.length, 0);
+    assert.equal((await stored(f))?.quotaPause ?? null, null);
+  });
+}
+
+test("standalone deferred quota failure waits for its exact turn history", async t => {
+  const f = await standaloneQuotaFixture(t);
+  await f.engine.deferredFailure("planner", "failed", f.error);
+  f.histories.set("planner", { key:"older", turnId:"older", failed:null, text:"old", messageIds:[] });
+  await f.engine.tick();
+  assert.equal((await stored(f)).quotaPause, null);
+  const waiting = (await stored(f)).recoveryCheck;
+  f.at(waiting.nextCheckAt);
+  f.histories.set("planner", { key:"failed", turnId:"failed", failed:f.error, text:"", messageIds:[] });
+  await f.engine.tick();
+  const stopped = await stored(f);
+  assert.equal(stopped.quotaPause.failedTurnId, "failed");
+  assert.equal(f.sent.length, 0);
+  f.at(stopped.quotaPause.nextCheckAt);
+  await f.engine.tick();
+  assert.equal(f.sent.length, 1);
+});
+
+test("explicit push approval blocks quota recovery even with an active progress marker", async t => {
+  let now = Date.UTC(2026, 10, 26);
+  const f = await fixture(t, undefined, "federated", undefined, "claude", null, () => now, undefined, 3);
+  await f.engine.ended("planner", "approval", "푸시 승인을 기다립니다.\n작업상태: 진행\n" + decision("note"), null);
+  assert.equal((await stored(f)).progress, "active");
+  assert.equal((await stored(f)).status, "active");
+  assert.equal((await stored(f)).pushApprovalPending, true);
+  await f.engine.ended("planner", "limit", "", "You're out of extra usage.");
+  now += 7_200_000;
+  await f.engine.tick();
+  assert.equal((await stored(f)).quotaPause, null);
+  assert.equal(f.sent.length, 0);
+});
+
+test("standalone pause and manual resume drop a deferred quota failure", async t => {
+  const f = await standaloneQuotaFixture(t);
+  await f.engine.deferredFailure("planner", "failed", f.error);
+  await f.engine.control(f.id, "pause");
+  await f.engine.control(f.id, "resume");
+  f.histories.set("planner", { key:"failed", turnId:"failed", failed:f.error, text:"", messageIds:[] });
+  f.at(f.now() + 7_200_000);
+  await f.engine.tick();
+  assert.equal((await stored(f)).inbox, null);
+  assert.equal((await stored(f)).quotaPause, null);
+  assert.equal(f.sent.length, 0);
+});
+
+test("standalone quota retry yields to a user turn that starts during its history check", async t => {
+  const f = await standaloneQuotaFixture(t);
+  await f.fail("first");
+  const history = f.port.history;
+  f.port.history = async id => {
+    f.agents.get(id).status = "running";
+    return history(id);
+  };
+  f.at((await stored(f)).quotaPause.nextCheckAt);
+  await f.engine.tick();
+  assert.equal(f.sent.length, 0);
+  await f.engine.started("planner");
+  assert.equal((await stored(f)).quotaPause, null);
+  assert.equal((await stored(f)).pending, null);
+});
+
+for (const manualFirst of [true, false]) {
+  test(`standalone manual resume and scheduled quota tick serialize, manual first=${manualFirst}`, async t => {
+    const f = await standaloneQuotaFixture(t);
+    await f.fail("first");
+    f.at((await stored(f)).quotaPause.nextCheckAt);
+    const actions = [() => f.engine.control(f.id, "resume"), () => f.engine.tick()];
+    await Promise.all((manualFirst ? actions : actions.reverse()).map(action => action()));
+    await f.engine.tick();
+    assert.equal(f.sent.length, manualFirst ? 0 : 1);
+  });
+}
+
+test("standalone restart reconciles a lost quota send acknowledgment without a second send", async t => {
+  const f = await standaloneQuotaFixture(t);
+  await f.fail("first");
+  const send = f.port.send;
+  f.port.send = async (...args) => {
+    await send(...args);
+    throw Error("lost acknowledgment");
+  };
+  f.at((await stored(f)).quotaPause.nextCheckAt);
+  await f.engine.tick();
+  const uncertain = await stored(f);
+  assert.equal(uncertain.pending.stage, "sending");
+  const id = uncertain.pending.id;
+  f.histories.set("planner", { key:"done", turnId:"retry", text:"done", failed:null, messageIds:[id], messageTurns:{[id]:"retry"} });
+  f.agents.get("planner").status = "idle";
+  await f.engine.close();
+  const engine = new WorkflowEngine(f.file, f.port, undefined, null, f.now);
+  t.after(() => engine.close());
+  f.at(uncertain.quotaPause.nextCheckAt);
+  await engine.tick();
+  await engine.tick();
+  assert.equal((await stored(f)).quotaPause, null);
+  assert.equal((await stored(f)).pending, null);
+  assert.equal(f.sent.length, 1);
+});
 async function quotaFixture(t, notify) {
   let time = new Date(2026, 9, 9, 12).getTime();
   const f = await fixture(t, notify, undefined, undefined, "claude", null, () => time);

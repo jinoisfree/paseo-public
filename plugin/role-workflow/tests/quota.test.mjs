@@ -206,3 +206,14 @@ test("credit and structured failures preserve quota precedence and permanent exc
     assert.equal(usageLimit("claude", text, "insufficient_quota"), null, text);
   }
 });
+
+test("Claude reset clocks use the displayed zone and calendar date", () => {
+  const now = Date.UTC(2026, 10, 26, 14);
+  const reset = text => usageLimit("claude", text, undefined, now)?.retryAt;
+  assert.equal(reset("You've hit your session limit · resets 12am (Asia/Seoul)"), Date.UTC(2026, 10, 26, 15));
+  assert.equal(reset("You've hit your weekly limit · resets Dec 2, 1:30pm (America/New_York)"), Date.UTC(2026, 11, 2, 18, 30));
+  assert.equal(reset("You've hit your Opus limit · resets Jan 3, 2027, 12:05am (UTC)"), Date.UTC(2027, 0, 3, 0, 5));
+  assert.equal(reset("You've hit your limit · resets 1pm (Bad/Zone)"), null);
+  assert.equal(reset("You've hit your limit · resets Feb 30, 1pm (UTC)"), null);
+  assert.equal(usageLimit("claude", "HTTP 429: too many requests"), null);
+});

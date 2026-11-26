@@ -17,6 +17,7 @@ export const quotaPauseSchema = z.object({
   instruction: z.boolean().default(false),
   budgetCharged: z.boolean().default(false),
   sourcePendingId: z.string().nullable().default(null),
+  failedTurnId: z.string().optional(),
 
   phase: z.enum(["plan", "execute", "review"]),
 });
@@ -32,17 +33,54 @@ export function permanentFailure(text: string, code?: string): boolean {
 }
 
 /** Called only for a failed outcome, never for successful assistant text. */
-export function usageLimit(provider: string, failure: string, code?: string): { retryAt: number | null } | null {
+export function usageLimit(provider: string, failure: string, code?: string, now = Date.now()): { retryAt: number | null } | null {
   if (permanentFailure(failure, code)) return null;
   if (provider !== "codex" && provider !== "claude") return null;
   const text = failure.replaceAll("’", "'");
   const recognized = code === "insufficient_quota" || (
     provider === "codex"
       ? /you've hit your usage limit\b/i.test(text)
-      : // @anthropic-ai/claude-agent-sdk/sdk.mjs, installed with Paseo 0.10.3.
-        provider === "claude" && /you're out of extra usage\b|\bcredit balance (?:is )?too low\b/i.test(text));
+      : /you're out of (?:extra usage|usage credits)\b|\bcredit balance (?:is )?too low\b|^spend limit reached(?:\s*·|$)|^you've hit your (?:(?:5-hour|session|weekly|Opus|Sonnet|Fable|usage credit|monthly spend) )?limit\b/i.test(text.trim()));
   if (!recognized) return null;
-  return { retryAt: retryTime(text) };
+  return { retryAt: provider === "codex" ? retryTime(text) : claudeResetTime(text, now) };
+}
+
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+
+/** Claude Code prints a local clock or month/day and clock, followed by its IANA zone. */
+function claudeResetTime(text: string, now: number): number | null {
+  const match = /· resets (?:(\w{3}) (\d{1,2})(?:,? (\d{4}))?,? )?(\d{1,2})(?::(\d{2}))?([ap]m) \(([\w/+\-]+)\)/i.exec(text);
+  if (!match) return null;
+  const [, month, day, year, hour, minute = "0", meridiem, timeZone] = match;
+  if (+hour < 1 || +hour > 12 || +minute > 59) return null;
+  let format: Intl.DateTimeFormat;
+  try {
+    format = new Intl.DateTimeFormat("en-US", {
+      timeZone, year: "numeric", month: "numeric", day: "numeric", hour: "numeric",
+      minute: "numeric", hourCycle: "h23",
+    });
+  } catch { return null; }
+  const localTime = (epoch: number) => {
+    const parts = Object.fromEntries(format.formatToParts(epoch).map(({ type, value }) => [type, Number(value)]));
+    return Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute);
+  };
+  const localNow = new Date(localTime(now));
+  const clock = (+hour % 12 + (meridiem.toLowerCase() === "pm" ? 12 : 0)) * 60 + +minute;
+  const date = month ? MONTHS.indexOf(month.toLowerCase()) : localNow.getUTCMonth();
+  if (date < 0) return null;
+  const calendarDay = day ? +day : localNow.getUTCDate();
+  let wall = Date.UTC(year ? +year : localNow.getUTCFullYear(), date, calendarDay, 0, clock);
+  if (new Date(wall).getUTCDate() !== calendarDay) return null;
+  // A clock without a date denotes the next occurrence in the next 24 hours.
+  if (!month && wall < localNow.getTime()) wall += 86_400_000;
+  if (month && !year && wall < localNow.getTime() && date < localNow.getUTCMonth())
+    wall = Date.UTC(localNow.getUTCFullYear() + 1, date, calendarDay, 0, clock);
+  // Check both offsets around a DST transition. Choose the later instant for a repeated clock.
+  const candidates = [-86_400_000, 86_400_000].map(delta => {
+    const sample = wall + delta;
+    return wall - (localTime(sample) - sample);
+  }).filter(candidate => localTime(candidate) === wall);
+  return candidates.length ? Math.max(...candidates) : null;
 }
 
 function retryTime(text: string): number | null {
@@ -51,20 +89,7 @@ function retryTime(text: string): number | null {
       text,
     );
   if (!match) return null;
-  const month = [
-    "jan",
-    "feb",
-    "mar",
-    "apr",
-    "may",
-    "jun",
-    "jul",
-    "aug",
-    "sep",
-    "oct",
-    "nov",
-    "dec",
-  ].indexOf(match[1].toLowerCase());
+  const month = MONTHS.indexOf(match[1].toLowerCase());
   const day = Number(match[2]),
     year = Number(match[3]),
     hour = Number(match[4]),
@@ -101,7 +126,7 @@ export function usageAvailable(usage: ProviderUsage): boolean | null {
 
 export function recordQuotaFailure(
   previous: QuotaPause | null,
-  failure: Pick<QuotaPause, "role" | "provider" | "retryAt" | "account" | "prompt" | "phase" | "instruction" | "budgetCharged" | "sourcePendingId">,
+  failure: Pick<QuotaPause, "role" | "provider" | "retryAt" | "account" | "prompt" | "phase" | "instruction" | "budgetCharged" | "sourcePendingId" | "failedTurnId">,
   now: number,
 ): QuotaPause {
   const same = previous?.role === failure.role && previous.provider === failure.provider &&

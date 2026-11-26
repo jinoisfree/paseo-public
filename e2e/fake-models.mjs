@@ -68,6 +68,10 @@ function responses(parsed, res) {
       callsTool,
     }) + "\n",
   );
+  if (settings.quotaPrompt && textOf(lastUser?.content).includes(settings.quotaPrompt)) {
+    res.writeHead(400, { "content-type": "application/json" });
+    return res.end(JSON.stringify({ error: { code: "insufficient_quota", message: "You've hit your usage limit." } }));
+  }
   const rid = `resp_${Date.now()}`,
     mid = `msg_${Date.now()}`;
   const usage = { input_tokens: 1, input_tokens_details: null, output_tokens: 1, output_tokens_details: null, total_tokens: 2 };
@@ -156,7 +160,8 @@ createServer((req, res) => {
         callsTool,
       }) + "\n",
     );
-    if (settings.failRole === role && (parsed.tools ?? []).length) {
+    if ((settings.failRole === role && (parsed.tools ?? []).length) ||
+        (settings.quotaPrompt && last.includes(settings.quotaPrompt))) {
       // Non-retryable at the SDK boundary: the workflow must own the later retry.
       return json(400, { type: "error", error: { type: "invalid_request_error", message: "Credit balance is too low. Please top up your account." } });
     }

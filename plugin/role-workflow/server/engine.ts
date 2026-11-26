@@ -103,6 +103,7 @@ const inboxSchema = z.object({
   failureCode: z.string().optional(),
   // A failed lifecycle event whose history was not yet readable. Null means no turn identity.
   failureTurnId: z.string().nullable().optional(),
+  turnId: z.string().optional(),
   compacted: z.boolean().default(false),
   canceled: z.boolean().default(false),
   reviewerViolation: z.string().default(""),
@@ -1079,7 +1080,7 @@ export class WorkflowEngine {
           if (w.transientPause && ["paused", "error"].includes(w.status))
             this.recovery.stopTransient(w, w.transientPause.failure);
       }
-      if (!db.settings.autoResumeQuota) for (const w of db.workflows) w.quotaPause = null;
+      if (!db.settings.autoResumeQuota) for (const w of db.workflows) this.recovery.stopQuota(w);
       await this.save();
       return saved;
     });
@@ -1523,6 +1524,7 @@ export class WorkflowEngine {
         verdict: verdictView(w),
         generalTransition: w.generalTransition,
         deliveryUnconfirmed: w.pending?.stage === "sending" && w.status !== "active",
+        quotaWaiting: !!w.quotaPause && (w.status === "paused" || w.status === "error"),
         updatedAt: w.updatedAt,
         progress: w.progress,
         planAgentId: w.plan?.id ?? null,
@@ -1696,9 +1698,13 @@ export class WorkflowEngine {
   deferredFailure(agentId: string, turnId: string | null, failure: string, failureCode?: string) {
     return this.serial(async () => {
       const w = (await this.db()).workflows.find(candidate => memberRole(candidate, agentId) !== null);
-      if (!w || w.status !== "active" || w.inbox || !w.pending || w.pending.stage === "queued" ||
-          w[w.pending.role]?.id !== agentId) return;
-      const key = `failed-event:${turnId ?? w.pending.id}`;
+      if (!w || w.status !== "active" || w.inbox) return;
+      const role = memberRole(w, agentId)!;
+      if (w.pending) {
+        if (w.pending.stage === "queued" || w.pending.role !== role) return;
+      } else if (!turnId || !(automates(w) || capabilities(w).standalone) || this.floor(w) !== role ||
+          this.recovery.quotaBlocked(w, role) || !this.recovery.quotaLimit(w, role, failure, failureCode)) return;
+      const key = `failed-event:${turnId ?? w.pending!.id}`;
       if (w.processed.includes(key)) return;
       w.inbox = { agentId, key, text: "", failed: failure, failureCode, failureTurnId: turnId,
         compacted: false, canceled: false, reviewerViolation: "", resumed: false, answers: false };
@@ -1718,6 +1724,7 @@ export class WorkflowEngine {
     messageIds?: readonly string[],
     evidence?: TurnEvidence,
     failureCode?: string,
+    turnId?: string,
   ) {
     return this.serial(async () => {
       const w = (await this.db()).workflows.find(
@@ -1727,7 +1734,10 @@ export class WorkflowEngine {
       if (memberRole(w, agentId) === "reviewer" && w.planReview.stage === "done") return;
       if (w.processed.includes(key) || w.inbox?.key === key || w.planIssue?.response.key === key) return;
       if (capabilities(w).brainstorm && requestsBrainstorm(userText(request || goal))) await this.startBrainstorm(w);
-      if (canceled) w.transientPause = null;
+      if (canceled) {
+        this.recovery.stopQuota(w);
+        w.transientPause = null;
+      }
       this.pushAudit.invalidatePushAudit(w);
       let foreignReview = false;
       try { foreignReview = memberRole(w, agentId) !== "reviewer" && !!parseDecision(text).planReview; } catch { /* read() owns malformed-block handling. */ }
@@ -1744,6 +1754,7 @@ export class WorkflowEngine {
         text,
         failed,
         ...(failureCode ? { failureCode } : {}),
+        turnId,
         compacted,
         canceled,
         reviewerViolation: evidence?.changed || evidence?.pushes.length ? "검증 턴에서 파일 변경 또는 푸시가 관측됐습니다." : "",
@@ -1871,10 +1882,18 @@ export class WorkflowEngine {
     chatBlocked: boolean,
     messageIds?: readonly string[],
   ) {
-    const { agentId, key, text, failed, compacted, canceled } = turn;
+    const { agentId, key, text, failed } = turn;
     const report = evidence?.report ?? text;
     const role: Role = memberRole(w, agentId)!;
     if (!(await this.admits(w, agentId, text, failed, request, key, report))) {
+      if (capabilities(w).standalone && role === "plan") {
+        if (w.inbox?.failureTurnId) w.inbox = null;
+        await this.standaloneTurn(w, turn);
+      }
+      await this.rememberSideTurn(w, key, evidence);
+      return;
+    }
+    if (failed !== null && w.status === "needs_input") {
       await this.rememberSideTurn(w, key, evidence);
       return;
     }
@@ -1910,7 +1929,7 @@ export class WorkflowEngine {
         w.pending.role === role && failed === null && this.sideDecision(w, role, text))
       w.status = "active";
     if (!w.goal) w.goal = goal.slice(0, 32000);
-    w.inbox = { agentId, key, text, failed, ...(turn.failureCode ? { failureCode: turn.failureCode } : {}), compacted, canceled, reviewerViolation: evidence?.changed || evidence?.pushes.length ? "검증 턴에서 파일 변경 또는 푸시가 관측됐습니다." : "", resumed, answers };
+    w.inbox = { ...turn, resumed, answers };
     await this.save();
     await this.advance(w);
   }
@@ -3041,8 +3060,12 @@ export class WorkflowEngine {
         if (action === "pause") await this.pause(w);
         else if (action === "retry_compaction") await this.compaction.retryCompaction(w);
         else if (action === "resume" && !message.trim()) {
+          if (w.plan?.compactionError && w.status !== "paused")
+            throw new Error("압축 복구·재시도 버튼으로 완료 상태를 먼저 확인하세요.");
+          this.recovery.stopQuota(w);
+          w.pending = null;
+          w.inbox = null;
           if (w.plan?.compactionError) {
-            if (w.status !== "paused") throw new Error("압축 복구·재시도 버튼으로 완료 상태를 먼저 확인하세요.");
             w.status = "error";
             this.touch(w, "압축 오류가 남아 있습니다. 압축 복구·재시도로 완료 상태를 확인하세요.");
           } else {
@@ -3077,7 +3100,11 @@ export class WorkflowEngine {
     });
   }
   private async pause(w: Workflow) {
-    w.quotaPause = null;
+    this.recovery.stopQuota(w);
+    if (capabilities(w).standalone) {
+      w.pending = null;
+      w.inbox = null;
+    }
     w.transientPause = null;
     w.recoveryCheck = null;
     w.status = "paused";
@@ -3100,19 +3127,20 @@ export class WorkflowEngine {
       this.queue(w, recovery.role, recovery.prompt ?? CONTINUE, recovery.phase, recovery.instruction);
       w.pending!.retry = true;
       w.pending!.budgetCharged = recoveryCharged(recovery);
+      if (w.quotaPause === recovery) recovery.sourcePendingId ??= w.pending!.id;
       w.pending!.sourcePendingId = recovery.sourcePendingId;
     }
     if (message && !w.planIssue) this.redirect(w, message);
     this.touch(w, "자동 작업을 재개합니다.");
     await this.save();
     await this.advance(w);
-    await this.keepMoving(w);
+    if (automates(w)) await this.keepMoving(w);
     return w.status;
   }
   private async prepareResume(w: Workflow, automatic: boolean) {
     if (!automatic) {
       w.recoveryCheck = null;
-      w.quotaPause = null;
+      this.recovery.stopQuota(w);
       w.transientPause = null;
       w.planFingerprint = "";
       w.repeatedPlans = 0;
@@ -3288,7 +3316,7 @@ export class WorkflowEngine {
     }
     await this.recovery.retryQuota(w);
     await this.recovery.retryTransient(w);
-    return automates(w) && w.status === "active";
+    return w.status === "active" && (automates(w) || (capabilities(w).standalone && !!(w.pending || w.inbox)));
   }
   private deferObservation(w: Workflow, reason: string) {
     const attempts = (w.recoveryCheck?.attempts ?? 0) + 1;
@@ -3337,7 +3365,7 @@ export class WorkflowEngine {
       }
       if (snapshot.archived) {
         member.usage = null;
-        w.quotaPause = null;
+        this.recovery.stopQuota(w);
         w.transientPause = null;
         this.compressionReasons.set(member.id, compressionDecision(member.config.provider, await this.settings(), null).reason);
         w.status = "paused";
@@ -3393,6 +3421,7 @@ export class WorkflowEngine {
         text: turn.history.text,
         failed: turn.failed,
         ...(turn.history.failureCode ? { failureCode: turn.history.failureCode } : {}),
+        turnId: turn.history.turnId,
         compacted: turn.history.compacted ?? false,
         canceled: false,
         reviewerViolation: turn.history.evidence?.changed || turn.history.evidence?.pushes.length ? "검증 턴에서 파일 변경 또는 푸시가 관측됐습니다." : "",
@@ -3506,6 +3535,10 @@ export class WorkflowEngine {
       if (w.inbox) await this.consumeInbox(w);
       if (w.status !== "active") {
         await this.save();
+        return;
+      }
+      if (capabilities(w).standalone) {
+        await this.deliver(w);
         return;
       }
       await this.prepareMember(w, "plan");
@@ -3634,24 +3667,55 @@ export class WorkflowEngine {
     const retryingFailure = !!pending.retry && recovery?.role === pending.role &&
       recovery.sourcePendingId === (pending.sourcePendingId ?? null);
     if (!this.receptive(snapshot, retryingFailure)) return;
-    if (w.turns >= (await this.settings()).maxTurns && !pendingCharged(pending)) {
+    const standalone = capabilities(w).standalone;
+    const quotaRetry = retryingFailure ? w.quotaPause : null;
+    if (quotaRetry && (this.recovery.quotaBlocked(w, pending.role) || !(await this.settings()).autoResumeQuota)) {
+      this.recovery.stopQuota(w);
+      w.status = standalone ? "active" : "needs_input";
+      this.touch(w, "현재 작업 상태 또는 설정에 따라 한도 자동 재개를 취소했습니다.");
+      return;
+    }
+    if (!standalone && w.turns >= (await this.settings()).maxTurns && !pendingCharged(pending)) {
       w.status = "paused";
       this.touch(w, this.limitDetail(w));
       await this.save();
       return;
     }
     if (pending.role === "execute" && !(await this.clearToExecute(w, pending))) return;
+    if (standalone && await this.busyWriter(w)) return;
+    if (quotaRetry?.failedTurnId) {
+      const history = await this.port.history(member.id);
+      if (!history.turnId) throw new Error("한도에 걸린 턴의 최신 이력을 확인하지 못했습니다.");
+      if (history.turnId !== quotaRetry.failedTurnId) {
+        this.recovery.stopQuota(w);
+        w.status = standalone ? "active" : "needs_input";
+        this.touch(w, "새 대화 요청을 확인해 한도 자동 재개를 취소했습니다.");
+        await this.save();
+        return;
+      }
+    }
+    if (quotaRetry) {
+      // The timeline and repository checks above can take time. Re-read before reserving a send.
+      const latest = await this.port.inspect(member.id);
+      if (!latest) throw new Error("자동 재개 직전 대화 상태를 조회하지 못했습니다.");
+      if (latest.archived || latest.permission) {
+        this.recovery.stopQuota(w);
+        w.status = standalone ? "active" : "needs_input";
+        this.touch(w, "대화의 보관 또는 권한 대기를 확인해 한도 자동 재개를 취소했습니다.");
+        return;
+      }
+      if (!this.receptive(latest, true)) return;
+    }
     pending.rememberedThrough = w.memorySequence;
-    if (!pendingCharged(pending)) w.turns++;
-    pending.budgetCharged = true;
+    if (!standalone && !pendingCharged(pending)) w.turns++;
+    pending.budgetCharged = !standalone;
     pending.sourcePendingId ??= pending.id;
     pending.stage = "sending";
     await this.save();
-    await this.port.send(
-      member.id,
-      (await this.context(w, member)) + "\n이번 지시:\n" + pending.prompt,
-      pending.id,
-    );
+    const continuation = "현재 대화의 상태와 이미 끝낸 작업을 확인하고 사용 한도에 막힌 지점부터 이어가세요. 완료한 명령·변경·푸시를 반복하지 말고, 새 질문이나 승인이 필요하면 기다리세요.";
+    const prompt = standalone ? continuation : (await this.context(w, member)) +
+      (quotaRetry ? "\n사용 한도 복구: " + continuation : "") + "\n이번 지시:\n" + pending.prompt;
+    await this.port.send(member.id, prompt, pending.id);
     pending.stage = "sent";
     member.rememberedThrough = pending.rememberedThrough;
     const descriptions = {
@@ -3663,7 +3727,8 @@ export class WorkflowEngine {
     const answering = pending.role === "plan" && pending.phase === "execute";
     this.touch(
       w,
-      pending.role === "reviewer" ? `${w.planReview.error ? w.planReview.error + "\n" : ""}계획 검증 중 (${w.planReview.round}/${w.planReview.maxRounds})` : answering ? "계획 담당이 답변을 처리하고 있습니다." : descriptions[pending.phase],
+      standalone ? "같은 대화에서 사용 한도로 중단된 작업을 이어가고 있습니다." :
+        pending.role === "reviewer" ? `${w.planReview.error ? w.planReview.error + "\n" : ""}계획 검증 중 (${w.planReview.round}/${w.planReview.maxRounds})` : answering ? "계획 담당이 답변을 처리하고 있습니다." : descriptions[pending.phase],
     );
     await this.save();
   }
@@ -3823,6 +3888,12 @@ export class WorkflowEngine {
         w.pending.stage !== "queued" &&
         w[w.pending.role]?.id === agentId;
       if (!automatic) w.transientPause = null;
+      const quotaInFlight = w.pending?.retry && w.pending.stage !== "queued" && w[w.pending.role]?.id === agentId;
+      if (!automatic && !quotaInFlight && w.quotaPause) {
+        this.recovery.stopQuota(w);
+        if (capabilities(w).standalone && w.status === "paused") w.status = "active";
+      }
+      if (!w.pending && w.inbox?.failureTurnId) w.inbox = null;
       if (w?.mode === "general" && w.generalDelivery?.stage === "uncertain") {
         w.generalDelivery = null;
         w.status = "active";
@@ -3954,10 +4025,10 @@ export class WorkflowEngine {
     if (!role) { w.inbox = null; return; }
     if (inbox.failureTurnId !== undefined) {
       const pending = w.pending;
-      if (!pending || pending.role !== role || pending.stage === "queued") return;
-      const history = await this.port.history(inbox.agentId, pending.id);
+      const history = await this.port.history(inbox.agentId, pending?.id);
       if (!inbox.failureTurnId || history.turnId !== inbox.failureTurnId ||
-          history.messageTurns?.[pending.id] !== inbox.failureTurnId || !history.messageIds.includes(pending.id)) {
+          (pending && (pending.role !== role || pending.stage === "queued" ||
+            history.messageTurns?.[pending.id] !== inbox.failureTurnId))) {
         this.deferObservation(w, "실패 이벤트와 전달된 턴의 연결을 확인하지 못했습니다. 대화의 오류·전달 내역을 확인하세요.");
         return;
       }
@@ -3965,8 +4036,16 @@ export class WorkflowEngine {
       if (w.processed.includes(history.key)) { w.inbox = null; await this.save(); return; }
       this.seen(w, inbox.key);
       inbox.key = history.key;
-      inbox.answers = true;
+      inbox.turnId = history.turnId;
+      inbox.answers = !!pending;
       delete inbox.failureTurnId;
+    }
+    if (capabilities(w).standalone) {
+      w.inbox = null;
+      await this.standaloneTurn(w, inbox);
+      this.seen(w, inbox.key);
+      await this.save();
+      return;
     }
     if (role === "reviewer" && w.reviewSelection.enabled === false) {
       if (w.pending?.role === "reviewer") w.pending = null;
@@ -3983,9 +4062,24 @@ export class WorkflowEngine {
     else await this.driven(w, role, inbox);
     await this.save();
   }
+  private async standaloneTurn(w: Workflow, inbox: Inbox) {
+    const recovering = !!w.quotaPause;
+    if (w.status === "active" && inbox.failed !== null && !w.plan?.compactionError)
+      await this.recovery.quotaFailure(w, "plan", inbox);
+    else this.recovery.stopQuota(w);
+    w.pending = null;
+    if (w.quotaPause) {
+      w.status = "paused";
+      this.recovery.describeQuota(w);
+    } else if (recovering && w.status === "paused") {
+      w.status = "active";
+      this.touch(w, "대화에 새 응답이 도착해 한도 재개 대기를 마쳤습니다.");
+    }
+  }
   /** The reply to a delivered instruction. Whatever it says, that instruction is over. */
   private async answered(w: Workflow, role: Role, inbox: Inbox) {
     if (inbox.failed !== null) await this.recovery.quotaFailure(w, role, inbox);
+    else if (w.quotaPause?.role === role) w.quotaPause = null;
     const pending = w.pending;
     w.pending = null;
     w.planIssue = null;

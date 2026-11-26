@@ -916,7 +916,7 @@ try {
     } finally {writeFileSync(control,JSON.stringify({mode:"text",text:"2"}));}
   });
 
-  await step("AUTOREC: credit failure survives reload and resumes the same executor without a resume RPC", async () => {
+  await step("AUTOREC: quota failures survive reload and resume the same Claude/Codex conversations", async () => {
     writeFileSync(control, JSON.stringify({mode:"role", scenario:"autorec-credit",
       plan:[workflowBlock("plan", "자동 복구 시험 지시"), workflowBlock("input", "자동 왕복 확인")],
       execute:[workflowBlock("result", "복구 뒤 결과")], failRole:"execute"}));
@@ -936,6 +936,32 @@ try {
       assert(failedSnapshot.agent.status === "error", `expected real error state, got ${failedSnapshot.agent.status}`);
       assert(record.prompt === "자동 복구 시험 지시" && record.instruction && record.budgetCharged, "failure lost instruction or budget ownership");
       assert(record.nextCheckAt - record.stoppedAt >= 300000, "quota retry ran before five minutes");
+      writeFileSync(control, JSON.stringify({mode:"role", scenario:"autorec-general-quota", quotaPrompt:"autorec-general-quota",
+        execute:[workflowBlock("result", "복구 뒤 결과")]}));
+      const standalone = await Promise.all(["claude", "codex"].map(async provider => {
+        const agent = await runAgent("일반개발로 진행해줘. autorec-general-quota", provider);
+        const stopped = await waitFor(`${provider} standalone quota reservation`, async () =>
+          state().workflows.find(w => w.plan?.id === agent && w.mode === "general" && w.quotaPause), 30000);
+        assert(stopped.status === "paused" && stopped.quotaPause.provider === provider &&
+          !stopped.quotaPause.prompt && !stopped.pending && !stopped.execute, "standalone reserved a role delivery");
+        return { agent, stopped, provider };
+      }));
+      const codexInstruction = "자동 복구 Codex 구현 지시";
+      writeFileSync(control, JSON.stringify({mode:"role", scenario:"autorec-codex-execute", quotaPrompt:codexInstruction,
+        plan:[workflowBlock("plan", codexInstruction)]}));
+      const codexPlanner = await runAgent("연합개발로 진행해줘. autorec-codex-execute");
+      const codexHeld = await waitFor("Codex executor's first held plan", async () =>
+        state().workflows.find(w => w.plan?.id === codexPlanner && w.heldApproval));
+      const codexModel = (await rpc("workflow.models", {provider:"codex"})).models[0];
+      assert(codexModel, "Codex executor catalog unavailable");
+      const codexThinking = codexModel.thinkingOptions.find(o=>o.isDefault)?.id ?? codexModel.thinkingOptions[0]?.id ?? "";
+      const codexSelected = await rpc("workflow.select-executor", {id:codexHeld.id, holdId:codexHeld.heldApproval.id,
+        provider:"codex", model:codexModel.id, thinking:codexThinking, review:{enabled:false}, placement:"worktree"});
+      assert(codexSelected.ok, codexSelected.detail);
+      const codexBefore = await waitFor("Codex executor quota reservation", async () =>
+        state().workflows.find(w => w.id === codexHeld.id && w.quotaPause), 90000);
+      assert(codexBefore.quotaPause.provider === "codex" && codexBefore.quotaPause.prompt === codexInstruction &&
+        codexBefore.quotaPause.budgetCharged, "Codex executor lost its role or charged instruction");
       writeFileSync(control, JSON.stringify({mode:"role", scenario:"autorec-recovered",
         plan:[workflowBlock("input", "자동 왕복 확인")], execute:[workflowBlock("result", "복구 뒤 결과")]}));
       const reloaded = await cli("plugin", "reload", "role-workflow");
@@ -945,11 +971,33 @@ try {
       assert(preserved.quotaPause.nextCheckAt === record.nextCheckAt && preserved.execute.id === executor, "reload reset retry time or executor");
       const rpcBeforeWait = rpcCount;
       const recovered = await waitFor("automatic executor result and planner response", async () => state().workflows.find(w=>w.id===flow.id && w.status==="needs_input" && w.lastResult && !w.quotaPause), 420000);
+      const codexAfter = await waitFor("Codex executor result and planner response", async () =>
+        state().workflows.find(w => w.id === codexBefore.id && w.status === "needs_input" && w.lastResult && !w.quotaPause), 90000);
       assert(rpcCount === rpcBeforeWait, "a workflow RPC was used to resume");
       assert(recovered.execute.id === executor && recovered.turns === turns + 1, "retry changed executor or charged its budget twice");
       assert(recovered.cycles === flow.cycles, "retry changed cycle budget");
+      assert(codexAfter.execute.id === codexBefore.execute.id && codexAfter.turns === codexBefore.turns + 1 &&
+        codexAfter.cycles === codexBefore.cycles, "Codex retry changed executor or budget");
+      for (const [agent, expected] of [[executor, record.prompt], [codexAfter.execute.id, codexInstruction]]) {
+        const entries = (await api.agents.ref(agent).timeline.refetch({direction:"tail",limit:200})).entries;
+        assert(entries.filter(e => e.item.type === "user_message" &&
+          e.item.text.includes("사용 한도 복구:") && e.item.text.endsWith(expected)).length === 1,
+        "federated recovery was not sent exactly once");
+      }
+      const generalRecovered = await Promise.all(standalone.map(async ({agent, stopped, provider}) => {
+        const after = await waitFor(`${provider} same standalone conversation to finish`, async () =>
+          state().workflows.find(w => w.id === stopped.id && w.plan?.lastTurnKey &&
+            w.status === "active" && !w.pending && !w.quotaPause), 90000);
+        const entries = (await api.agents.ref(agent).timeline.refetch({direction:"tail",limit:200})).entries;
+        assert(entries.filter(e => e.item.type === "user_message" &&
+          e.item.text.includes("사용 한도에 막힌 지점부터 이어가세요")).length === 1, "standalone recovery was not sent exactly once");
+        assert(after.plan.id === agent && !after.execute && after.turns === stopped.turns &&
+          after.cycles === stopped.cycles, "recovery changed the standalone role or budget");
+        return {provider, agent, before:stopped, after};
+      }));
       writeFileSync(join(root,"autorec-credit.json"), JSON.stringify({record, failedStatus:failedSnapshot.agent.status,
-        before:flow, after:recovered, workflowRpcsDuringWait:rpcCount-rpcBeforeWait}, null, 2));
+        before:flow, after:recovered, codexBefore, codexAfter, generalRecovered,
+        workflowRpcsDuringWait:rpcCount-rpcBeforeWait}, null, 2));
     } catch (error) {
       const failed = state().workflows.find(w => w.id === flow.id);
       const timeline = failed?.execute && await createPaseoApi(client).agents.ref(failed.execute.id).timeline.refetch({direction:"tail", limit:200}).catch(() => null);
