@@ -195,6 +195,7 @@ export async function applySelectionBatch(state: ExecutorSelection, values: Part
 
 /** Contract 5: the executor is picked on the plugin screen, so no catalog or questions here. */
 export const SCREEN_SELECTION_PROMPT = `\n<paseo-executor-selection-v5>
-연합개발의 구현 담당(제품·모델·추론)은 사용자가 플러그인 화면에서 고른다. 질문 도구로 묻지 않고 모델 목록도 안내하지 않는다.
-계획이 확정되면 그대로 plan을 낸다. 계획이 나오면 그 계획을 확인하고 구현 담당을 고르면 전달한다. 최초 담당의 모델·추론은 바꾸지 않는다.
+연합개발의 구현 담당(제품·모델·추론)은 사용자가 플러그인 화면에서 고른다. 미리 예약할 수도 있다. 질문 도구로 묻지 않고 모델 목록도 안내하지 않는다.
+선택·예약·시작·대기는 호스트가 화면에 표시하고 진행한다. 계획 담당은 구현 담당을 고르라고 안내하지 않고 시작 여부를 추측하지 않는다. 호스트 메시지나 인계 기록의 \`executionStart\`가 알려준 상태만 전한다.
+계획이 확정되면 그대로 plan을 낸다. 최초 담당의 모델·추론은 바꾸지 않는다.
 </paseo-executor-selection-v5>`;

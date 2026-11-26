@@ -630,6 +630,38 @@ test("AT-RG-07: only the handoff records the derived execution start stage", asy
   assert.equal(Object.hasOwn(JSON.parse(await readFile(f.file, "utf8")).workflows[0], "executionStart"), false);
 });
 
+test("AT-ESN-01: handoff reports the reserved or approved executor", async (t) => {
+  const f = await fixture(t);
+  const flow = f.engine.database.workflows[0];
+  const handoff = path.join(path.dirname(f.file), "handoffs", `${f.id}.json`);
+  const draft = { stage: "ready", provider: "codex", model: "builder" };
+  const scenarios = [
+    ["before the first plan", { implementationReserved: true }, "reserved", true, "codex/builder"],
+    ["held during review", { implementationReserved: true, planReview: { ...flow.planReview, stage: "reviewing" } }, "planReview", true, "codex/builder"],
+    ["without a reservation", { selectionDraft: null }, "selecting", false, ""],
+    ["after cancellation", {}, "selecting", false, ""],
+    ["with an incomplete draft", { implementationReserved: true, selectionDraft: { ...draft, stage: "model" } }, "selecting", false, ""],
+    ["after approval", { approvedHold: 1, selection: { ...draft, model: "approved" }, phase: "execute", execute: { ...flow.plan, workspaceId: "workspace" } }, "running", false, "codex/approved"],
+  ];
+  const planReview = flow.planReview;
+  for (const [name, scenario, stage, reserved, executor] of scenarios) {
+    await t.test(name, async () => {
+      Object.assign(flow, {
+        contract: 7, phase: "plan", implementationReserved: false, approvedHold: 0,
+        planReview, selection: { stage: "provider" }, selectionDraft: draft, execute: null,
+      }, scenario);
+      await f.engine.saveHandoff(flow);
+      const { executionStart } = JSON.parse(await readFile(handoff, "utf8"));
+      assert.deepEqual(executionStart, {
+        stage, reserved, executor, executorSelected: Boolean(executor), blocker: null, reason: "",
+        userAction: stage === "selecting" ? "Paseo에서 구현 담당을 선택하세요." : "",
+      });
+    });
+  }
+  assert.equal(Object.hasOwn(flow, "executionStart"), false);
+  assert.equal(Object.hasOwn(JSON.parse(await readFile(f.file, "utf8")).workflows[0], "executionStart"), false);
+});
+
 test("first tick only removes confirmed archived undecided and never repeats lookup", async (t) => {
   const events = [];
   const f = await fixture(t, async (e) => events.push(e), "undecided");

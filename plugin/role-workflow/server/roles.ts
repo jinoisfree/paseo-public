@@ -104,6 +104,7 @@ export function composePrompt(
     trailing?: string;
     rulesReadme?: string | null;
     sharedRoles?: boolean;
+    contract?: number;
   },
 ): string | undefined {
   if (provider !== "claude" && provider !== "codex") return existing;
@@ -117,7 +118,7 @@ export function composePrompt(
     gated,
     sharedRoles: parts.sharedRoles,
   })!;
-  return (parts.automated ? role + "\n" + automationBlock(gated) : role) + (parts.trailing ?? "");
+  return (parts.automated ? role + "\n" + automationBlock(gated, parts.contract) : role) + (parts.trailing ?? "");
 }
 
 /** Contract 4 keeps the initial configuration; only federation activates role instructions. */
@@ -142,7 +143,7 @@ ${currentChoice}
   if (mode === "general")
     return [original, agentRulesBlock(rulesReadme), modeBlock, trailing].filter(Boolean).join("\n\n");
   return composePrompt(provider, original, {
-    role: "plan", automated: true, mode: modeBlock, rulesReadme,
+    role: "plan", automated: true, mode: modeBlock, rulesReadme, contract,
     trailing: selection + trailing,
   })!;
 }

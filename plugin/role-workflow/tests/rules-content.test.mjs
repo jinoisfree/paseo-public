@@ -25,3 +25,13 @@ test("generated rules exactly match their sorted LF sources and content version"
     "npm run rules:sync 필요",
   );
 });
+
+test("AT-ESN-05: the rules and README describe the contract 7 reservation", async () => {
+  const common = RULES["00-common.md"];
+  const workflow = RULES["40-paseo-role-workflow.md"];
+  const readme = await readFile(new URL("../../../README.md", import.meta.url), "utf8");
+  assert.match(common, /계약7.*미리 예약.*다시 고르지 않.*40-paseo-role-workflow 5절/);
+  assert.match(workflow, /계약6 첫 plan.*계약7.*미리 예약.*다시 고르지 않.*5절/);
+  assert.match(workflow, /`executionStart`.*`executorSelected=true`.*`reserved=true`.*구현 담당 선택을 다시 요구하지 않는다/);
+  assert.match(readme, /연합개발의 구현 제품·모델·추론[^\n]*\n[^\n]*예약[^\n]*자동으로 시작/);
+});

@@ -9,6 +9,7 @@ export { contextRatio } from "../shared/compression";
 export const FEDERATED_ONLY =
   "[연합개발 전용] 이 블록은 연합개발로 진행할 때만 적용한다. 일반개발에서는 따르지 않는다.";
 const AUTOMATION_OPEN = "<paseo-automation-v1>";
+const LEGACY_FIRST_PLAN_GUIDE = "첫 plan은 사용자가 그 계획을 보고 구현 담당을 고른 뒤 전달된다.";
 export const AUTOMATION_INSTRUCTIONS = `
 ${AUTOMATION_OPEN}
 이 대화는 사용자가 승인한 Paseo 자동 작업 흐름에 속한다. 실제 대화 생성과 전달은 호스트 플러그인이 수행한다. 너는 다른 에이전트를 직접 실행하거나 메시지를 보내지 않는다.
@@ -23,7 +24,7 @@ checks에는 명령, 실제 종료 코드, 검증한 변경본(커밋 또는 변
 <paseo-workflow>{"status":"plan|result|continue|complete|input|note","summary":"현재 결과 요약","next":"다음 담당자가 그대로 실행할 구체적인 지시","handoff":"독립적으로 이해 가능한 인계 기록","checks":["검증 명령: 실제 결과"],"remember":["압축 뒤에도 반드시 지킬 사항"]}</paseo-workflow>
 remember에는 사용자의 결정, 제약, 금지 사항, 완료 조건처럼 압축 뒤에도 반드시 지켜야 할 사항이 새로 생겼을 때만 한 줄씩 적는다. 이미 적은 것은 반복하지 않는다. 없으면 생략한다.
 status 규칙:
-- 계획 담당이 실행 가능한 계획을 확정했을 때 plan. 본문에 사용자에게 묻는 결정 질문이 있으면 plan이 아니라 input. 첫 plan은 사용자가 그 계획을 보고 구현 담당을 고른 뒤 전달된다. 검토에서 보완이 필요할 때도 구체적인 수정 계획과 함께 plan.
+- 계획 담당이 실행 가능한 계획을 확정했을 때 plan. 본문에 사용자에게 묻는 결정 질문이 있으면 plan이 아니라 input. ${LEGACY_FIRST_PLAN_GUIDE} 검토에서 보완이 필요할 때도 구체적인 수정 계획과 함께 plan.
 - 실행 담당이 배정된 구현과 검증을 마쳤을 때 result. 실패·차단 사항도 명시한다. result는 제품의 최종 완료를 뜻하지 않는다.
 - 같은 역할에서 추가 작업이 필요하고 사용자 답변 없이 진행 가능하면 continue, next에 다음 작업을 쓴다. 계획 담당이 구현을 대신하려고 continue를 쓰지 않는다.
 - 계획 담당 검토에서 최초 완료 조건이 실제 근거로 충족됐거나 단독 작업이 끝났으면 complete. 추가 작업을 억지로 만들지 않는다.
@@ -49,10 +50,13 @@ export function stripManagedBlocks(existing: string): string {
     .replace(/\n*<paseo-automation-v1>[^]*?<\/paseo-automation-v1>\n*/g, "\n\n")
     .trim();
 }
-export function automationBlock(gated = false): string {
-  return gated
-    ? AUTOMATION_INSTRUCTIONS.replace(AUTOMATION_OPEN, `${AUTOMATION_OPEN}\n${FEDERATED_ONLY}`)
+export function automationBlock(gated = false, contract = 0): string {
+  const instructions = contract >= 7
+    ? AUTOMATION_INSTRUCTIONS.replace(LEGACY_FIRST_PLAN_GUIDE, "첫 plan은 호스트가 보관했다가 사용자의 화면 승인이나 미리 한 예약에 따라 전달한다.")
     : AUTOMATION_INSTRUCTIONS;
+  return gated
+    ? instructions.replace(AUTOMATION_OPEN, `${AUTOMATION_OPEN}\n${FEDERATED_ONLY}`)
+    : instructions;
 }
 export function automationPrompt(existing: string, gated = false): string {
   return stripManagedBlocks(existing) + "\n" + automationBlock(gated);

@@ -5,6 +5,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import contribute from "../index.server.ts";
+import { composeCurrentPrompt } from "../server/roles.ts";
 import { settingsSchema } from "../shared/contracts.ts";
 
 async function fixture(t, project) {
@@ -208,6 +209,23 @@ test("startup never reads the catalog or puts a saved executor in the prompt",as
  await f.configure({askMode:true,askExecutorModel:true});const {config}=await f.create();
  assert.match(config.systemPrompt,/<paseo-executor-selection-v5>/);assert.doesNotMatch(config.systemPrompt,/codex\/saved/);
  assert.doesNotMatch(config.systemPrompt,/저장된 설정을 사용하며 다시 묻지 않는다/);
+});
+test("AT-ESN-04: the startup prompt follows the host's executor start state", async t => {
+  const f = await fixture(t);
+  const { config: { systemPrompt } } = await f.create();
+  const selection = systemPrompt.match(/<paseo-executor-selection-v5>([^]*?)<\/paseo-executor-selection-v5>/)[1];
+  const automation = systemPrompt.match(/<paseo-automation-v1>([^]*?)<\/paseo-automation-v1>/)[1];
+  assert.doesNotMatch(selection, /구현 담당을 고르면 전달한다/);
+  assert.match(selection, /플러그인 화면에서 고른다.*미리 예약/);
+  assert.match(selection, /질문 도구로 묻지 않고 모델 목록도 안내하지 않는다/);
+  assert.match(selection, /선택·예약·시작·대기는 호스트가 화면에 표시하고 진행한다/);
+  assert.match(selection, /구현 담당을 고르라고 안내하지 않고 시작 여부를 추측하지 않는다/);
+  assert.match(selection, /호스트 메시지나 인계 기록의 `executionStart`가 알려준 상태만 전한다/);
+  assert.match(selection, /최초 담당의 모델·추론은 바꾸지 않는다/);
+  assert.doesNotMatch(automation, /구현 담당을 고른 뒤 전달된다/);
+  assert.match(automation, /첫 plan은 호스트가 보관했다가 사용자의 화면 승인이나 미리 한 예약에 따라 전달한다/);
+  const legacyPrompt = composeCurrentPrompt("claude", "", "federated", null, "", "", 6);
+  assert.match(legacyPrompt, /첫 plan은 사용자가 그 계획을 보고 구현 담당을 고른 뒤 전달된다\./);
 });
 test("the legacy model-question switch cannot skip screen selection",async t=>{
  const f=await fixture(t);await f.configure({askMode:true,askExecutorModel:false});const {config}=await f.create();

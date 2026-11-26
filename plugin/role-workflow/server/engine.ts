@@ -307,7 +307,12 @@ export type Workflow = z.infer<typeof workflowSchema>;
 
 function describeExecutionStart(w: Workflow) {
   const placement = w.placement;
-  const executorSelected = w.selection?.stage === "ready";
+  const reservation = capabilities(w).planReview && !w.approvedHold && w.implementationReserved && w.selectionDraft?.stage === "ready"
+    ? w.selectionDraft : null;
+  const reserved = reservation !== null;
+  const selection = w.selection?.stage === "ready" ? w.selection : reservation;
+  const executorSelected = selection !== null;
+  const executor = selection?.provider && selection.model ? `${selection.provider}/${selection.model}` : "";
   const blocker = placement?.number ? { number: placement.number, title: placement.title } : null;
   const pending = w.pending?.role === "execute" ? w.pending : null;
   const stage =
@@ -316,11 +321,14 @@ function describeExecutionStart(w: Workflow) {
       : placement?.stage === "choice" ? "choosing"
       : w.execute?.workspaceId && (pending?.stage === "sent" || (w.phase === "execute" && w.status === "active" && !w.pending)) ? "running"
       : !w.execute?.workspaceId && pending?.stage === "queued" ? "starting"
+      : reserved ? "reserved"
       : w.mode === "federated" && w.selection && !executorSelected ? "selecting"
       : "notStarted";
   return {
     stage,
     executorSelected,
+    reserved,
+    executor,
     blocker,
     reason: placement?.reason ?? "",
     userAction: stage === "selecting" ? "Paseo에서 구현 담당을 선택하세요."
@@ -638,6 +646,7 @@ export class WorkflowEngine {
     port: () => this.port, settings: () => this.settings(),
     queue: (w, role, prompt, phase) => this.queue(w, role, prompt, phase),
     touch: (w, detail) => this.touch(w, detail),
+    describeExecutionStart,
     startReserved: w => this.startReservedImplementation(w),
   });
   private readonly archives = new Archives({

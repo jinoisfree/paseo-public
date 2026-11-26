@@ -20,7 +20,17 @@ export interface PlanReviewHost {
   settings(): Promise<Settings>;
   queue(w: Workflow, role: Role, prompt: string, phase: Workflow["phase"]): void;
   touch(w: Workflow, detail: string): void;
+  describeExecutionStart(w: Workflow): { reserved: boolean; executor: string };
   startReserved(w: Workflow): Promise<boolean>;
+}
+
+function recordingStartGuide(approved: boolean, atLimit: boolean, { reserved, executor }: ReturnType<PlanReviewHost["describeExecutionStart"]>): string {
+  if (!approved && atLimit) return "다음 자동 검토 없음. 보완·기록 뒤 사용자 결정으로 올라갑니다.";
+  const recording = approved ? "계획을 유지해 기록 후 note를 반환하면" : "보완한 계획이 검증을 통과하면";
+  const guide = reserved
+    ? `구현 담당은 이미 예약돼 있습니다 (${executor}). ${recording} 예약한 구현 담당으로 자동 시작합니다. 사용자에게 구현 담당 선택이나 시작 승인을 요청하지 마세요.`
+    : `${recording} 사용자가 화면에서 승인해야 구현을 시작합니다.`;
+  return atLimit ? `${guide} 계획이 달라져 새 plan을 내면 자동 검토 없이 사용자 결정으로 올라갑니다.` : guide;
 }
 
 /** First-plan verification; delivery, recovery, and compaction stay in the common engine. */
@@ -157,7 +167,11 @@ export class PlanReviewGate {
       if (!w.reviewSelection.enabled || review.stage === "done") { review.stage = "off"; this.restore(w); return true; }
       if (d.status === "input") return false;
       review.error = ""; review.verdict = d.planReview!; review.stage = "revising";
-      this.host.queue(w, "plan", `계획 검증 결과를 ${review.path}에 기록하세요. 지적별 수용/반박/보류와 이유를 남기세요.\n${JSON.stringify(d.planReview)}\n${d.planReview!.verdict === "APPROVED" ? "계획을 유지하면 기록 후 note, 계획이 달라지면 새 plan을 반환하세요." : "보완 또는 근거 있는 반박 뒤 plan을 반환하세요."}\n${review.round >= review.maxRounds ? "다음 자동 검토 없음. 보완·기록 뒤 사용자 결정으로 올라갑니다." : "구현은 아직 승인되지 않았습니다."}`, "plan");
+      const approved = review.verdict.verdict === "APPROVED";
+      const response = approved ? "계획을 유지하면 기록 후 note, 계획이 달라지면 새 plan을 반환하세요."
+        : "보완 또는 근거 있는 반박 뒤 plan을 반환하세요.";
+      const startGuide = recordingStartGuide(approved, review.round >= review.maxRounds, this.host.describeExecutionStart(w));
+      this.host.queue(w, "plan", `계획 검증 결과를 ${review.path}에 기록하세요. 지적별 수용/반박/보류와 이유를 남기세요.\n${JSON.stringify(review.verdict)}\n${response}\n${startGuide}`, "plan");
       return true;
     }
     if (role === "plan" && !w.reviewSelection.enabled && w.reviewPlan && d.status === "note") { review.stage = "off"; this.restore(w); return true; }

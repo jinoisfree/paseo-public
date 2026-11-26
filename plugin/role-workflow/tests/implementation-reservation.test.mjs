@@ -79,3 +79,54 @@ test('AC-7: contract6 ignores reservation input and retains manual approval',asy
  const f=await fixture(t,{contract:6});await f.say('','plan');await f.engine.selectExecutor(f.id,{...choice,holdId:1,reserve:true});
  assert.equal((await f.live()).implementationReserved,false);assert.equal(f.created.filter(c=>c.role==='execute').length,1);
 });
+
+for (const reserve of [true, false]) {
+  for (const verdict of ['APPROVED', 'BLOCKED']) {
+    for (const atLimit of [false, true]) {
+      test(`AT-ESN-02: ${verdict}, ${reserve ? 'reserved' : 'unreserved'}, ${atLimit ? 'last' : 'earlier'} round`, async t => {
+        const f = await setup(t, { reserve });
+        const w = await f.live();
+        if (atLimit) w.planReview.maxRounds = 1;
+        const approved = verdict === 'APPROVED';
+        const planReview = {
+          planHash: w.heldApproval.decisionHash, verdict,
+          findings: approved ? [] : [{ id: 'F1', severity: '차단', text: '보완', evidence: '설계' }],
+        };
+        await reply(f, 'reviewer', 'result', { planReview });
+        const { prompt } = f.sent.findLast(sent => sent.id === w.plan.id);
+        assert.ok(prompt.includes(`계획 검증 결과를 ${w.planReview.path}에 기록하세요. 지적별 수용/반박/보류와 이유를 남기세요.`));
+        assert.ok(prompt.includes(JSON.stringify(planReview)));
+        assert.ok(prompt.includes(approved
+          ? '계획을 유지하면 기록 후 note, 계획이 달라지면 새 plan을 반환하세요.'
+          : '보완 또는 근거 있는 반박 뒤 plan을 반환하세요.'));
+
+        const blockedLimit = '다음 자동 검토 없음. 보완·기록 뒤 사용자 결정으로 올라갑니다.';
+        if (!approved && atLimit) {
+          assert.ok(prompt.includes(blockedLimit));
+          assert.doesNotMatch(prompt, /이미 예약|자동 시작/);
+        } else {
+          assert.ok(!prompt.includes(blockedLimit));
+          assert.doesNotMatch(prompt, /구현은 아직 승인되지 않았습니다/);
+          if (reserve) {
+            assert.match(prompt, /구현 담당은 이미 예약돼 있습니다/);
+            assert.match(prompt, /codex\/builder/);
+            assert.match(prompt, /사용자에게 구현 담당 선택이나 시작 승인을 요청하지 마세요/);
+            assert.match(prompt, approved ? /note[^\n]*예약한 구현 담당으로 자동 시작/ : /보완한 계획[^\n]*검증을 통과[^\n]*자동 시작/);
+          } else {
+            assert.doesNotMatch(prompt, /이미 예약/);
+            assert.match(prompt, approved && atLimit ? /note[^\n]*사용자가 화면에서 승인해야[^\n]*시작/ : /사용자가 화면에서 승인해야[^\n]*시작/);
+          }
+          if (atLimit) assert.match(prompt, /새 plan[^\n]*자동 검토 없이 사용자 결정으로 올라갑니다/);
+        }
+
+        if (!atLimit) return;
+        if (approved) await reply(f, 'plan', 'note');
+        else await reply(f, 'plan', 'plan', { summary: '보완한 계획' });
+        const started = approved && reserve;
+        assert.equal(f.created.filter(created => created.role === 'execute').length, started ? 1 : 0);
+        if (started) assert.equal(f.sent.filter(sent => sent.id === w.execute.id).length, 1);
+        else assert.equal(w.planReview.stage, approved ? 'passed' : 'limit');
+      });
+    }
+  }
+}
